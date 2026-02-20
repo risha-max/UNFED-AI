@@ -224,6 +224,8 @@ success, or an error with the appropriate HTTP status.
 
 ## Running the Client
 
+**CLI**:
+
 ```bash
 python -m client.client \
   --registry "registry.unfed.ai:50050" \
@@ -233,13 +235,21 @@ python -m client.client \
 
 Add `--tls-ca ca.crt` if the network uses TLS.
 
+**Web interface**: Every registry hosts a web dashboard. Open the registry's
+HTTP address in a browser to chat, inspect the network, and explore the
+share-chain — no separate client install needed.
+
 ## Web Dashboard
 
+The registry operator starts the dashboard with:
+
 ```bash
-python -m web.server --host 0.0.0.0 --port 8080 --registry "registry.unfed.ai:50050"
+python -m web.server --host 0.0.0.0 --port 8080 --registry "localhost:50050"
 ```
 
-Open `http://localhost:8080` — tabs for Chat, Network topology, and Chain explorer.
+Open `http://<registry-ip>:8080` — tabs for Chat, Network topology, and Chain
+explorer. Clients visiting the URL can send inference requests directly from
+the browser, get test tokens via the faucet, and monitor node activity.
 
 ## Known Limitations
 
