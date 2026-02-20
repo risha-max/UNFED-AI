@@ -18,7 +18,7 @@ RPC_URL="http://localhost:${PORT}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CONTRACTS_DIR="${UNFED_CONTRACTS_DIR:-${PROJECT_DIR}/contracts}"
-ENV_FILE="${UNFED_DEPLOYED_ENV:-${CONTRACTS_DIR}/deployed.env}"
+ENV_FILE="${UNFED_DEPLOYED_ENV:-${PROJECT_DIR}/deployed.env}"
 PID_FILE="${UNFED_ANVIL_PID_FILE:-/tmp/anvil.pid}"
 
 export PATH="$HOME/.foundry/bin:$PATH"
