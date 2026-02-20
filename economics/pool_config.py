@@ -67,9 +67,6 @@ class PoolConfig:
     fee_window_blocks: int = 10          # rolling window for utilization calculation
     fee_target_capacity: int = 40        # expected shares/block at 100% utilization
 
-    # --- Guard relay ---
-    guard_fee_ratio: float = 0.05        # guard earns this fraction of compute rate per relay
-
     # --- Shard-level overrides (optional) ---
     # Manual payout boosts for specific shards, e.g. {0: 2.0, 3: 1.5}
     # On top of the automatic scarcity multiplier.
@@ -197,8 +194,6 @@ def print_pool_config(cfg: PoolConfig):
     print(f"  Fee range:       [{cfg.fee_min}, {cfg.fee_max}]")
     print(f"  Fee target util: {cfg.fee_target_utilization * 100:.0f}%")
     print(f"  Fee adjustment:  {cfg.fee_adjustment_factor}")
-    print(f"  Guard fee:       {cfg.guard_fee_ratio * 100:.0f}% of compute rate")
-
     if cfg.shard_multipliers:
         print(div)
         print(f"  Shard overrides:")

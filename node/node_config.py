@@ -5,7 +5,6 @@ Each node role has its own config class with only the fields it needs:
 
   BaseNodeConfig     — shared by all roles (port, host, registry, gRPC, network)
   ├── ComputeConfig  — shard, model, KV cache, P2P serving, verification
-  ├── GuardConfig    — relay-specific settings
   └── VerifierConfig — polling, ZK verification, sampling
 
 Priority: CLI > config file > defaults
@@ -30,12 +29,11 @@ from typing import Optional, Union
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as global_config
 
-VALID_ROLES = ("compute", "guard", "verifier", "daemon", "mpc")
+VALID_ROLES = ("compute", "verifier", "daemon", "mpc")
 
 # Default ports per role
 DEFAULT_PORTS = {
     "compute": 50051,
-    "guard": 50060,
     "verifier": 50070,
     "daemon": 50080,
     "mpc": 50061,
@@ -44,7 +42,6 @@ DEFAULT_PORTS = {
 # Default grpc_max_workers per role
 DEFAULT_WORKERS = {
     "compute": 4,
-    "guard": 10,
     "verifier": 2,
     "daemon": 10,
     "mpc": 4,
@@ -174,22 +171,6 @@ class MPCConfig(ComputeConfig):
 
 
 # ---------------------------------------------------------------------------
-# Guard relay config
-# ---------------------------------------------------------------------------
-
-@dataclass
-class GuardConfig(BaseNodeConfig):
-    """Configuration for a guard relay node — IP anonymization layer."""
-
-    role: str = "guard"
-
-    # --- Relay settings ---
-    max_concurrent_relays: int = 100             # max simultaneous relay sessions
-    relay_timeout_seconds: float = 120.0         # timeout for a single relay hop
-    log_connections: bool = False                 # log client connections (privacy tradeoff)
-
-
-# ---------------------------------------------------------------------------
 # Verifier node config
 # ---------------------------------------------------------------------------
 
@@ -255,13 +236,12 @@ class DaemonConfig(BaseNodeConfig):
 # Type alias for any config
 # ---------------------------------------------------------------------------
 
-NodeConfig = Union[ComputeConfig, MPCConfig, GuardConfig, VerifierConfig, DaemonConfig]
+NodeConfig = Union[ComputeConfig, MPCConfig, VerifierConfig, DaemonConfig]
 
 # Map role name -> config class
 _ROLE_CONFIG_MAP = {
     "compute": ComputeConfig,
     "mpc": MPCConfig,
-    "guard": GuardConfig,
     "verifier": VerifierConfig,
     "daemon": DaemonConfig,
 }
@@ -466,13 +446,6 @@ def print_config_summary(cfg: NodeConfig, config_path: Optional[str]):
         print(f"  Upload rate:     {rate_str}")
         print(f"  Max transfers:   {conc_str}")
         print(f"  Infer priority:  {'yes' if cfg.inference_priority else 'no'}")
-
-    # --- Guard-specific ---
-    if isinstance(cfg, GuardConfig):
-        print(div)
-        print(f"  Max relays:      {cfg.max_concurrent_relays}")
-        print(f"  Relay timeout:   {cfg.relay_timeout_seconds}s")
-        print(f"  Log connections: {'yes' if cfg.log_connections else 'no'}")
 
     # --- Verifier-specific ---
     if isinstance(cfg, VerifierConfig):

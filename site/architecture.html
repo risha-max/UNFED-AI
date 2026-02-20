@@ -50,14 +50,13 @@
       <div class="diagram-wrap">
         <div class="mermaid">
 graph LR
-  Client["Client"] -->|"onion-encrypted"| Guard["Guard Node"]
-  Guard -->|"peel layer 1"| MPC_A["MPC Node A"]
+  Client["Client"] -->|"onion-encrypted"| MPC_A["MPC Node A"]
   MPC_A <-->|"secret shares"| MPC_B["MPC Node B"]
   MPC_A -->|"activations"| Shard1["Shard 1"]
   Shard1 -->|"activations"| ShardN["Shard N"]
   ShardN -->|"tokens"| Client
         </div>
-        <p class="diagram-caption">Text inference: client request flows through guard, MPC pair, and compute shards.</p>
+        <p class="diagram-caption">Text inference: client request flows through MPC pair and compute shards.</p>
       </div>
 
       <div class="info-box">
@@ -187,17 +186,6 @@ sequenceDiagram
           </div>
         </div>
 
-        <div class="step">
-          <div class="step-number">3</div>
-          <div class="step-content">
-            <h3>Guard Node (Optional)</h3>
-            <p>
-              An optional guard node sits between the client and the first compute
-              node. It sees the client's IP but cannot read the encrypted payload.
-              The compute nodes never learn who sent the request.
-            </p>
-          </div>
-        </div>
       </div>
     </div>
   </section>

@@ -67,7 +67,6 @@ class RacingCoordinator:
         self.replicas = replicas or config.RACING_REPLICAS
         self.timeout = timeout or config.SHARD_TIMEOUT_SECONDS
         self._stubs: dict[str, inference_pb2_grpc.InferenceNodeStub] = {}
-        self._guard_stubs: dict[str, inference_pb2_grpc.GuardRelayStub] = {}
         self._executor = ThreadPoolExecutor(max_workers=self.replicas * 4)
         self._mismatches: list[dict] = []  # log of detected mismatches
 
@@ -78,69 +77,28 @@ class RacingCoordinator:
             self._stubs[address] = inference_pb2_grpc.InferenceNodeStub(channel)
         return self._stubs[address]
 
-    def _get_guard_stub(self, address: str) -> inference_pb2_grpc.GuardRelayStub:
-        """Get or create a gRPC stub for a guard relay."""
-        if address not in self._guard_stubs:
-            channel = create_resilient_channel(address, config.GRPC_OPTIONS)
-            self._guard_stubs[address] = inference_pb2_grpc.GuardRelayStub(channel)
-        return self._guard_stubs[address]
-
     def _forward_to_node(self, address: str, request: inference_pb2.ForwardRequest,
-                         guard_address: str = None) -> inference_pb2.ForwardResponse:
-        """
-        Send a ForwardRequest to a node, optionally through a guard relay.
-
-        Returns the ForwardResponse from the node.
-        """
-        if guard_address:
-            # Route through guard relay
-            guard_stub = self._get_guard_stub(guard_address)
-            relay_req = inference_pb2.RelayRequest(
-                encrypted_payload=request.SerializeToString(),
-                target_address=address,
-            )
-            relay_resp = guard_stub.Relay(relay_req)
-            if relay_resp.encrypted_payload:
-                resp = inference_pb2.ForwardResponse()
-                resp.ParseFromString(relay_resp.encrypted_payload)
-                return resp
-            return inference_pb2.ForwardResponse()
-        else:
-            # Direct connection
-            stub = self._get_stub(address)
-            return stub.Forward(request)
+                         ) -> inference_pb2.ForwardResponse:
+        """Send a ForwardRequest to a node. Returns the ForwardResponse."""
+        stub = self._get_stub(address)
+        return stub.Forward(request)
 
     def race_shard(self, shard_index: int, node_addresses: list[str],
                    request: inference_pb2.ForwardRequest,
                    guard_address: str = None) -> RaceResult:
-        """
-        Race multiple replicas for a single shard hop.
+        """Race multiple replicas for a single shard hop.
 
         Sends the same ForwardRequest to all nodes in parallel.
         Returns the first successful response. When slower responses
         arrive, compares their output hash for verification.
-
-        Args:
-            shard_index: Which shard we're racing
-            node_addresses: List of node addresses to race
-            request: The ForwardRequest to send to each replica
-            guard_address: Optional guard relay address
-
-        Returns:
-            RaceResult with the winning response
-
-        Raises:
-            TimeoutError: If all replicas time out
-            RuntimeError: If all replicas fail
         """
         import time
         start = time.time()
 
-        # Submit forward calls to all replicas in parallel
         future_to_addr: dict[Future, str] = {}
         for addr in node_addresses[:self.replicas]:
             future = self._executor.submit(
-                self._forward_to_node, addr, request, guard_address
+                self._forward_to_node, addr, request
             )
             future_to_addr[future] = addr
 

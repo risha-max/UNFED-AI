@@ -41,7 +41,6 @@ _OVERRIDABLE_FIELDS = (
     "fee_target_utilization",
     "fee_window_blocks",
     "fee_target_capacity",
-    "guard_fee_ratio",
     "pplns_window",
     "pps_rate",
     "max_payout_multiplier",
@@ -82,8 +81,6 @@ class ClusterConfig:
     default_fee_target_utilization: float = 0.7
     default_fee_window_blocks: int = 10
     default_fee_target_capacity: int = 40
-
-    default_guard_fee_ratio: float = 0.05
 
     # --- On-chain escrow (recommended — empty = in-memory simulation) ---
     # These fields are required for production deployment.  When both

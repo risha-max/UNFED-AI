@@ -253,7 +253,7 @@ the browser, get test tokens via the faucet, and monitor node activity.
 
 ## Known Limitations
 
-- **No persistent identity**: node IDs are generated per session (no wallet integration yet)
+- **Partial persistent identity**: compute nodes use their Ethereum address as ID (`--eth-address`, required when escrow is active), but daemon nodes still generate a random ID per session
 - **Testnet economics**: on-chain escrow works but uses test tokens — no real value at stake
 - **Single model**: the testnet runs one model (Qwen2.5-0.5B); multi-model pools are implemented but untested at scale
 - **No NAT traversal**: nodes behind NAT must configure port forwarding manually

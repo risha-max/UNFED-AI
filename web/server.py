@@ -179,15 +179,9 @@ async def get_circuit(model_id: str = ""):
             vision_circuit = [{"address": a, "shard_index": i}
                               for i, a in enumerate(addrs)]
 
-        # Guard nodes
-        guards = discovery.discover_guards()
-        guard_list = [{"node_id": g.node_id, "address": g.address}
-                      for g in guards]
-
         return {
             "text_circuit": text_circuit,
             "vision_circuit": vision_circuit,
-            "guards": guard_list,
             "mpc_enabled": len(mpc_nodes) > 0,
             "mpc_entries": len(mpc_nodes),
         }
@@ -611,7 +605,6 @@ async def ws_chat(websocket: WebSocket):
             "image_path": "..." (optional),
             "model_type": "qwen2" | "qwen2_vl",
             "max_tokens": 100,
-            "use_guard": false,
             "use_voting": false,
             "model_id": "" (optional),
             "cluster_endpoint": "" (optional — override registry)
@@ -619,7 +612,7 @@ async def ws_chat(websocket: WebSocket):
 
     Server sends:
         {type: "status", message: "..."}
-        {type: "circuit", guard: "...", nodes: [...], vision_nodes: [...]}
+        {type: "circuit", nodes: [...], vision_nodes: [...]}
         {type: "hop", shard_index: int, address: "...", phase: "vision"|"text"}
         {type: "token", text: "...", token_id: int, step_time: float, step: int}
         {type: "done", total_tokens: int, total_time: float, tokens_per_sec: float}
@@ -644,14 +637,13 @@ async def ws_chat(websocket: WebSocket):
             image_path = data.get("image_path")
             model_type = data.get("model_type", "qwen2")
             max_tokens = data.get("max_tokens", 100)
-            use_guard = data.get("use_guard", False)
             use_voting = data.get("use_voting", False)
             model_id = data.get("model_id", "")
             cluster_endpoint = data.get("cluster_endpoint", "")
 
             await _run_generation(
                 websocket, prompt, image_path, model_type,
-                max_tokens, use_guard, use_voting, model_id,
+                max_tokens, use_voting, model_id,
                 cluster_endpoint=cluster_endpoint,
                 client_address=client_address,
             )
@@ -671,7 +663,6 @@ async def _run_generation(
     image_path: Optional[str],
     model_type: str,
     max_tokens: int,
-    use_guard: bool,
     use_voting: bool,
     model_id: str,
     cluster_endpoint: str = "",
@@ -738,7 +729,6 @@ async def _run_generation(
         # Create client (use cluster-specific endpoint if selected)
         client = UnfedClient(
             registry_address=registry_addr,
-            use_guard=use_guard,
             use_voting=use_voting,
             model_id=model_id,
         )
@@ -748,7 +738,6 @@ async def _run_generation(
 
         text_circuit = discovery.build_circuit(model_id)
         vision_circuit = None
-        guard_addr = None
 
         if model_type in ("qwen2_vl", "smolvlm"):
             vision_circuit = discovery.build_vision_circuit(model_id)
@@ -804,21 +793,9 @@ async def _run_generation(
                 "message": "SmolVLM text-only mode (no image attached)"
             })
 
-        if use_guard:
-            guards = discovery.discover_guards()
-            if guards:
-                guard_addr = guards[0].address
-            else:
-                await websocket.send_json({
-                    "type": "status",
-                    "message": "No guard nodes available — using direct connection"
-                })
-                use_guard = False  # Fall back to direct mode
-
         # Send circuit info to frontend
         circuit_msg = {
             "type": "circuit",
-            "guard": guard_addr,
             "text_nodes": [],
             "vision_nodes": [],
         }

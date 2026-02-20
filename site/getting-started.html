@@ -54,7 +54,7 @@
         <div class="card">
           <div class="card-icon">&#128293;</div>
           <h3>PyTorch 2.0+</h3>
-          <p>With CUDA support for GPU nodes. CPU works for registry, daemon, and guard nodes.</p>
+          <p>With CUDA support for GPU nodes. CPU works for registry and daemon nodes.</p>
         </div>
 
         <div class="card">
@@ -233,14 +233,6 @@ python -m network.mpc_shard0 \
   --registry localhost:50050 \
   --shards-dir shards_smolvlm \
   --eth-address 0xMPCAddress</code></pre>
-        </div>
-
-        <div class="card">
-          <h3>Guard Node</h3>
-          <p>Hide client IPs from compute nodes.</p>
-          <pre><code>python -m network.guard_node \
-  --port 50060 \
-  --registry localhost:50050</code></pre>
         </div>
 
         <div class="card">

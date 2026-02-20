@@ -93,7 +93,6 @@ class VotingCoordinator:
         candidates = [
             n for n in nodes
             if n.shard_index == shard_index
-            and n.node_type != "guard"
             and (exclude_address is None or n.address != exclude_address)
         ]
         return candidates

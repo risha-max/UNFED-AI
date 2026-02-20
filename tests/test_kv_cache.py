@@ -438,7 +438,6 @@ def run_client_query(prompt: str, label: str = "Q",
             run_client_query._client = UnfedClient(
                 registry_address=f"localhost:{REGISTRY_PORT}",
                 use_racing=False,
-                use_guard=False,
             )
 
         client = run_client_query._client

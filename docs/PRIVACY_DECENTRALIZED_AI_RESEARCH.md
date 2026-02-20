@@ -78,7 +78,7 @@ A research synthesis on technology approaches, UNFED AI differentiators, success
 ### UNFED AI’s Stack (from project docs/code)
 
 - **Layer splitting:** LLM layers split across nodes; **no single node sees the full prompt** ([architecture](site/architecture.html)).
-- **Tor-style anonymous routing:** X25519 + AES-256-GCM onion encryption; each node peels one layer and sees only the next hop; optional **guard** sees client IP but not payload; compute nodes do not learn client identity ([architecture](site/architecture.html), [TODO](TODO.md)).
+- **Onion routing:** X25519 + AES-256-GCM onion encryption; each node peels one layer and sees only the next hop; compute nodes do not learn client identity ([architecture](site/architecture.html)).
 - **MPC for embedding (Shard 0):** Token IDs secret-shared between two nodes; neither can reconstruct tokens; only activations leave the MPC pair ([architecture](site/architecture.html)).
 - **Spot-check verification:** Random tickets (e.g. 5%) with shard index, input activations, output activation hash; **no user identity or prompt** in tickets; verifier cannot link to who asked what ([protocol](site/protocol.html)).
 - **Share-chain economics:** P2Pool-style side-chain recording compute shares (~10 s blocks); proportional payouts from escrow; on-chain staking and slashing ([protocol](site/protocol.html), [economics](site/economics.html)).
@@ -88,7 +88,7 @@ A research synthesis on technology approaches, UNFED AI differentiators, success
 | Dimension | UNFED AI | Bittensor | Gensyn | Phala | Cascade / Fission / Petals |
 |-----------|----------|-----------|--------|-------|----------------------------|
 | **Privacy model** | No single node sees prompt; MPC on embedding; onion routing | Validators/miners may see prompts; focus on incentive alignment | Training; proofs of learning | TEE: operator cannot read memory | Cascade: token sharding; Fission: MPC+shuffling; Petals: layer split, no crypto privacy |
-| **Identity vs query** | Unlinkable (guard + onion: no node has both) | Not designed for anonymity | N/A (training) | TEE hides from operator; identity can be known to gateway | Varies |
+| **Identity vs query** | Unlinkable (onion routing: no node has both) | Not designed for anonymity | N/A (training) | TEE hides from operator; identity can be known to gateway | Varies |
 | **Verification** | Spot-check re-execution + fraud proofs | Validator scoring (Yuma consensus) | Probabilistic proofs of learning | TEE attestation | Varies |
 | **Economics** | Share-chain + escrow + UNFED token; per-token pricing | TAO; proof-of-intelligence; subnets | Gensyn token; training rewards | Phala token; pay-per-request / dedicated GPU | N/A or project-specific |
 | **Primary use** | Private, censorship-resistant inference | Decentralized model marketplace / subnets | Decentralized training | Confidential inference (centralized or decentralized) | Research / P2P serving |
@@ -96,7 +96,7 @@ A research synthesis on technology approaches, UNFED AI differentiators, success
 **Differentiators for UNFED:**
 
 1. **Prompt never in one place:** Layer sharding + MPC on the embedding layer means the raw prompt exists only as secret shares at the first hop; downstream shards see only activations. Few competitors combine layer splitting with **cryptographic** protection of the embedding step.
-2. **Identity–query separation:** Onion routing + guard ensures no node learns both “who” and “what”; TEE-based (e.g. Phala) hides data from the operator but the gateway can still link identity and query.
+2. **Identity–query separation:** Onion routing ensures no node learns both “who” and “what”; TEE-based (e.g. Phala) hides data from the operator but the gateway can still link identity and query.
 3. **Lightweight verification:** Spot-checks (e.g. 5%) keep cost low while retaining fraud detection; no per-request ZK (unlike some zkML stacks).
 4. **Familiar economics:** Per-token pricing and share-chain feel similar to existing API and mining-pool mental models; integrates with on-chain escrow and staking.
 
@@ -160,7 +160,7 @@ So: **privacy/confidentiality**, **latency/cost**, and **ease of use** all matte
 
 - **Confidential computing:** Azure, AMD, Intel are making TEE-based confidential AI a standard option ([Azure](https://techcommunity.microsoft.com/blog/azureconfidentialcomputingblog/azure-ai-confidential-inferencing-technical-deep-dive/4253150); [AMD](https://www.amd.com/en/products/processors/server/epyc/confidential-computing.html)).
 - **Enterprise trust:** Many enterprises will prefer “private AI” from incumbent clouds (familiar contracts, compliance, SLAs) over a decentralized token-based network.
-- **Differentiation:** UNFED’s edge is **no single party** (including cloud) seeing prompts, **anonymity** (onion + guard), and **censorship resistance**, not only “encrypted in use” in one provider’s TEE.
+- **Differentiation:** UNFED’s edge is **no single party** (including cloud) seeing prompts, **anonymity** (onion routing), and **censorship resistance**, not only “encrypted in use” in one provider’s TEE.
 
 ### 4.4 Network Bootstrapping (Chicken-and-Egg)
 

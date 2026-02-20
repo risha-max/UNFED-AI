@@ -2,14 +2,12 @@
 Integration Test — Privacy Features
 
 Tests the full pipeline with:
-  1. Guard relay — client connects through a guard, guard cannot read payload
-  2. MPC for shard 0 — secret-shared embedding + layer 0 computation
-  3. Return-path encryption — layered response encryption
-  4. Redundant voting — commit-then-reveal correctness verification
+  1. MPC for shard 0 — secret-shared embedding + layer 0 computation
+  2. Return-path encryption — layered response encryption
+  3. Redundant voting — commit-then-reveal correctness verification
 
 Test architecture:
   - Registry on port 50050
-  - Guard relay on port 50060
   - 4 compute nodes on ports 50051-50054 (one per shard)
   - Duplicate nodes for voting on ports 50055-50058
   - (Optional) 2 MPC nodes on ports 50070-50071
@@ -177,33 +175,10 @@ def test_voting_coordinator():
     voter.close()
 
 
-def test_guard_node_proto():
-    """Test that guard relay proto messages serialize correctly."""
-    print("\n=== Test: Guard Node Proto ===")
+def test_commit_proto():
+    """Test that commit proto messages serialize correctly."""
+    print("\n=== Test: Commit Proto ===")
     import inference_pb2
-
-    # Create a RelayRequest
-    relay_req = inference_pb2.RelayRequest(
-        encrypted_payload=b"encrypted-test-payload",
-        target_address="localhost:50051",
-        guard_ephemeral_key=b"\x00" * 32,
-    )
-    serialized = relay_req.SerializeToString()
-    assert len(serialized) > 0, "Serialization failed"
-
-    # Deserialize
-    parsed = inference_pb2.RelayRequest()
-    parsed.ParseFromString(serialized)
-    assert parsed.encrypted_payload == b"encrypted-test-payload"
-    assert parsed.target_address == "localhost:50051"
-    print("  PASS: RelayRequest serializes and deserializes correctly")
-
-    # Create a RelayResponse
-    relay_resp = inference_pb2.RelayResponse(
-        encrypted_payload=b"encrypted-response",
-    )
-    assert relay_resp.encrypted_payload == b"encrypted-response"
-    print("  PASS: RelayResponse works correctly")
 
     # Test CommitRequest/Response
     commit_req = inference_pb2.CommitRequest(
@@ -261,13 +236,13 @@ def test_node_type_in_registry():
 
     # Test RegisterRequest with node_type
     req = registry_pb2.RegisterRequest(
-        node_id="test-guard",
+        node_id="test-vision",
         address="localhost:50060",
         model_id="",
         shard_index=-1,
-        node_type="guard",
+        node_type="vision",
     )
-    assert req.node_type == "guard"
+    assert req.node_type == "vision"
     print("  PASS: RegisterRequest supports node_type field")
 
     # Test NodeInfo with node_type
@@ -298,7 +273,7 @@ def main():
         ("MPC Protocols", test_mpc_protocols),
         ("Return-Path Encryption", test_return_path_encryption),
         ("Voting Coordinator", test_voting_coordinator),
-        ("Guard Node Proto", test_guard_node_proto),
+        ("Commit Proto", test_commit_proto),
         ("ForwardRequest Response Keys", test_forward_request_response_keys),
         ("Node Type in Registry", test_node_type_in_registry),
     ]

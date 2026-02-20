@@ -96,16 +96,11 @@ class RegistryClient:
             print(f"[Discovery] Failed to get pool health: {e.details()}")
             return None
 
-    def discover_guards(self) -> list:
-        """Discover available guard relay nodes."""
-        all_nodes = self.discover("")
-        return [n for n in all_nodes if n.node_type == "guard"]
-
     def discover_compute(self, model_id: str = "") -> list:
-        """Discover only compute nodes (excludes guards, vision, and MPC nodes)."""
+        """Discover only compute nodes (excludes vision and MPC nodes)."""
         all_nodes = self.discover(model_id)
         return [n for n in all_nodes
-                if n.node_type not in ("guard", "vision", "mpc")]
+                if n.node_type not in ("vision", "mpc")]
 
     def discover_mpc(self, model_id: str = "") -> list:
         """Discover MPC entry nodes (role A) for shard 0."""
@@ -393,20 +388,15 @@ class RegistryPool:
         return result if result else []
 
     def discover_compute(self, model_id: str = "") -> list:
-        """Discover only compute nodes (excludes guards, vision, MPC)."""
+        """Discover only compute nodes (excludes vision and MPC)."""
         nodes = self.discover(model_id)
         return [n for n in nodes
-                if n.node_type not in ("guard", "vision", "mpc")]
+                if n.node_type not in ("vision", "mpc")]
 
     def discover_mpc(self, model_id: str = "") -> list:
         """Discover MPC entry nodes."""
         nodes = self.discover(model_id)
         return [n for n in nodes if n.node_type == "mpc"]
-
-    def discover_guards(self) -> list:
-        """Discover guard relay nodes."""
-        nodes = self.discover("")
-        return [n for n in nodes if n.node_type == "guard"]
 
     def discover_vision(self, model_id: str = "") -> list:
         """Discover vision nodes."""

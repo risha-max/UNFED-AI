@@ -58,24 +58,24 @@ def test_race_shard_takes_first():
     fast_response = _make_activation_response(b"fast_activation")
     slow_response = _make_activation_response(b"fast_activation")  # same data
 
-    def fast_forward(addr, request, guard=None):
+    def fast_forward(addr, request):
         time.sleep(0.05)
         return fast_response
 
-    def slow_forward(addr, request, guard=None):
+    def slow_forward(addr, request):
         time.sleep(0.5)
         return slow_response
 
     call_count = {"fast": 0, "slow": 0}
     original_forward = coordinator._forward_to_node
 
-    def mock_forward(address, request, guard_address=None):
+    def mock_forward(address, request):
         if address == "fast-node:50051":
             call_count["fast"] += 1
-            return fast_forward(address, request, guard_address)
+            return fast_forward(address, request)
         else:
             call_count["slow"] += 1
-            return slow_forward(address, request, guard_address)
+            return slow_forward(address, request)
 
     coordinator._forward_to_node = mock_forward
 
@@ -112,7 +112,7 @@ def test_race_shard_fault_tolerance():
 
     good_response = _make_token_response(token_id=99)
 
-    def mock_forward(address, request, guard_address=None):
+    def mock_forward(address, request):
         if address == "failing-node:50051":
             raise Exception("Node crashed!")
         else:
@@ -147,7 +147,7 @@ def test_all_racers_fail():
 
     coordinator = RacingCoordinator(replicas=2, timeout=5)
 
-    def mock_forward(address, request, guard_address=None):
+    def mock_forward(address, request):
         raise Exception(f"Node {address} crashed!")
 
     coordinator._forward_to_node = mock_forward
@@ -180,7 +180,7 @@ def test_background_verification_match():
 
     call_order = []
 
-    def mock_forward(address, request, guard_address=None):
+    def mock_forward(address, request):
         call_order.append(address)
         if "fast" in address:
             time.sleep(0.05)
@@ -217,7 +217,7 @@ def test_background_verification_mismatch():
 
     coordinator = RacingCoordinator(replicas=2, timeout=10)
 
-    def mock_forward(address, request, guard_address=None):
+    def mock_forward(address, request):
         if "honest" in address:
             time.sleep(0.05)
             return _make_activation_response(b"correct_output")

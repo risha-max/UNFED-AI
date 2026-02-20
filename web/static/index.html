@@ -102,14 +102,6 @@
 
                 <div class="setting-group">
                     <label class="toggle-label">
-                        <input type="checkbox" id="useGuard">
-                        <span>Guard relay</span>
-                    </label>
-                    <p class="setting-hint">Hide your IP from compute nodes</p>
-                </div>
-
-                <div class="setting-group">
-                    <label class="toggle-label">
                         <input type="checkbox" id="useVoting">
                         <span>Voting verification</span>
                     </label>
@@ -286,11 +278,6 @@
                             <span class="fee-role-weight">1.0x share</span>
                         </div>
                         <div class="fee-role">
-                            <span class="fee-role-icon">&#128737;</span>
-                            <span class="fee-role-label">Guard relay</span>
-                            <span class="fee-role-weight">0.05x share</span>
-                        </div>
-                        <div class="fee-role">
                             <span class="fee-role-icon">&#9878;</span>
                             <span class="fee-role-label">Daemon</span>
                             <span class="fee-role-weight">unpaid infra</span>
@@ -302,8 +289,7 @@
                     <h3>Node Contributions</h3>
                     <p class="chain-card-hint">
                         How much work each node has done (weighted). Compute/MPC shares
-                        count as 1.0, guard relay shares count as 0.05.
-                        MPC pairs each get credit for shared computation.
+                        count as 1.0. MPC pairs each get credit for shared computation.
                     </p>
                     <div class="contributions-chart" id="contributionsChart">
                         <p class="chart-empty">No contributions yet &mdash; send a query to generate compute shares.</p>

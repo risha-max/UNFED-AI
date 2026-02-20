@@ -173,7 +173,7 @@ class PaymentContract:
 
     Uses the FeeOracle's base_fee for dynamic pricing instead of a
     fixed price_per_share. Settlements pay out based on weighted shares
-    (compute=1.0, guard=GUARD_FEE_RATIO) * base_fee.
+    (compute=1.0) * base_fee.
     """
 
     def __init__(self, stake_manager: StakeManager,

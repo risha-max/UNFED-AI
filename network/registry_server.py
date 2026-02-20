@@ -60,7 +60,7 @@ class NodeRecord:
         self.has_embedding = has_embedding
         self.has_lm_head = has_lm_head
         self.public_key = public_key
-        self.node_type = node_type  # "compute" or "guard"
+        self.node_type = node_type
         self.last_heartbeat = time.time()
         self.registered_at = time.time()
 
@@ -470,7 +470,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         """Core assignment engine.
 
         Returns an assignment dict or None.
-        Priority: orphaned shards > uncovered > under-replicated > guard.
+        Priority: orphaned shards > uncovered > under-replicated.
         GPU nodes prefer vision shards; CPU nodes prefer text.
         """
         has_gpu = capacity.has_gpu if capacity else False
@@ -522,23 +522,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             scored.append((score, c, has_file, peers))
 
         if not scored:
-            # All shards well-covered — assign as guard
-            model_id = candidates[0]["model_id"] if candidates else ""
-            return {
-                "role": "guard",
-                "model_id": model_id,
-                "shard_index": 0,
-                "stack": "",
-                "layer_start": 0,
-                "layer_end": 0,
-                "has_embedding": False,
-                "has_lm_head": False,
-                "estimated_ram_gb": 0.0,
-                "shard_file": "",
-                "mpc_role": "",
-                "mpc_peer_address": "",
-                "download_peers": [],
-            }
+            return None
 
         # Pick highest-scoring shard
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -663,7 +647,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         """
         challenge_bytes = int(expected_ram_gb * 0.8 * 1e9)
         if challenge_bytes <= 0:
-            return  # guard or no meaningful size to verify
+            return  # no meaningful size to verify
         device = "cuda" if has_gpu else "cpu"
 
         try:

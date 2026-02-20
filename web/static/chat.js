@@ -107,7 +107,6 @@ const Chat = {
         // Gather settings
         const modelType = document.getElementById('modelSelect').value;
         const maxTokens = parseInt(document.getElementById('maxTokens').value) || 100;
-        const useGuard = document.getElementById('useGuard').checked;
         const useVoting = document.getElementById('useVoting').checked;
 
         // Upload image if present
@@ -136,7 +135,6 @@ const Chat = {
             prompt,
             model_type: modelType,
             max_tokens: maxTokens,
-            use_guard: useGuard,
             use_voting: useVoting,
         };
         if (imagePath) payload.image_path = imagePath;

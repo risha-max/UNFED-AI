@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Node Types — UNFED AI</title>
-  <meta name="description" content="All UNFED AI node types: Registry, Daemon, Compute, Vision, MPC, Guard, and Verifier. Roles, requirements, CLI commands, and earnings.">
+  <meta name="description" content="All UNFED AI node types: Registry, Daemon, Compute, Vision, MPC, and Verifier. Roles, requirements, CLI commands, and earnings.">
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="img/logo.svg" type="image/svg+xml">
 </head>
@@ -33,7 +33,7 @@
   <section class="page-header">
     <div class="container">
       <h1>Node <span class="accent">Types</span></h1>
-      <p>Seven distinct node roles make up the UNFED AI network. Each serves a specific purpose in the decentralized inference pipeline.</p>
+      <p>Six distinct node roles make up the UNFED AI network. Each serves a specific purpose in the decentralized inference pipeline.</p>
     </div>
   </section>
 
@@ -192,29 +192,6 @@
   --eth-address 0xYourAddress</code></pre>
       </div>
 
-      <!-- Guard Node -->
-      <div class="node-card" id="guard">
-        <h3>
-          &#128737; Guard Node
-          <span class="tag">Lightweight</span>
-        </h3>
-        <p>
-          An IP-hiding relay between the client and the compute pipeline. The guard
-          sees the client's IP but cannot read the onion-encrypted payload. Compute
-          nodes never learn who sent the request.
-        </p>
-        <div class="meta">
-          <div class="meta-item"><strong>GPU:</strong> Not required</div>
-          <div class="meta-item"><strong>Weights:</strong> Not required</div>
-          <div class="meta-item"><strong>Stake:</strong> Not required</div>
-          <div class="meta-item"><strong>Earns:</strong> guard_fee_ratio (default 5%) of compute rate per relay</div>
-        </div>
-        <span class="code-label">Start command</span>
-        <pre><code>python -m network.guard_node \
-  --port 50060 \
-  --registry localhost:50050</code></pre>
-      </div>
-
       <!-- Verifier Node -->
       <div class="node-card" id="verifier">
         <h3>
@@ -305,13 +282,6 @@
               <td>Shard 0</td>
               <td>A only</td>
               <td><code>network.mpc_shard0</code></td>
-            </tr>
-            <tr>
-              <td><strong>Guard</strong></td>
-              <td>No</td>
-              <td>No</td>
-              <td>No</td>
-              <td><code>network.guard_node</code></td>
             </tr>
             <tr>
               <td><strong>Verifier</strong></td>

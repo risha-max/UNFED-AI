@@ -2,7 +2,6 @@
 UNFED AI Client — discovers nodes, builds circuits, and runs distributed inference.
 
 Privacy features:
-  - Guard relay: client connects through a guard node that hides client IP
   - Onion routing: layered encryption so no node sees the full circuit
   - Return-path encryption: response is encrypted so no node reads the answer
   - Redundant voting: double-check one random shard per query for correctness
@@ -16,7 +15,7 @@ Usage:
     python -m client.client --prompt "The capital of France is"
     python -m client.client --prompt "Once upon a time" --max-tokens 200
     python -m client.client  # interactive mode
-    python -m client.client --use-guard --use-voting --prompt "Hello"
+    python -m client.client --use-voting --prompt "Hello"
     python -m client.client --model-type qwen2_vl --image photo.jpg --prompt "What is this?"
 """
 
@@ -47,14 +46,10 @@ from network.onion import (
 from network.voting import VotingCoordinator
 from network.racing import RacingCoordinator
 
-# Guard selection persistence path (like Tor's entry guard persistence)
-GUARD_CACHE_PATH = os.path.expanduser("~/.unfed/guard.json")
-
-
 class UnfedClient:
     """Client for the UNFED AI distributed inference pipeline."""
 
-    def __init__(self, registry_address: str = None, use_guard: bool = False,
+    def __init__(self, registry_address: str = None,
                  use_voting: bool = False, use_return_encryption: bool = False,
                  use_racing: bool = False, model_id: str = None,
                  tls_ca: str = None):
@@ -73,18 +68,11 @@ class UnfedClient:
 
         self._stubs: dict[str, inference_pb2_grpc.InferenceNodeStub] = {}
         self._channels: dict[str, grpc.Channel] = {}
-        self._guard_stubs: dict[str, inference_pb2_grpc.GuardRelayStub] = {}
 
         # Privacy features
-        self.use_guard = use_guard
         self.use_voting = use_voting
         self.use_return_encryption = use_return_encryption
         self.use_racing = use_racing
-
-        # Guard relay
-        self._guard_address = None
-        if use_guard:
-            self._guard_address = self._select_guard()
 
         # Voting coordinator
         self._voter = VotingCoordinator() if use_voting else None
@@ -120,40 +108,6 @@ class UnfedClient:
 
         return self._prev_session_id, prefix_len
 
-    def _select_guard(self) -> str | None:
-        """
-        Select a guard relay node.
-
-        Strategy (like Tor): persist the guard across sessions for stability.
-        Only change guards if the current one is unreachable.
-        """
-        # Try to load persisted guard
-        if os.path.exists(GUARD_CACHE_PATH):
-            try:
-                with open(GUARD_CACHE_PATH, "r") as f:
-                    cached = json.load(f)
-                guard_address = cached.get("address")
-                if guard_address:
-                    print(f"[Guard] Using persisted guard: {guard_address}")
-                    return guard_address
-            except (json.JSONDecodeError, IOError):
-                pass
-
-        # Discover guards from registry
-        guards = self.discovery.discover_guards()
-        if not guards:
-            print("[Guard] No guard nodes available — connecting directly")
-            return None
-
-        # Pick a random guard and persist it
-        guard = random.choice(guards)
-        guard_address = guard.address
-        os.makedirs(os.path.dirname(GUARD_CACHE_PATH), exist_ok=True)
-        with open(GUARD_CACHE_PATH, "w") as f:
-            json.dump({"address": guard_address, "node_id": guard.node_id}, f)
-        print(f"[Guard] Selected and persisted guard: {guard_address}")
-        return guard_address
-
     def _get_stub(self, address: str) -> inference_pb2_grpc.InferenceNodeStub:
         """Get or create a gRPC stub for the given address (resilient channel)."""
         if address not in self._stubs:
@@ -176,31 +130,6 @@ class UnfedClient:
                 pass
         with ThreadPoolExecutor(max_workers=len(addresses)) as pool:
             list(pool.map(_warmup_one, addresses))
-
-    def _get_guard_stub(self, address: str) -> inference_pb2_grpc.GuardRelayStub:
-        """Get or create a gRPC stub for a guard relay."""
-        if address not in self._guard_stubs:
-            channel = create_resilient_channel(address, config.GRPC_OPTIONS)
-            self._guard_stubs[address] = inference_pb2_grpc.GuardRelayStub(channel)
-        return self._guard_stubs[address]
-
-    def _send_via_guard(self, guard_address: str, target_address: str,
-                        request: inference_pb2.ForwardRequest
-                        ) -> inference_pb2.ForwardResponse:
-        """Send a request through the guard relay."""
-        guard_stub = self._get_guard_stub(guard_address)
-        relay_req = inference_pb2.RelayRequest(
-            encrypted_payload=request.SerializeToString(),
-            target_address=target_address,
-        )
-        relay_resp = guard_stub.Relay(relay_req)
-
-        # Deserialize the response
-        if relay_resp.encrypted_payload:
-            resp = inference_pb2.ForwardResponse()
-            resp.ParseFromString(relay_resp.encrypted_payload)
-            return resp
-        return inference_pb2.ForwardResponse()
 
     def get_fee_estimate(self, estimated_tokens: int = 100) -> dict:
         """Query the daemon's fee oracle for current pricing.
@@ -302,8 +231,6 @@ class UnfedClient:
             print(f"[Session {session_id[:8]}...] Prompt tokens: {len(input_ids)}")
             mpc_label = " + MPC shard 0" if using_mpc else ""
             print(f"[Routing] {routing_mode}{mpc_label}")
-            if self.use_guard and self._guard_address:
-                print(f"[Guard] Routing through {self._guard_address}")
             if self.use_return_encryption:
                 print(f"[Return Encryption] Enabled for {num_shards} nodes")
             if self.use_voting:
@@ -421,13 +348,8 @@ class UnfedClient:
                         print(f"[Voting] No second node for shard {voted_shard}, "
                               f"skipping vote")
 
-            # Send request (through guard or directly)
             try:
-                if self.use_guard and self._guard_address:
-                    response = self._send_via_guard(
-                        self._guard_address, entry_address, request)
-                else:
-                    response = entry_stub.Forward(request)
+                response = entry_stub.Forward(request)
             except grpc.RpcError as e:
                 print(f"\n[Error] gRPC call failed: {e.details()}")
                 break
@@ -538,14 +460,10 @@ class UnfedClient:
             if prefix_length > 0:
                 print(f"[Prefix Cache] Reusing {prefix_length} tokens from "
                       f"session {prefix_session_id[:8]}...")
-            if self.use_guard and self._guard_address:
-                print(f"[Guard] Routing through {self._guard_address}")
             for i in range(num_shards):
                 addrs = shard_addresses.get(i, [])
                 label = "MPC" if (i == 0 and using_mpc) else f"Shard {i}"
                 print(f"  {label}: {', '.join(addrs)}")
-
-        guard_addr = self._guard_address if self.use_guard else None
 
         all_addrs = []
         for addrs in shard_addresses.values():
@@ -617,7 +535,7 @@ class UnfedClient:
                         shard_index=shard_idx,
                         node_addresses=nodes,
                         request=request,
-                        guard_address=guard_addr,
+                        guard_address=None,
                     )
                 except (TimeoutError, RuntimeError) as e:
                     print(f"\n[Error] Racing failed at shard {shard_idx}: {e}")
@@ -1382,8 +1300,6 @@ def main():
                         help="Disable onion routing (use plain circuit)")
     parser.add_argument("--random-routing", action="store_true",
                         help="Use computational randomness routing")
-    parser.add_argument("--use-guard", action="store_true",
-                        help="Route through a guard relay node")
     parser.add_argument("--use-voting", action="store_true",
                         help="Enable redundant voting (double-check 1 random shard)")
     parser.add_argument("--use-return-encryption", action="store_true",
@@ -1421,7 +1337,6 @@ def main():
 
     client = UnfedClient(
         registry_address=args.registry,
-        use_guard=args.use_guard,
         use_voting=args.use_voting,
         use_return_encryption=args.use_return_encryption,
         tls_ca=args.tls_ca,
@@ -1471,8 +1386,6 @@ def main():
         print(f"Registry: {args.registry or 'seed list'}")
 
         features = []
-        if args.use_guard:
-            features.append("guard-relay")
         if args.use_voting:
             features.append("voting")
         if args.use_return_encryption:

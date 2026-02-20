@@ -1,7 +1,7 @@
 """
 Unified Node Entry Point — start any UNFED node type from a single command.
 
-Each role has its own config class (ComputeConfig, GuardConfig, VerifierConfig)
+Each role has its own config class (ComputeConfig, VerifierConfig, etc.)
 with only the fields that role needs. The 'role' field in the JSON or CLI
 determines which config type is created.
 
@@ -15,9 +15,6 @@ Usage:
     # Pure CLI (no config file)
     python -m node.run --role compute --shard-index 0 --port 50051
 
-    # Guard relay
-    python -m node.run --role guard --port 50060
-
     # Verifier
     python -m node.run --role verifier --poll-interval 5
 """
@@ -29,7 +26,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from node.node_config import (
-    ComputeConfig, MPCConfig, GuardConfig, VerifierConfig, DaemonConfig,
+    ComputeConfig, MPCConfig, VerifierConfig, DaemonConfig,
     load_config, print_config_summary,
 )
 
@@ -37,13 +34,12 @@ from node.node_config import (
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser with all config fields."""
     parser = argparse.ArgumentParser(
-        description="UNFED AI Node — unified entry point for compute, guard, and verifier nodes",
+        description="UNFED AI Node — unified entry point for compute, verifier, and daemon nodes",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python -m node.run --config node_config.json
   python -m node.run --role compute --shard-index 0 --port 50051
-  python -m node.run --role guard --port 50060
   python -m node.run --role verifier --poll-interval 5
         """,
     )
@@ -54,8 +50,8 @@ Examples:
 
     # --- Core ---
     parser.add_argument("--role", type=str, default=None,
-                        choices=["compute", "mpc", "guard", "verifier", "daemon"],
-                        help="Node role: compute, mpc, guard, verifier, or daemon")
+                        choices=["compute", "mpc", "verifier", "daemon"],
+                        help="Node role: compute, mpc, verifier, or daemon")
     parser.add_argument("--port", type=int, default=None,
                         help="gRPC listen port")
     parser.add_argument("--host", type=str, default=None,
@@ -127,15 +123,6 @@ Examples:
                         dest="peer_address",
                         help="Address of the other MPC node (required for MPC)")
 
-    # --- Guard-only ---
-    parser.add_argument("--max-concurrent-relays", type=int, default=None,
-                        help="Max simultaneous relay sessions (guard only)")
-    parser.add_argument("--relay-timeout", type=float, default=None,
-                        dest="relay_timeout_seconds",
-                        help="Timeout per relay hop in seconds (guard only)")
-    parser.add_argument("--log-connections", action="store_true", default=None,
-                        help="Log client connections (guard only, privacy tradeoff)")
-
     # --- Daemon-only ---
     parser.add_argument("--db", type=str, default=None,
                         dest="db_path",
@@ -200,10 +187,6 @@ def cli_to_overrides(args: argparse.Namespace) -> dict:
         # MPC
         "mpc_role": "mpc_role",
         "peer_address": "peer_address",
-        # Guard
-        "max_concurrent_relays": "max_concurrent_relays",
-        "relay_timeout_seconds": "relay_timeout_seconds",
-        "log_connections": "log_connections",
         # Daemon
         "db_path": "db_path",
         "block_interval_seconds": "block_interval_seconds",
@@ -270,16 +253,6 @@ def main():
             shards_dir=cfg.shards_dir,
             tls_cert=cfg.tls_cert or None,
             tls_key=cfg.tls_key or None,
-        )
-
-    elif isinstance(cfg, GuardConfig):
-        from network.guard_node import serve as serve_guard
-        serve_guard(
-            port=cfg.port,
-            host=cfg.host,
-            advertise=cfg.advertise,
-            registry_address=cfg.registry,
-            node_config=cfg,
         )
 
     elif isinstance(cfg, VerifierConfig):

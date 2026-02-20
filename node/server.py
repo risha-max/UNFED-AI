@@ -1539,7 +1539,7 @@ def serve_auto(port: int, host: str = "[::]",
     2. List available shard files
     3. Call registry RequestAssignment RPC
     4. Download shard from peers if needed
-    5. Launch as the assigned role (compute, vision, mpc, guard)
+    5. Launch as the assigned role (compute, vision, mpc)
     """
     import uuid
     from node.capacity import probe_capacity, list_available_shards
@@ -1637,12 +1637,6 @@ def serve_auto(port: int, host: str = "[::]",
                 return
 
     # 5. Determine model_type from assignment stack
-    if assignment.role == "guard":
-        print("[Auto] Assigned as guard relay — starting guard server")
-        _serve_guard(port, host, public_address, registry_addr,
-                     node_id, assignment.model_id)
-        return
-
     if assignment.role == "mpc":
         print(f"[Auto] Assigned as MPC role {assignment.mpc_role} "
               f"with peer {assignment.mpc_peer_address}")
@@ -1685,51 +1679,6 @@ def _detect_model_type(shards_dir: str) -> str:
     if "vl" in mt.lower() or "vision" in mt.lower():
         return "qwen2_vl"
     return "qwen2"
-
-
-def _serve_guard(port, host, public_address, registry_addr, node_id, model_id,
-                 tls_cert=None, tls_key=None):
-    """Start a lightweight guard relay node."""
-    registration = NodeRegistration(
-        address=public_address,
-        model_id=model_id,
-        shard_index=0,
-        layer_start=0,
-        layer_end=0,
-        has_embedding=False,
-        has_lm_head=False,
-        node_type="guard",
-        registry_address=registry_addr,
-        node_id=node_id,
-    )
-
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=4),
-        options=config.GRPC_OPTIONS,
-    )
-    # Guard relay uses the same servicer framework but only relays
-    inference_pb2_grpc.add_InferenceNodeServicer_to_server(
-        inference_pb2_grpc.InferenceNodeServicer(), server)
-    from network.tls import configure_server_port
-    configure_server_port(server, host, port, tls_cert, tls_key)
-    server.start()
-    print(f"[Guard] Listening on {host}:{port}")
-
-    registration.start()
-    print(f"[Guard] Registered as guard relay for {model_id}")
-
-    shutdown_event = threading.Event()
-
-    def _shutdown(signum, frame):
-        print("\n[Guard] Shutting down...")
-        registration.stop()
-        server.stop(grace=5)
-        shutdown_event.set()
-
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-    shutdown_event.wait()
-    print("[Guard] Stopped.")
 
 
 def _serve_mpc(port, host, public_address, registry_addr,

@@ -3,7 +3,7 @@ Tests for the Dynamic Fee System (EIP-1559-style).
 
 Tests:
   1. FeeOracle basic adjustments (up and down)
-  2. Weighted share creation (compute, MPC, guard)
+  2. Weighted share creation (compute, MPC)
   3. Weighted settlement tally
   4. PaymentContract dynamic pricing
   5. Proto round-trip with share_weight
@@ -135,9 +135,9 @@ class TestWeightedShares:
         )
         assert share.share_weight == 1.0
 
-    def test_guard_share_weight(self):
+    def test_low_weight_share(self):
         share = ComputeShare(
-            node_id="guard-1",
+            node_id="infra-1",
             shard_index=-1,
             session_id="sess",
             activation_hash="abc",
@@ -190,7 +190,7 @@ class TestWeightedShares:
 
 class TestWeightedSettlement:
     def _make_chain_with_shares(self):
-        """Create a chain with a mix of compute and guard shares."""
+        """Create a chain with a mix of compute shares at different weights."""
         chain = ShareChain(block_interval=10.0, settlement_blocks=2)
 
         # Compute shares (weight 1.0)
@@ -204,12 +204,12 @@ class TestWeightedSettlement:
                 share_weight=1.0,
             ))
 
-        # Guard shares (weight 0.05)
+        # Low-weight shares (weight 0.05)
         for i in range(3):
             chain.add_share(ComputeShare(
-                node_id="guard-node",
+                node_id="infra-node",
                 shard_index=-1,
-                session_id=f"guard-sess-{i}",
+                session_id=f"infra-sess-{i}",
                 activation_hash="def",
                 tokens_processed=1,
                 share_weight=0.05,
@@ -228,8 +228,8 @@ class TestWeightedSettlement:
         totals = chain.get_node_totals()
         assert abs(totals["compute-node"] - 5.0) < 1e-9, \
             "Compute node should have 5.0 weighted shares"
-        assert abs(totals["guard-node"] - 0.15) < 1e-9, \
-            "Guard node should have 0.15 weighted shares (3 * 0.05)"
+        assert abs(totals["infra-node"] - 0.15) < 1e-9, \
+            "Infra node should have 0.15 weighted shares (3 * 0.05)"
 
     def test_settlement_summary_float(self):
         chain = self._make_chain_with_shares()
@@ -282,7 +282,7 @@ class TestPaymentContractDynamic:
             period_start=0.0,
             period_end=1.0,
             block_range=(1, 2),
-            node_shares={"compute-node": 10.0, "guard-node": 0.15},
+            node_shares={"compute-node": 10.0, "infra-node": 0.15},
             total_shares=10.15,
         )
         summary.finalize()
@@ -366,12 +366,6 @@ class TestConfig:
         assert hasattr(config, 'FEE_ADJUSTMENT_FACTOR')
         assert hasattr(config, 'FEE_WINDOW_BLOCKS')
         assert hasattr(config, 'FEE_TARGET_CAPACITY')
-        assert hasattr(config, 'GUARD_FEE_RATIO')
-
-    def test_guard_fee_ratio_value(self):
-        import config
-        assert config.GUARD_FEE_RATIO == 0.05
-
     def test_proto_fee_fields(self):
         """Verify proto stubs have new fields."""
         from proto import inference_pb2

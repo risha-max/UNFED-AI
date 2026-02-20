@@ -106,7 +106,6 @@ FEE_MAX = 0.1                    # ceiling (prevents price shock)
 FEE_ADJUSTMENT_FACTOR = 0.125    # how aggressively the fee adjusts per block
 FEE_WINDOW_BLOCKS = 10           # rolling window for utilization calculation
 FEE_TARGET_CAPACITY = 40         # expected shares/block at 100% utilization
-GUARD_FEE_RATIO = 0.05           # guard earns 5% of compute rate per relay
 
 
 def get_shard_path(shard_index: int) -> str:

@@ -40,12 +40,6 @@ service InferenceNode {
   rpc VerifyCapacity(VerifyCapacityRequest) returns (VerifyCapacityResponse);
 }
 
-// Guard relay service — lightweight relay between client and compute pipeline.
-// The guard sees the client's IP but cannot read the encrypted request payload.
-service GuardRelay {
-  // Relay an encrypted request to a compute node and return the encrypted response.
-  rpc Relay(RelayRequest) returns (RelayResponse);
-}
 
 message ForwardRequest {
   // Unique session identifier — ties KV cache state across token steps.
@@ -184,25 +178,6 @@ message ShardChunk {
   string chunk_hash = 5;        // SHA256 hash of this individual chunk (for piece-level verification)
 }
 
-// --- Guard Relay ---
-
-message RelayRequest {
-  // Encrypted payload — the guard cannot read this.
-  // Contains a serialized ForwardRequest encrypted for Node 0's key.
-  bytes encrypted_payload = 1;
-
-  // Target compute node address (the guard forwards to this address).
-  string target_address = 2;
-
-  // Ephemeral public key for the guard's onion layer.
-  bytes guard_ephemeral_key = 3;
-}
-
-message RelayResponse {
-  // Encrypted response from the compute pipeline.
-  // The guard cannot read this — it's encrypted for the client.
-  bytes encrypted_payload = 1;
-}
 
 // --- Voting (Commit-then-Reveal) ---
 
@@ -338,7 +313,7 @@ message ShareProto {
   string activation_hash = 4;
   int32 tokens_processed = 5;
   double timestamp = 6;
-  double share_weight = 7;            // 1.0 for compute/MPC, GUARD_FEE_RATIO for guard
+  double share_weight = 7;            // 1.0 for compute/MPC, 0.0 for daemon
 }
 
 message BlockMessage {

@@ -316,7 +316,7 @@ def test_e2e_multimodal():
             all_nodes = reg.discover("")
             vision_nodes = [n for n in all_nodes if n.node_type == "vision"]
             compute_nodes = [n for n in all_nodes
-                             if n.node_type not in ("guard", "vision")]
+                             if n.node_type not in ("vision",)]
             if len(vision_nodes) >= 2 and len(compute_nodes) >= 4:
                 break
             print(f"  Waiting for nodes... ({len(vision_nodes)} vision, "

@@ -41,7 +41,6 @@ class ComputeShare:
 
     share_weight determines how much this share counts at settlement:
       - 1.0 for compute and MPC nodes (full GPU work)
-      - GUARD_FEE_RATIO (e.g., 0.05) for guard relay work
       - 0.0 for daemon nodes (unpaid infrastructure)
     """
     node_id: str
@@ -126,9 +125,8 @@ class SettlementSummary:
     This feeds into the payment system.
 
     node_shares contains weighted sums (float), not raw counts.
-    Compute shares contribute 1.0 each, guard shares contribute
-    GUARD_FEE_RATIO (e.g., 0.05) each. This means the settlement
-    automatically pays different roles proportionally.
+    Compute shares contribute 1.0 each. The settlement
+    pays nodes proportionally to their weighted contributions.
     """
     period_start: float
     period_end: float
