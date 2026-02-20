@@ -29,6 +29,7 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 # Project root setup
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -94,26 +95,6 @@ async def list_models():
                 "is_healthy": m.is_healthy,
             })
         return {"models": result}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# REST: Cluster discovery
-# ---------------------------------------------------------------------------
-@app.get("/api/clusters")
-async def list_clusters():
-    """Discover all known clusters (registries) and return their metadata.
-
-    Performs gossip-based peer exchange to discover new clusters, then
-    queries each for its identity and stats.
-    """
-    try:
-        discovery = get_discovery()
-        # Learn about new peers via gossip first
-        discovery.learn_peers()
-        clusters = discovery.discover_clusters()
-        return {"clusters": clusters}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -542,6 +523,54 @@ async def client_auth():
     """Get a challenge for wallet signature authentication."""
     challenge = _wallet_auth.generate_challenge()
     return {"challenge": challenge}
+
+
+# ---------------------------------------------------------------------------
+# Faucet (testnet token distribution)
+# ---------------------------------------------------------------------------
+_faucet_last_drip: dict[str, float] = {}
+
+
+class FaucetRequest(BaseModel):
+    address: str
+
+@app.post("/api/faucet")
+async def faucet_drip(body: FaucetRequest):
+    """Drip test tokens into a client's escrow balance."""
+    escrow = _get_escrow()
+    if escrow is None:
+        return JSONResponse(status_code=503, content={
+            "error": "Escrow not configured. Deploy contracts and provide deployed.env."
+        })
+
+    address = body.address.strip()
+    if not address:
+        return JSONResponse(status_code=400, content={
+            "error": "Missing 'address' field."
+        })
+
+    now = time.time()
+    cooldown = escrow.FAUCET_COOLDOWN
+    last = _faucet_last_drip.get(address, 0)
+    remaining = cooldown - (now - last)
+    if remaining > 0:
+        return JSONResponse(status_code=429, content={
+            "error": "Cooldown active.",
+            "retry_after_seconds": int(remaining),
+        })
+
+    try:
+        tx_hash = escrow.faucet_drip(address)
+        _faucet_last_drip[address] = time.time()
+        _, balance = _check_client_balance(address)
+        return {
+            "success": True,
+            "amount": escrow.FAUCET_DRIP_AMOUNT,
+            "tx_hash": tx_hash,
+            "balance": round(balance, 4),
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ---------------------------------------------------------------------------

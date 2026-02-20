@@ -116,6 +116,16 @@ _ESCROW_ABI = [
         "outputs": [],
         "stateMutability": "nonpayable",
     },
+    {
+        "type": "function",
+        "name": "depositFor",
+        "inputs": [
+            {"name": "client", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
 ]
 
 _ERC20_ABI = [
@@ -139,6 +149,26 @@ _ERC20_ABI = [
         "inputs": [],
         "outputs": [{"name": "", "type": "uint8"}],
         "stateMutability": "view",
+    },
+    {
+        "type": "function",
+        "name": "approve",
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
+    },
+    {
+        "type": "function",
+        "name": "transfer",
+        "inputs": [
+            {"name": "to", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
     },
 ]
 
@@ -297,6 +327,37 @@ class OnChainEscrow:
         addr = Web3.to_checksum_address(node_address)
         fn = self._contract.functions.slashNode(addr)
         return self._send_tx(fn, f"slashNode({node_address[:10]}...)")
+
+    # ------------------------------------------------------------------
+    # Faucet (testnet only)
+    # ------------------------------------------------------------------
+
+    FAUCET_DRIP_AMOUNT = 100   # tokens per drip
+    FAUCET_COOLDOWN = 3600     # seconds between drips per address
+
+    def faucet_drip(self, client_address: str,
+                    amount_tokens: float = 0) -> str:
+        """Transfer test tokens from operator to a client's escrow balance.
+
+        Executes two transactions: approve + depositFor.
+        Returns the depositFor tx hash.
+        """
+        if not self._token_contract:
+            raise ValueError("No token contract configured")
+
+        amount = amount_tokens or self.FAUCET_DRIP_AMOUNT
+        amount_wei = int(amount * 10**18)
+        client = Web3.to_checksum_address(client_address)
+        escrow_addr = self._contract.address
+
+        approve_fn = self._token_contract.functions.approve(
+            escrow_addr, amount_wei)
+        self._send_tx(approve_fn, f"approve({amount} tokens)")
+
+        deposit_fn = self._contract.functions.depositFor(
+            client, amount_wei)
+        return self._send_tx(
+            deposit_fn, f"depositFor({client_address[:10]}..., {amount})")
 
     # ------------------------------------------------------------------
     # Helpers

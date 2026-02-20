@@ -182,6 +182,25 @@ The deploy script creates a test `UnfedToken`, but the escrow contract accepts a
 - The operator posts settlement batches from the share-chain; after a challenge window, payouts are finalized
 - Misbehaving nodes can be slashed (50% of stake, configurable)
 
+### Test token faucet
+
+On a testnet the operator holds all minted tokens. Clients can request free test
+tokens from the web dashboard:
+
+1. Open the dashboard and enter your wallet address in the Settings sidebar.
+2. Click **Get Test Tokens**.
+3. The server calls `depositFor(address, amount)` on the escrow contract, which
+   transfers tokens from the operator and credits them directly to the client's
+   escrow balance.
+
+Rate limit: one drip (100 tokens) per address per hour. The amount and cooldown
+are configurable via `OnChainEscrow.FAUCET_DRIP_AMOUNT` and
+`OnChainEscrow.FAUCET_COOLDOWN`.
+
+API: `POST /api/faucet` with body `{"address": "0x..."}`. Returns
+`{"success": true, "amount": 100, "tx_hash": "0x...", "balance": 200.0}` on
+success, or an error with the appropriate HTTP status.
+
 ## Environment Variables
 
 | Variable | Description | Default |

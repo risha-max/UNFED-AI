@@ -132,9 +132,6 @@ const Chat = {
         this.currentAssistantEl = this.addMessage('assistant', '', null, true);
 
         // Send via WebSocket
-        const clusterSelect = document.getElementById('clusterSelect');
-        const clusterEndpoint = clusterSelect ? clusterSelect.value : '';
-
         const payload = {
             prompt,
             model_type: modelType,
@@ -143,8 +140,6 @@ const Chat = {
             use_voting: useVoting,
         };
         if (imagePath) payload.image_path = imagePath;
-        if (clusterEndpoint) payload.cluster_endpoint = clusterEndpoint;
-
         const sent = App.sendChatMessage(payload);
         if (!sent) {
             this.addSystemMessage('Not connected to server');

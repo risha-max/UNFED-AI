@@ -197,6 +197,15 @@ contract UnfedEscrow {
         emit Deposited(msg.sender, amount);
     }
 
+    /// @notice Deposit tokens into a specific client's escrow (faucet / third-party top-up).
+    function depositFor(address client, uint256 amount) external {
+        require(amount > 0, "UnfedEscrow: zero amount");
+        token.safeTransferFrom(msg.sender, address(this), amount);
+        clientBalances[client] += amount;
+        escrowPool += amount;
+        emit Deposited(client, amount);
+    }
+
     /// @notice Withdraw unused client credits.
     function clientWithdraw(uint256 amount) external {
         require(clientBalances[msg.sender] >= amount, "UnfedEscrow: insufficient balance");

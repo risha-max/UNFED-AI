@@ -202,34 +202,60 @@ const App = {
         return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
     },
 
-    // ---- Cluster discovery ----
-    async loadClusters() {
-        const select = document.getElementById('clusterSelect');
-        if (!select) return;
+    // ---- Faucet ----
+    initFaucet() {
+        const btn = document.getElementById('faucetBtn');
+        if (!btn) return;
+        btn.addEventListener('click', () => this.requestFaucet());
+    },
 
-        const data = await this.fetchJson('/api/clusters');
-        if (!data || !data.clusters) return;
-
-        // Clear all options except the first "Auto" one
-        while (select.options.length > 1) {
-            select.remove(1);
+    async requestFaucet() {
+        const address = this.getWalletAddress();
+        if (!address) {
+            this.setFaucetStatus('Enter a wallet address first.', true);
+            return;
         }
+        const btn = document.getElementById('faucetBtn');
+        btn.disabled = true;
+        this.setFaucetStatus('Requesting tokens...', false);
 
-        for (const c of data.clusters) {
-            const opt = document.createElement('option');
-            opt.value = c.endpoint;
-            const nodes = c.total_nodes || 0;
-            const models = c.total_models || 0;
-            const name = c.name || c.endpoint;
-            opt.textContent = `${name} (${nodes} nodes, ${models} models)`;
-            select.appendChild(opt);
+        try {
+            const res = await fetch('/api/faucet', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ address }),
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                this.setFaucetStatus(
+                    `Received ${data.amount} tokens. Balance: ${data.balance}`,
+                    false);
+            } else if (res.status === 429) {
+                const mins = Math.ceil((data.retry_after_seconds || 0) / 60);
+                this.setFaucetStatus(
+                    `Cooldown active. Try again in ${mins} min.`, true);
+            } else {
+                this.setFaucetStatus(data.error || 'Faucet error.', true);
+            }
+        } catch (e) {
+            this.setFaucetStatus('Network error.', true);
+        } finally {
+            btn.disabled = false;
         }
+    },
+
+    setFaucetStatus(msg, isError) {
+        const el = document.getElementById('faucetStatus');
+        if (!el) return;
+        el.textContent = msg;
+        el.style.color = isError ? '#ef4444' : '#4ade80';
     },
 
     // ---- Init ----
     init() {
         this.initTabs();
         this.initWallet();
+        this.initFaucet();
         this.connectChat();
         this.connectChain();
 
@@ -242,8 +268,6 @@ const App = {
             }
         });
 
-        // Discover available clusters
-        this.loadClusters();
     },
 };
 

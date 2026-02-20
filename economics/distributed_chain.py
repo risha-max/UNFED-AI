@@ -39,6 +39,7 @@ import inference_pb2_grpc
 import registry_pb2
 import registry_pb2_grpc
 
+from economics.chain_store import ChainStore
 from economics.share_chain import ShareChain, ComputeShare, Block
 
 
@@ -111,7 +112,8 @@ class DistributedShareChain:
 
     def __init__(self, node_id: str, registry_address: str = None,
                  block_interval: float = 10.0, settlement_blocks: int = 6,
-                 self_address: str = ""):
+                 self_address: str = "",
+                 db_path: str = "~/.unfed/chain.db"):
         """
         Args:
             node_id: This node's unique identifier.
@@ -119,16 +121,18 @@ class DistributedShareChain:
             block_interval: Seconds between block proposals.
             settlement_blocks: Blocks per settlement period.
             self_address: This node's own advertised address (excluded from gossip).
+            db_path: SQLite database path for chain persistence.
         """
         self.node_id = node_id
         self.registry_address = registry_address or config.REGISTRY_ADDRESS
         self.block_interval = block_interval
         self.self_address = self_address
 
-        # The underlying chain (handles block storage, validation, settlements)
+        self._store = ChainStore(db_path)
         self.chain = ShareChain(
             block_interval=block_interval,
             settlement_blocks=settlement_blocks,
+            store=self._store,
         )
 
         # Known peer addresses for gossip (updated periodically from registry)
@@ -339,9 +343,10 @@ class DistributedShareChain:
                 self._refresh_peers()
 
     def stop(self):
-        """Stop all background loops."""
+        """Stop all background loops and close the database."""
         self._running = False
         self.chain.stop()
+        self._store.close()
 
     # --- Status ---
 
