@@ -80,6 +80,10 @@ class BaseNodeConfig:
     keepalive_time_ms: int = 30000
     keepalive_timeout_ms: int = 10000
 
+    # --- TLS ---
+    tls_cert: str = ""
+    tls_key: str = ""
+
     def resolve_defaults(self):
         """Fill in role-dependent defaults for fields left at sentinel values."""
         if self.port == 0:

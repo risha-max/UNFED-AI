@@ -56,11 +56,16 @@ class UnfedClient:
 
     def __init__(self, registry_address: str = None, use_guard: bool = False,
                  use_voting: bool = False, use_return_encryption: bool = False,
-                 use_racing: bool = False, model_id: str = None):
+                 use_racing: bool = False, model_id: str = None,
+                 tls_ca: str = None):
         self.model_id = model_id or config.MODEL_NAME
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
 
-        # Multi-registry discovery (falls back through seed list)
+        self._tls_credentials = None
+        if tls_ca:
+            from network.tls import make_channel_credentials
+            self._tls_credentials = make_channel_credentials(tls_ca)
+
         if registry_address:
             self.discovery = RegistryPool([registry_address])
         else:
@@ -152,7 +157,10 @@ class UnfedClient:
     def _get_stub(self, address: str) -> inference_pb2_grpc.InferenceNodeStub:
         """Get or create a gRPC stub for the given address (resilient channel)."""
         if address not in self._stubs:
-            channel = create_resilient_channel(address, config.GRPC_OPTIONS)
+            channel = create_resilient_channel(
+                address, config.GRPC_OPTIONS,
+                channel_credentials=self._tls_credentials,
+            )
             self._stubs[address] = inference_pb2_grpc.InferenceNodeStub(channel)
             self._channels[address] = channel
         return self._stubs[address]
@@ -1395,6 +1403,8 @@ def main():
                         help="Enable pipelined prefill for long prompts (racing mode)")
     parser.add_argument("--prefill-chunk-size", type=int, default=None,
                         help=f"Chunk size for pipelined prefill (default: {config.PREFILL_CHUNK_SIZE})")
+    parser.add_argument("--tls-ca", type=str, default=None,
+                        help="Path to CA certificate PEM for TLS connections")
     args = parser.parse_args()
 
     if args.prefill_chunk_size is not None:
@@ -1414,6 +1424,7 @@ def main():
         use_guard=args.use_guard,
         use_voting=args.use_voting,
         use_return_encryption=args.use_return_encryption,
+        tls_ca=args.tls_ca,
         use_racing=args.racing,
         model_id=model_id,
     )

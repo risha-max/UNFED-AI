@@ -22,6 +22,7 @@ import io
 import json
 import os
 import random
+import signal
 import sys
 import time
 import threading
@@ -918,7 +919,8 @@ def serve(shard_index: int, port: int, host: str = "[::]",
           advertise_address: str = None, registry_address: str = None,
           node_config=None, model_type: str = "qwen2",
           shards_dir: str = None, eth_address: str = None,
-          cheat_rate: float = 0.0, sampling_rate: float = 0.05):
+          cheat_rate: float = 0.0, sampling_rate: float = 0.05,
+          tls_cert: str = None, tls_key: str = None):
     """Start the gRPC server for a node.
 
     Args:
@@ -991,8 +993,9 @@ def serve(shard_index: int, port: int, host: str = "[::]",
                                      cheat_rate=cheat_rate,
                                      sampling_rate=sampling_rate)
     inference_pb2_grpc.add_InferenceNodeServicer_to_server(servicer, server)
+    from network.tls import configure_server_port
     bind_address = f"{host}:{port}"
-    server.add_insecure_port(bind_address)
+    configure_server_port(server, host, port, tls_cert, tls_key)
     server.start()
 
     print(f"[Node] Server listening on {bind_address} "
@@ -1065,12 +1068,18 @@ def serve(shard_index: int, port: int, host: str = "[::]",
     ticket_thread = threading.Thread(target=_submit_tickets_loop, daemon=True)
     ticket_thread.start()
 
-    try:
-        server.wait_for_termination()
-    except KeyboardInterrupt:
+    shutdown_event = threading.Event()
+
+    def _shutdown(signum, frame):
         print(f"\n[Node] Shutting down...")
         registration.stop()
-        server.stop(0)
+        server.stop(grace=5)
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+    shutdown_event.wait()
+    print("[Node] Stopped.")
 
 
 class VisionNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
@@ -1396,7 +1405,8 @@ class VisionNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
 def serve_vision(shard_index: int, port: int, host: str = "[::]",
                  advertise_address: str = None, registry_address: str = None,
-                 shards_dir: str = "shards_vl", eth_address: str = None):
+                 shards_dir: str = "shards_vl", eth_address: str = None,
+                 tls_cert: str = None, tls_key: str = None):
     """Start a vision shard gRPC server.
 
     Auto-detects model type from manifest (Qwen2-VL or SmolVLM).
@@ -1442,7 +1452,8 @@ def serve_vision(shard_index: int, port: int, host: str = "[::]",
     servicer = VisionNodeServicer(shard_index, port, registration,
                                   shards_dir=shards_dir)
     inference_pb2_grpc.add_InferenceNodeServicer_to_server(servicer, server)
-    server.add_insecure_port(f"{host}:{port}")
+    from network.tls import configure_server_port
+    configure_server_port(server, host, port, tls_cert, tls_key)
     server.start()
 
     print(f"[Vision Node] Server listening on {host}:{port} "
@@ -1452,12 +1463,18 @@ def serve_vision(shard_index: int, port: int, host: str = "[::]",
     print(f"[Vision Node] Advertised as {public_address}")
     print(f"[Vision Node] Ready to serve requests.")
 
-    try:
-        server.wait_for_termination()
-    except KeyboardInterrupt:
+    shutdown_event = threading.Event()
+
+    def _shutdown(signum, frame):
         print(f"\n[Vision Node] Shutting down...")
         registration.stop()
-        server.stop(0)
+        server.stop(grace=5)
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+    shutdown_event.wait()
+    print("[Vision Node] Stopped.")
 
 
 def _download_shard_from_peers(
@@ -1670,7 +1687,8 @@ def _detect_model_type(shards_dir: str) -> str:
     return "qwen2"
 
 
-def _serve_guard(port, host, public_address, registry_addr, node_id, model_id):
+def _serve_guard(port, host, public_address, registry_addr, node_id, model_id,
+                 tls_cert=None, tls_key=None):
     """Start a lightweight guard relay node."""
     registration = NodeRegistration(
         address=public_address,
@@ -1692,19 +1710,26 @@ def _serve_guard(port, host, public_address, registry_addr, node_id, model_id):
     # Guard relay uses the same servicer framework but only relays
     inference_pb2_grpc.add_InferenceNodeServicer_to_server(
         inference_pb2_grpc.InferenceNodeServicer(), server)
-    server.add_insecure_port(f"{host}:{port}")
+    from network.tls import configure_server_port
+    configure_server_port(server, host, port, tls_cert, tls_key)
     server.start()
     print(f"[Guard] Listening on {host}:{port}")
 
     registration.start()
     print(f"[Guard] Registered as guard relay for {model_id}")
 
-    try:
-        server.wait_for_termination()
-    except KeyboardInterrupt:
+    shutdown_event = threading.Event()
+
+    def _shutdown(signum, frame):
         print("\n[Guard] Shutting down...")
         registration.stop()
-        server.stop(0)
+        server.stop(grace=5)
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+    shutdown_event.wait()
+    print("[Guard] Stopped.")
 
 
 def _serve_mpc(port, host, public_address, registry_addr,
@@ -1764,6 +1789,10 @@ if __name__ == "__main__":
                         help="Preferred model ID in auto mode (optional)")
     parser.add_argument("--device", type=str, default=None,
                         help="Compute device: cpu, cuda, cuda:0, or auto (default: cpu)")
+    parser.add_argument("--tls-cert", type=str, default=None,
+                        help="Path to TLS certificate PEM file")
+    parser.add_argument("--tls-key", type=str, default=None,
+                        help="Path to TLS private key PEM file")
     args = parser.parse_args()
 
     if args.auto:
@@ -1805,9 +1834,11 @@ if __name__ == "__main__":
             default_dir = "shards_smolvlm" if "smolvlm" in args.model_type else "shards_vl"
             serve_vision(args.shard_index, args.port, args.host, args.advertise,
                          args.registry, shards_dir=args.shards_dir or default_dir,
-                         eth_address=args.eth_address)
+                         eth_address=args.eth_address,
+                         tls_cert=args.tls_cert, tls_key=args.tls_key)
         else:
             serve(args.shard_index, args.port, args.host, args.advertise,
                   args.registry, node_config=nc, model_type=args.model_type,
                   shards_dir=args.shards_dir, eth_address=args.eth_address,
-                  cheat_rate=args.cheat, sampling_rate=args.sampling_rate)
+                  cheat_rate=args.cheat, sampling_rate=args.sampling_rate,
+                  tls_cert=args.tls_cert, tls_key=args.tls_key)

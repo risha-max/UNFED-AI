@@ -63,28 +63,30 @@ def with_retry(max_retries: int = MAX_RETRIES,
     return decorator
 
 
-def create_resilient_channel(address: str, grpc_options: list = None) -> grpc.Channel:
+def create_resilient_channel(
+    address: str,
+    grpc_options: list = None,
+    channel_credentials: grpc.ChannelCredentials = None,
+) -> grpc.Channel:
     """
     Create a gRPC channel with keepalive and retry settings suitable
     for cross-machine / WAN deployment.
+
+    If channel_credentials is provided, creates a secure channel.
     """
     options = list(grpc_options or [])
 
-    # Add keepalive settings for WAN resilience
     options.extend([
-        # Send keepalive pings every 30 seconds
         ("grpc.keepalive_time_ms", 30000),
-        # Wait 10 seconds for keepalive response before considering dead
         ("grpc.keepalive_timeout_ms", 10000),
-        # Allow keepalive even when there are no active RPCs
         ("grpc.keepalive_permit_without_calls", 1),
-        # After a connection failure, wait before reconnecting
         ("grpc.initial_reconnect_backoff_ms", 1000),
         ("grpc.max_reconnect_backoff_ms", 10000),
-        # Enable retries at the gRPC level
         ("grpc.enable_retries", 1),
     ])
 
+    if channel_credentials:
+        return grpc.secure_channel(address, channel_credentials, options=options)
     return grpc.insecure_channel(address, options=options)
 
 

@@ -268,6 +268,8 @@ def main():
             node_config=cfg,
             model_type=cfg.model_type,
             shards_dir=cfg.shards_dir,
+            tls_cert=cfg.tls_cert or None,
+            tls_key=cfg.tls_key or None,
         )
 
     elif isinstance(cfg, GuardConfig):

@@ -1,0 +1,9 @@
+{
+  "role": "compute",
+  "port": 50051,
+  "advertise": "YOUR_PUBLIC_IP:50051",
+  "registry": "registry.unfed.ai:50050",
+  "shard_index": 0,
+  "shards_dir": "./shards",
+  "device": "auto"
+}

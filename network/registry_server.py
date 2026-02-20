@@ -15,6 +15,7 @@ Usage:
 import argparse
 import json
 import logging
+import signal
 import sys
 import os
 import time
@@ -1278,7 +1279,8 @@ def _load_seed_peers(seeds_path: str | None = None) -> list[str]:
 
 
 def serve(port: int, cluster_config_path: str | None = None,
-          no_chain: bool = False):
+          no_chain: bool = False, tls_cert: str | None = None,
+          tls_key: str | None = None):
     """Start the registry server.
 
     Args:
@@ -1316,7 +1318,8 @@ def serve(port: int, cluster_config_path: str | None = None,
     gossip_servicer = RegistryGossipServicer(registry_servicer._distributed_chain)
     inference_pb2_grpc.add_InferenceNodeServicer_to_server(gossip_servicer, server)
 
-    server.add_insecure_port(f"[::]:{port}")
+    from network.tls import configure_server_port
+    configure_server_port(server, "[::]", port, tls_cert, tls_key)
     server.start()
 
     print(f"[Registry] Running on port {port}")
@@ -1329,12 +1332,18 @@ def serve(port: int, cluster_config_path: str | None = None,
           f"without heartbeat")
     print(f"[Registry] Waiting for nodes to register...")
 
-    try:
-        server.wait_for_termination()
-    except KeyboardInterrupt:
+    shutdown_event = threading.Event()
+
+    def _shutdown(signum, frame):
         print("\n[Registry] Shutting down...")
         registry_servicer._distributed_chain.stop()
-        server.stop(0)
+        server.stop(grace=5)
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+    shutdown_event.wait()
+    print("[Registry] Stopped.")
 
 
 if __name__ == "__main__":
@@ -1345,6 +1354,11 @@ if __name__ == "__main__":
                         help="Path to cluster config JSON file")
     parser.add_argument("--no-chain", action="store_true",
                         help="Disable on-chain escrow; use in-memory simulation")
+    parser.add_argument("--tls-cert", type=str, default=None,
+                        help="Path to TLS certificate PEM file")
+    parser.add_argument("--tls-key", type=str, default=None,
+                        help="Path to TLS private key PEM file")
     args = parser.parse_args()
     serve(args.port, cluster_config_path=args.cluster_config,
-          no_chain=args.no_chain)
+          no_chain=args.no_chain, tls_cert=args.tls_cert,
+          tls_key=args.tls_key)

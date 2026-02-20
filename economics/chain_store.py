@@ -125,12 +125,10 @@ class ChainStore:
 
     # --- Block operations ---
 
-    def save_block(self, block: Block, proposer_id: str = ""):
+    def save_block(self, block: Block, proposer_id: str = "") -> bool:
         """Persist a block and its shares to SQLite.
 
-        The full block is stored as gzip-compressed JSON in raw_data,
-        and individual shares are also inserted into the shares table
-        for indexed queries.
+        Returns True on success, False if block already exists.
         """
         raw_data = gzip.compress(
             json.dumps(block.to_dict()).encode("utf-8")
@@ -140,14 +138,13 @@ class ChainStore:
             c = self._conn.cursor()
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO blocks "
+                    "INSERT INTO blocks "
                     "(block_index, previous_hash, timestamp, block_hash, proposer_id, raw_data) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (block.index, block.previous_hash, block.timestamp,
                      block.block_hash, proposer_id, raw_data),
                 )
 
-                # Batch-insert shares for indexed queries
                 if block.shares:
                     c.executemany(
                         "INSERT INTO shares "
@@ -163,9 +160,10 @@ class ChainStore:
                     )
 
                 self._conn.commit()
+                return True
             except sqlite3.IntegrityError:
-                # Block already exists (e.g., re-save after conflict resolution)
                 self._conn.rollback()
+                return False
 
     def load_blocks(self, from_height: int = 0, limit: int = 100) -> list[Block]:
         """Load blocks from the database starting at from_height."""

@@ -18,11 +18,13 @@ MODEL_CACHE_DIR = "model_cache"
 MANIFEST_PATH = "shards/manifest.json"
 
 # Registry (bootstrap / DNS seed)
-REGISTRY_ADDRESS = "localhost:50050"
+REGISTRY_ADDRESS = os.environ.get("UNFED_REGISTRY", "localhost:50050")
 
-# Seed registries — loaded from network/seeds.json (fallback to REGISTRY_ADDRESS)
+# Seed registries — UNFED_SEEDS env (comma-separated), then seeds.json, then REGISTRY_ADDRESS
 def _load_seed_registries() -> list[str]:
-    """Load seed registry addresses from the seeds file."""
+    env_seeds = os.environ.get("UNFED_SEEDS", "")
+    if env_seeds:
+        return [s.strip() for s in env_seeds.split(",") if s.strip()]
     seeds_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "network", "seeds.json"
     )

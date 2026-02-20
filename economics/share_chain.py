@@ -363,6 +363,7 @@ class ShareChain:
 
         node_shares: dict[str, float] = {}
         total = 0.0
+        total_tokens = 0
         earliest = float('inf')
         latest = 0.0
 
@@ -372,6 +373,7 @@ class ShareChain:
                 weight = getattr(share, 'share_weight', 1.0)
                 node_shares[share.node_id] = node_shares.get(share.node_id, 0.0) + weight
                 total += weight
+                total_tokens += getattr(share, 'tokens_processed', 0)
                 earliest = min(earliest, share.timestamp)
                 latest = max(latest, share.timestamp)
 
@@ -386,6 +388,7 @@ class ShareChain:
             block_range=(start_idx, end_idx),
             node_shares=node_shares,
             total_shares=total,
+            total_tokens=total_tokens,
         )
         settlement.finalize()
         self._settlements.append(settlement)

@@ -1,0 +1,7 @@
+{
+  "registries": [
+    "registry1.unfed.ai:50050",
+    "registry2.unfed.ai:50050"
+  ],
+  "description": "Copy to seeds.json and replace with actual testnet registry addresses."
+}

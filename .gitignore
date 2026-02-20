@@ -59,5 +59,9 @@ model_cache/
 model-search.json
 _baseline_override.py
 
+# Proto generated files at root (canonical copies live in proto/)
+/*_pb2.py
+/*_pb2_grpc.py
+
 # Misc
 node_modules/
