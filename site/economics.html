@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Economics — UNFED AI</title>
+  <meta name="description" content="UNFED AI economic model: per-token pricing, on-chain staking, slashing, reward schemes, and settlement flows.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { primaryColor: '#1c2128', primaryTextColor: '#e6edf3', lineColor: '#00d4aa', secondaryColor: '#161b22' } });</script>
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container">
+      <a href="index.html" class="nav-logo">
+        <img src="img/logo.svg" alt="UNFED AI" width="28" height="28">
+        UNFED AI
+      </a>
+      <button class="nav-toggle" aria-label="Menu">&#9776;</button>
+      <ul class="nav-links">
+        <li><a href="about.html">About</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="nodes.html">Nodes</a></li>
+        <li><a href="economics.html">Economics</a></li>
+        <li><a href="protocol.html">Protocol</a></li>
+        <li><a href="getting-started.html">Get Started</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Page Header -->
+  <section class="page-header">
+    <div class="container">
+      <h1><span class="accent">Economics</span></h1>
+      <p>How nodes get paid, what keeps them honest, and how pricing works in a decentralized inference market.</p>
+    </div>
+  </section>
+
+  <!-- Per-Token Pricing -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Per-Token <span class="accent">Pricing</span></h2>
+        <p>Just like centralized AI APIs, but the cluster operator sets the price.</p>
+      </div>
+
+      <div class="split">
+        <div class="split-item">
+          <h3>How it works</h3>
+          <p>
+            The cluster operator (registry) sets two prices:
+          </p>
+          <ul>
+            <li><code>price_per_input_token</code> &mdash; cost per token in the prompt</li>
+            <li><code>price_per_output_token</code> &mdash; cost per generated token</li>
+          </ul>
+          <p style="margin-top: 12px;">
+            When a client sends a request, the web server counts input and output tokens
+            and reports usage to the registry. The total cost is computed as:
+          </p>
+          <pre><code>cost = (input_tokens &times; price_per_input_token)
+     + (output_tokens &times; price_per_output_token)</code></pre>
+        </div>
+
+        <div class="split-item">
+          <h3>Example</h3>
+          <div class="table-wrap">
+            <table>
+              <tr><th>Parameter</th><th>Value</th></tr>
+              <tr><td>Input tokens</td><td>50</td></tr>
+              <tr><td>Output tokens</td><td>200</td></tr>
+              <tr><td>Input price</td><td>0.0001 UNFED/token</td></tr>
+              <tr><td>Output price</td><td>0.001 UNFED/token</td></tr>
+              <tr><td><strong>Total cost</strong></td><td><strong>0.205 UNFED</strong></td></tr>
+            </table>
+          </div>
+          <p style="margin-top: 8px;">
+            Output tokens are ~10x more expensive because they require full autoregressive
+            inference (one forward pass per token), while input tokens are batched in a
+            single prefill pass.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Revenue Flow -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Revenue <span class="accent">Flow</span></h2>
+        <p>From client payment to node payout, tracked on-chain.</p>
+      </div>
+
+      <div class="diagram-wrap">
+        <div class="mermaid">
+graph LR
+  Client["Client"] -->|"deposit"| Escrow["UnfedEscrow.sol"]
+  Escrow -->|"locked"| Pool["Settlement Pool"]
+  Pool -->|"settlement"| Nodes["Node Payouts"]
+  Nodes -->|"proportional"| N1["Node A (60% shares)"]
+  Nodes -->|"proportional"| N2["Node B (40% shares)"]
+        </div>
+        <p class="diagram-caption">Revenue flows from client deposits through escrow to proportional node payouts.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Client deposits</h3>
+            <p>
+              Before inference, the client deposits ERC-20 tokens into the
+              <code>UnfedEscrow.sol</code> contract. This covers the estimated cost
+              of the inference session.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Usage reporting</h3>
+            <p>
+              After each inference, the web server reports input/output token counts
+              to the registry via the <code>ReportUsage</code> RPC. The registry
+              accumulates these into a running tally.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Settlement</h3>
+            <p>
+              Periodically, the share chain daemon produces a settlement block.
+              The payment contract calculates total revenue from token usage and
+              distributes it to nodes proportionally by their weighted compute shares.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Staking -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>On-Chain <span class="accent">Staking</span></h2>
+        <p>Nodes put skin in the game. Cheating costs real money.</p>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-icon">&#128176;</div>
+          <h3>Stake Requirement</h3>
+          <p>
+            Every compute, vision, and MPC node must stake at least <code>min_stake</code>
+            (default: 100 UNFED) in the <code>UnfedEscrow.sol</code> contract before
+            the registry will accept their registration.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">&#9939;</div>
+          <h3>UnfedEscrow.sol</h3>
+          <p>
+            A Solidity smart contract that manages staking, escrow, and slashing.
+            Functions: <code>stakeNode()</code>, <code>depositClient()</code>,
+            <code>settleJob()</code>, <code>slashNode()</code>.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">&#127968;</div>
+          <h3>ERC-20 Token</h3>
+          <p>
+            The stake token is any ERC-20 specified by the cluster operator in
+            <code>ClusterConfig</code>. For local testing, a mock <code>UnfedToken</code>
+            is deployed on Anvil.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Slashing -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2><span class="accent">Slashing</span></h2>
+        <p>The economic penalty that makes cheating unprofitable.</p>
+      </div>
+
+      <div class="flow">
+        <div class="flow-item">
+          <h4>1. Fraud Detected</h4>
+          <p>
+            A verifier re-executes a sampled forward pass and finds the output hash
+            doesn't match the original. It constructs a fraud proof containing
+            shard index, input/output hashes, and the node's identity.
+          </p>
+        </div>
+
+        <div class="flow-item">
+          <h4>2. Proof Submitted</h4>
+          <p>
+            The fraud proof is submitted to the registry via the
+            <code>SubmitFraudProof</code> gRPC. The registry validates the proof
+            and identifies the cheating node.
+          </p>
+        </div>
+
+        <div class="flow-item">
+          <h4>3. On-Chain Slash</h4>
+          <p>
+            The registry (as operator) calls <code>slashNode()</code> on the escrow
+            contract. The node's stake is reduced by <code>slash_fraction</code>
+            (e.g., 50%). Slashed funds are redistributed or burned.
+          </p>
+        </div>
+
+        <div class="flow-item">
+          <h4>4. Economic Exclusion</h4>
+          <p>
+            If the remaining stake falls below <code>min_stake</code>, the node
+            can no longer register with the cluster. It must re-stake to continue.
+            This is the <em>right of exclusion</em> &mdash; the libertarian model.
+          </p>
+        </div>
+      </div>
+
+      <div class="info-box warning">
+        <p>
+          <strong>Operator-attested model:</strong> The cluster operator (registry) is
+          the authority that calls <code>slashNode()</code>. This is trust-minimized
+          through context-free verification &mdash; the verifier's fraud proof is
+          independently verifiable.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Reward Schemes -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Reward <span class="accent">Schemes</span></h2>
+        <p>How revenue is distributed among participating nodes, like mining pool payout methods.</p>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <h3>Proportional</h3>
+          <p>
+            Revenue is split based on each node's share of total weighted compute
+            shares in the settlement period. Simple and fair, but susceptible to
+            pool-hopping.
+          </p>
+          <pre><code>payout = revenue &times; (my_shares / total_shares)</code></pre>
+        </div>
+
+        <div class="card">
+          <h3>PPLNS</h3>
+          <p>
+            Pay Per Last N Shares. Only the most recent <code>pplns_window</code>
+            shares count. Rewards consistent contributors and penalizes pool-hoppers.
+            Default window: 1000 shares.
+          </p>
+          <pre><code>payout = revenue &times; (my_recent_shares / last_N_shares)</code></pre>
+        </div>
+
+        <div class="card">
+          <h3>PPS</h3>
+          <p>
+            Pay Per Share. Each share earns a fixed rate (<code>pps_rate</code>)
+            regardless of total pool revenue. The operator absorbs variance risk.
+            Good for nodes wanting predictable income.
+          </p>
+          <pre><code>payout = my_shares &times; pps_rate</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ClusterConfig vs PoolConfig -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Configuration <span class="accent">Hierarchy</span></h2>
+        <p>Cluster-wide defaults with per-model overrides.</p>
+      </div>
+
+      <div class="split">
+        <div class="split-item">
+          <h3>ClusterConfig</h3>
+          <p>
+            Set by the cluster operator. Defines default values for all economic
+            parameters across the entire cluster.
+          </p>
+          <pre><code>{
+  "cluster_name": "my-unfed-cluster",
+  "default_min_stake": 100,
+  "default_slash_fraction": 0.5,
+  "default_price_per_input_token": 0.0001,
+  "default_price_per_output_token": 0.001,
+  "default_reward_scheme": "proportional",
+  ...
+}</code></pre>
+        </div>
+
+        <div class="split-item">
+          <h3>PoolConfig (per-model)</h3>
+          <p>
+            Optional per-model overrides. Larger models might require higher
+            stakes or charge more per token.
+          </p>
+          <pre><code>{
+  "model_id": "meta-llama/Llama-3-70B",
+  "min_stake": 500,
+  "price_per_input_token": 0.001,
+  "price_per_output_token": 0.01,
+  "reward_scheme": "pplns",
+  "pplns_window": 2000
+}</code></pre>
+        </div>
+      </div>
+
+      <div class="info-box" style="margin-top: 32px;">
+        <p>
+          <strong>Override rules:</strong> Any field defined in <code>PoolConfig</code>
+          takes precedence over the cluster default. The overridable fields include:
+          <code>min_stake</code>, <code>slash_fraction</code>, <code>price_per_input_token</code>,
+          <code>price_per_output_token</code>, <code>reward_scheme</code>, and all fee
+          oracle parameters.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="nodes.html">Nodes</a>
+        <a href="economics.html">Economics</a>
+        <a href="protocol.html">Protocol</a>
+        <a href="getting-started.html">Get Started</a>
+      </div>
+      <p>UNFED AI is open-source software. No single entity controls the network.</p>
+    </div>
+  </footer>
+
+  <script src="js/nav.js"></script>
+</body>
+</html>

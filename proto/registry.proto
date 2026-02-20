@@ -1,0 +1,394 @@
+syntax = "proto3";
+
+package unfed;
+
+// Registry service — bootstrap node for peer discovery.
+// Acts as a DNS seed: nodes register on startup, clients query to discover
+// available nodes and build inference circuits.
+// In production, multiple independent registries ensure no single point of failure.
+service Registry {
+  // Register a node with the registry.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Periodic heartbeat to signal the node is still alive.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Unregister a node (graceful shutdown).
+  rpc Unregister(UnregisterRequest) returns (UnregisterResponse);
+
+  // Discover available nodes, optionally filtered by model.
+  rpc Discover(DiscoverRequest) returns (DiscoverResponse);
+
+  // Get pool health: which shards are covered, node counts per shard.
+  rpc GetPoolHealth(PoolHealthRequest) returns (PoolHealthResponse);
+
+  // Submit verification tickets collected by nodes.
+  rpc SubmitTickets(SubmitTicketsRequest) returns (SubmitTicketsResponse);
+
+  // Get pending verification tickets (for verifier nodes to process).
+  rpc GetPendingTickets(GetPendingTicketsRequest) returns (GetPendingTicketsResponse);
+
+  // Submit fraud proofs discovered by verifiers.
+  rpc SubmitFraudProof(FraudProofMessage) returns (FraudProofResponse);
+
+  // Get all known fraud proofs.
+  rpc GetFraudProofs(GetFraudProofsRequest) returns (GetFraudProofsResponse);
+
+  // Get model manifest (so new nodes can discover shards without out-of-band distribution).
+  rpc GetManifest(GetManifestRequest) returns (GetManifestResponse);
+
+  // Upload/update a model manifest (called by splitter or seed node).
+  rpc PutManifest(PutManifestRequest) returns (PutManifestResponse);
+
+  // List all models known to this registry with health summaries.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+
+  // Get per-model economic rules (staking, rewards, fees).
+  rpc GetPoolConfig(GetPoolConfigRequest) returns (GetPoolConfigResponse);
+
+  // Publish/update per-model economic rules.
+  rpc PutPoolConfig(PutPoolConfigRequest) returns (PutPoolConfigResponse);
+
+  // --- Cluster identity & gossip ---
+
+  // Get this cluster's identity, default economics, and live stats.
+  rpc GetClusterInfo(GetClusterInfoRequest) returns (ClusterInfoResponse);
+
+  // Update the cluster config at runtime (operator use).
+  rpc SetClusterConfig(SetClusterConfigRequest) returns (SetClusterConfigResponse);
+
+  // Gossip: exchange known peer registries for decentralized discovery.
+  rpc ExchangePeers(ExchangePeersRequest) returns (ExchangePeersResponse);
+
+  // --- Pricing ---
+
+  // Get per-token pricing for a model (or cluster defaults).
+  rpc GetPricing(GetPricingRequest) returns (GetPricingResponse);
+
+  // Report token usage after a generation request (for settlement accounting).
+  rpc ReportUsage(ReportUsageRequest) returns (ReportUsageResponse);
+
+  // --- Auto-assignment ---
+
+  // Request a role/shard assignment from the registry based on hardware capacity.
+  rpc RequestAssignment(RequestAssignmentRequest) returns (RequestAssignmentResponse);
+}
+
+// --- Verification ---
+
+message VerificationTicketProto {
+  string ticket_id = 1;
+  int32 shard_index = 2;
+  bytes input_data = 3;
+  repeated int32 input_shape = 4;
+  bool input_is_tokens = 5;
+  bytes expected_output_data = 6;
+  repeated int32 expected_output_shape = 7;
+  int32 expected_token = 8;
+  bool has_expected_token = 9;
+  double timestamp = 10;
+}
+
+message SubmitTicketsRequest {
+  string node_id = 1;
+  repeated VerificationTicketProto tickets = 2;
+}
+
+message SubmitTicketsResponse {
+  int32 accepted = 1;
+}
+
+message GetPendingTicketsRequest {
+  int32 max_tickets = 1;  // Max number of tickets to return (0 = no limit)
+}
+
+message GetPendingTicketsResponse {
+  repeated VerificationTicketProto tickets = 1;
+}
+
+message FraudProofMessage {
+  string ticket_id = 1;
+  int32 shard_index = 2;
+  string input_hash = 3;
+  string expected_output_hash = 4;
+  string actual_output_hash = 5;
+  int32 expected_token = 6;
+  int32 actual_token = 7;
+  double timestamp = 8;
+}
+
+message FraudProofResponse {
+  bool accepted = 1;
+}
+
+message GetFraudProofsRequest {}
+
+message GetFraudProofsResponse {
+  repeated FraudProofMessage proofs = 1;
+}
+
+// --- Registration ---
+
+message RegisterRequest {
+  string node_id = 1;            // Unique node identifier (UUID)
+  string address = 2;            // Host:port where this node's gRPC server listens
+  string model_id = 3;           // Model being served (e.g., "Qwen/Qwen2.5-0.5B")
+  int32 shard_index = 4;         // Which shard this node holds
+  int32 layer_start = 5;         // First layer in the shard (inclusive)
+  int32 layer_end = 6;           // Last layer in the shard (exclusive)
+  bool has_embedding = 7;        // True if this shard includes the embedding layer
+  bool has_lm_head = 8;          // True if this shard includes norm + LM head
+  bytes public_key = 9;          // X25519 public key for onion routing (32 bytes)
+  string node_type = 10;         // "compute" or "guard"
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// --- Heartbeat ---
+
+message HeartbeatRequest {
+  string node_id = 1;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
+
+// --- Unregister ---
+
+message UnregisterRequest {
+  string node_id = 1;
+}
+
+message UnregisterResponse {
+  bool success = 1;
+}
+
+// --- Discovery ---
+
+message DiscoverRequest {
+  string model_id = 1;           // Filter by model (empty = all models)
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string address = 2;
+  string model_id = 3;
+  int32 shard_index = 4;
+  int32 layer_start = 5;
+  int32 layer_end = 6;
+  bool has_embedding = 7;
+  bool has_lm_head = 8;
+  double last_heartbeat = 9;     // Unix timestamp of last heartbeat
+  bytes public_key = 10;         // X25519 public key for onion routing (32 bytes)
+  string node_type = 11;         // "compute" or "guard"
+}
+
+message DiscoverResponse {
+  repeated NodeInfo nodes = 1;
+}
+
+// --- Pool Health ---
+
+message PoolHealthRequest {
+  string model_id = 1;
+}
+
+message ShardHealth {
+  int32 shard_index = 1;
+  int32 layer_start = 2;
+  int32 layer_end = 3;
+  int32 node_count = 4;          // How many nodes serve this shard
+  repeated string node_ids = 5;  // Which nodes serve this shard
+  string status = 6;             // "healthy", "degraded", "missing"
+}
+
+message PoolHealthResponse {
+  string model_id = 1;
+  int32 total_shards = 2;
+  repeated ShardHealth shards = 3;
+  string overall_status = 4;     // "healthy", "degraded", "incomplete"
+  bool can_serve = 5;            // True if all shards have at least one node
+}
+
+// --- Manifest Distribution ---
+
+message GetManifestRequest {
+  string model_id = 1;           // Which model's manifest to retrieve
+}
+
+message GetManifestResponse {
+  bool found = 1;
+  string manifest_json = 2;      // The manifest as a JSON string
+}
+
+message PutManifestRequest {
+  string model_id = 1;
+  string manifest_json = 2;      // The manifest as a JSON string
+}
+
+message PutManifestResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// --- Model Catalog ---
+
+// --- Pool Config (per-model economics) ---
+
+message GetPoolConfigRequest {
+  string model_id = 1;
+}
+
+message GetPoolConfigResponse {
+  bool found = 1;
+  string config_json = 2;          // PoolConfig serialized as JSON
+}
+
+message PutPoolConfigRequest {
+  string model_id = 1;
+  string config_json = 2;          // PoolConfig serialized as JSON
+}
+
+message PutPoolConfigResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// --- Model Catalog ---
+
+message ListModelsRequest {}
+
+message ModelInfo {
+  string model_id = 1;          // e.g. "meta-llama/Llama-3-70B"
+  int32 total_nodes = 2;        // Total compute nodes serving this model
+  int32 total_shards = 3;       // Number of shards the model is split into
+  int32 covered_shards = 4;     // Shards that have at least 1 node
+  bool can_serve = 5;           // True if all shards are covered (ready for inference)
+}
+
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+}
+
+// --- Cluster Identity & Gossip ---
+
+message GetClusterInfoRequest {}
+
+message ClusterInfoResponse {
+  string cluster_id = 1;
+  string name = 2;
+  string description = 3;
+  string operator = 4;
+  string public_endpoint = 5;
+  int32 total_nodes = 6;
+  int32 total_models = 7;
+  double uptime_seconds = 8;
+  string default_config_json = 9;  // ClusterConfig defaults as JSON
+}
+
+message SetClusterConfigRequest {
+  string config_json = 1;           // ClusterConfig serialized as JSON
+}
+
+message SetClusterConfigResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ExchangePeersRequest {
+  repeated string known_peers = 1;  // Peer endpoints the caller knows about
+}
+
+message PeerInfo {
+  string endpoint = 1;              // "registry.fastai.io:50050"
+  string cluster_id = 2;
+  string name = 3;
+  double last_seen = 4;             // Unix timestamp
+}
+
+message ExchangePeersResponse {
+  repeated PeerInfo peers = 1;
+}
+
+// --- Pricing ---
+
+message GetPricingRequest {
+  string model_id = 1;  // optional — empty returns cluster defaults
+}
+
+message GetPricingResponse {
+  double price_per_input_token = 1;
+  double price_per_output_token = 2;
+  string currency = 3;   // token symbol, e.g. "UNFED"
+  string model_id = 4;
+}
+
+message ReportUsageRequest {
+  int32 input_tokens = 1;
+  int32 output_tokens = 2;
+  string model_id = 3;
+  string session_id = 4;  // for deduplication
+}
+
+message ReportUsageResponse {
+  double cost = 1;  // total cost for this request
+  bool accepted = 2;
+}
+
+// --- Auto-assignment ---
+
+message NodeCapacity {
+  double total_ram_gb = 1;
+  double available_ram_gb = 2;
+  int32  cpu_cores = 3;
+  bool   has_gpu = 4;
+  double gpu_vram_gb = 5;
+  double available_gpu_vram_gb = 6;
+}
+
+message RequestAssignmentRequest {
+  string node_id = 1;
+  NodeCapacity capacity = 2;
+  string preferred_model_id = 3;
+  repeated string available_shards = 4;
+  bool   willing_to_mpc = 5;
+  string address = 6;
+}
+
+message Assignment {
+  string role = 1;
+  string model_id = 2;
+  int32  shard_index = 3;
+  string stack = 4;
+  int32  layer_start = 5;
+  int32  layer_end = 6;
+  bool   has_embedding = 7;
+  bool   has_lm_head = 8;
+  double estimated_ram_gb = 9;
+  string shard_file = 10;
+  string mpc_role = 11;
+  string mpc_peer_address = 12;
+  repeated string download_peers = 13;
+}
+
+message RequestAssignmentResponse {
+  bool success = 1;
+  string message = 2;
+  Assignment assignment = 3;
+}
+
+message VerifyCapacityRequest {
+  string node_id = 1;
+  int64  challenge_bytes = 2;
+  string expected_device = 3;
+}
+
+message VerifyCapacityResponse {
+  bool   passed = 1;
+  string proof_hash = 2;
+  double allocation_time_ms = 3;
+}

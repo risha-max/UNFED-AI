@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>About — UNFED AI</title>
+  <meta name="description" content="Why decentralized AI inference matters. UNFED AI prevents censorship, protects privacy, and removes single points of failure.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container">
+      <a href="index.html" class="nav-logo">
+        <img src="img/logo.svg" alt="UNFED AI" width="28" height="28">
+        UNFED AI
+      </a>
+      <button class="nav-toggle" aria-label="Menu">&#9776;</button>
+      <ul class="nav-links">
+        <li><a href="about.html">About</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="nodes.html">Nodes</a></li>
+        <li><a href="economics.html">Economics</a></li>
+        <li><a href="protocol.html">Protocol</a></li>
+        <li><a href="getting-started.html">Get Started</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Page Header -->
+  <section class="page-header">
+    <div class="container">
+      <h1>What is <span class="accent">UNFED AI</span></h1>
+      <p>A decentralized network for private, censorship-resistant AI inference &mdash; where no single entity controls the model, sees your data, or decides what you can ask.</p>
+    </div>
+  </section>
+
+  <!-- Mission -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Why This <span class="accent">Matters</span></h2>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-icon">&#128683;</div>
+          <h3>Censorship Resistance</h3>
+          <p>
+            Centralized AI providers filter, log, and refuse requests at will.
+            UNFED AI distributes inference across independent operators &mdash;
+            no single entity can censor or shut down the network.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">&#128065;</div>
+          <h3>Privacy by Design</h3>
+          <p>
+            Your prompts never exist in plaintext on any single machine. Multi-Party
+            Computation at the embedding layer means the most sensitive part of
+            inference &mdash; turning your words into numbers &mdash; is cryptographically
+            protected.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">&#9878;</div>
+          <h3>No Single Point of Failure</h3>
+          <p>
+            Models are sharded across multiple nodes run by different operators.
+            If one node goes down, the network can route around it. No company
+            can pull the plug.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Comparison -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Centralized AI vs <span class="accent">UNFED AI</span></h2>
+        <p>The fundamental difference in who controls your data.</p>
+      </div>
+
+      <div class="split">
+        <div class="split-item negative">
+          <h3>Centralized AI (status quo)</h3>
+          <ul>
+            <li>One company holds the full model</li>
+            <li>Your prompts are logged and stored</li>
+            <li>Content policies filter what you can ask</li>
+            <li>Single point of failure and censorship</li>
+            <li>Pricing is opaque and monopolistic</li>
+            <li>Provider can shut down service at any time</li>
+          </ul>
+        </div>
+
+        <div class="split-item positive">
+          <h3>UNFED AI</h3>
+          <ul>
+            <li>Model split across independent operators</li>
+            <li>No node sees the full input (MPC + sharding)</li>
+            <li>No content filtering at the protocol level</li>
+            <li>Decentralized &mdash; no single point of failure</li>
+            <li>Transparent per-token pricing set by operators</li>
+            <li>Open-source, permissionless participation</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Key Properties -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Key <span class="accent">Properties</span></h2>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">&#128274;</div>
+          <div class="step-content">
+            <h3>No node sees the full input</h3>
+            <p>
+              The embedding layer (shard 0) runs as an MPC pair. Your token IDs
+              are secret-shared before any computation happens. Subsequent shards
+              only see intermediate activations, not your original text.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">&#9939;</div>
+          <div class="step-content">
+            <h3>Economic incentives align nodes</h3>
+            <p>
+              Nodes must stake tokens on-chain to participate. A verifier network
+              randomly spot-checks computations. Cheating results in automatic
+              slashing &mdash; dishonesty costs real money.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">&#127760;</div>
+          <div class="step-content">
+            <h3>Cluster marketplace competition</h3>
+            <p>
+              Registries (clusters) compete like Monero mining pools. Each operator
+              sets their own pricing, staking rules, and model offerings. Nodes
+              and clients choose freely based on economics and reputation.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="nodes.html">Nodes</a>
+        <a href="economics.html">Economics</a>
+        <a href="protocol.html">Protocol</a>
+        <a href="getting-started.html">Get Started</a>
+      </div>
+      <p>UNFED AI is open-source software. No single entity controls the network.</p>
+    </div>
+  </footer>
+
+  <script src="js/nav.js"></script>
+</body>
+</html>

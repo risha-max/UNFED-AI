@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Node Types — UNFED AI</title>
+  <meta name="description" content="All UNFED AI node types: Registry, Daemon, Compute, Vision, MPC, Guard, and Verifier. Roles, requirements, CLI commands, and earnings.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container">
+      <a href="index.html" class="nav-logo">
+        <img src="img/logo.svg" alt="UNFED AI" width="28" height="28">
+        UNFED AI
+      </a>
+      <button class="nav-toggle" aria-label="Menu">&#9776;</button>
+      <ul class="nav-links">
+        <li><a href="about.html">About</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="nodes.html">Nodes</a></li>
+        <li><a href="economics.html">Economics</a></li>
+        <li><a href="protocol.html">Protocol</a></li>
+        <li><a href="getting-started.html">Get Started</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Page Header -->
+  <section class="page-header">
+    <div class="container">
+      <h1>Node <span class="accent">Types</span></h1>
+      <p>Seven distinct node roles make up the UNFED AI network. Each serves a specific purpose in the decentralized inference pipeline.</p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+
+      <!-- Registry -->
+      <div class="node-card" id="registry">
+        <h3>
+          &#9881; Registry Server
+          <span class="tag">Infrastructure</span>
+        </h3>
+        <p>
+          The cluster coordinator. Handles node discovery, model manifest distribution,
+          verification ticket queuing, fraud proof tracking, and payment settlements.
+          Analogous to a mining pool's stratum server.
+        </p>
+        <div class="meta">
+          <div class="meta-item"><strong>GPU:</strong> Not required</div>
+          <div class="meta-item"><strong>Weights:</strong> Not required</div>
+          <div class="meta-item"><strong>Stake:</strong> Operator role (no stake)</div>
+          <div class="meta-item"><strong>Earns:</strong> Operator fees</div>
+        </div>
+        <span class="code-label">Start command</span>
+        <pre><code>python -m network.registry_server \
+  --port 50050 \
+  --cluster-config cluster_config.json</code></pre>
+        <p>
+          The cluster config JSON defines the cluster identity, default economics
+          (pricing, staking minimums, slash fractions), and optional on-chain escrow
+          contract addresses.
+        </p>
+      </div>
+
+      <!-- Daemon -->
+      <div class="node-card" id="daemon">
+        <h3>
+          &#9939; Chain Daemon
+          <span class="tag">Infrastructure</span>
+        </h3>
+        <p>
+          The share-chain node, analogous to Monero's <code>monerod</code>. Accepts compute
+          shares from nodes, produces blocks, persists them to SQLite, and gossips
+          blocks to other daemon peers. Implements the EIP-1559-style fee oracle.
+        </p>
+        <div class="meta">
+          <div class="meta-item"><strong>GPU:</strong> Not required</div>
+          <div class="meta-item"><strong>Weights:</strong> Not required</div>
+          <div class="meta-item"><strong>Stake:</strong> Not required</div>
+          <div class="meta-item"><strong>Earns:</strong> Nothing (infrastructure)</div>
+        </div>
+        <span class="code-label">Start command</span>
+        <pre><code>python -m network.daemon_node \
+  --port 50070 \
+  --registry localhost:50050 \
+  --db ~/.unfed/chain.db</code></pre>
+      </div>
+
+      <!-- Compute Node -->
+      <div class="node-card" id="compute">
+        <h3>
+          &#9889; Compute Node
+          <span class="tag">GPU Required</span>
+        </h3>
+        <p>
+          The workhorse of the network. Loads a text transformer shard, serves
+          <code>Forward()</code> RPCs, manages KV caches per session, and submits
+          compute shares to the daemon. Supports multiple model architectures via
+          the generic runtime (v2 manifests).
+        </p>
+        <div class="meta">
+          <div class="meta-item"><strong>GPU:</strong> Required</div>
+          <div class="meta-item"><strong>Weights:</strong> One shard file</div>
+          <div class="meta-item"><strong>Stake:</strong> min_stake (e.g. 100 UNFED)</div>
+          <div class="meta-item"><strong>Earns:</strong> 1.0 share weight per forward pass</div>
+        </div>
+        <span class="code-label">Start command</span>
+        <pre><code>python -m node.server \
+  --shard-index 1 \
+  --port 50052 \
+  --model-type smolvlm \
+  --shards-dir shards_smolvlm \
+  --registry localhost:50050 \
+  --eth-address 0xYourAddress</code></pre>
+        <div class="info-box">
+          <p>
+            <strong>Key arguments:</strong>
+            <code>--shard-index</code> (which shard),
+            <code>--model-type</code> (qwen2, smolvlm, qwen2_vl),
+            <code>--shards-dir</code> (weight directory),
+            <code>--eth-address</code> (for on-chain staking),
+            <code>--sampling-rate</code> (verification ticket frequency, default 5%).
+          </p>
+        </div>
+      </div>
+
+      <!-- Vision Node -->
+      <div class="node-card" id="vision">
+        <h3>
+          &#128247; Vision Node
+          <span class="tag">GPU Required</span>
+        </h3>
+        <p>
+          Processes images through the vision encoder (ViT) for multimodal models.
+          Produces image embeddings that are merged with text tokens at shard 0.
+          Auto-detects model type (SmolVLM or Qwen2-VL) from the manifest.
+        </p>
+        <div class="meta">
+          <div class="meta-item"><strong>GPU:</strong> Required</div>
+          <div class="meta-item"><strong>Weights:</strong> Vision shard file</div>
+          <div class="meta-item"><strong>Stake:</strong> min_stake</div>
+          <div class="meta-item"><strong>Earns:</strong> Compute shares per image processed</div>
+        </div>
+        <span class="code-label">Start command</span>
+        <pre><code>python -m node.server \
+  --shard-index 0 \
+  --port 50060 \
+  --model-type smolvlm_vision \
+  --shards-dir shards_smolvlm \
+  --registry localhost:50050 \
+  --eth-address 0xYourAddress</code></pre>
+      </div>
+
+      <!-- MPC Node -->
+      <div class="node-card" id="mpc">
+        <h3>
+          &#128274; MPC Node (A + B)
+          <span class="tag">GPU Required</span>
+          <span class="tag">Privacy-Critical</span>
+        </h3>
+        <p>
+          A pair of nodes that replaces shard 0 with privacy-preserving computation.
+          Token IDs are secret-shared between Node A (entry point) and Node B (peer).
+          Neither can reconstruct the original text. Node A registers with the registry;
+          Node B runs as a silent peer.
+        </p>
+        <div class="meta">
+          <div class="meta-item"><strong>GPU:</strong> Required (both nodes)</div>
+          <div class="meta-item"><strong>Weights:</strong> Shard 0 file (both nodes)</div>
+          <div class="meta-item"><strong>Stake:</strong> Node A only</div>
+          <div class="meta-item"><strong>Earns:</strong> 1.0 share weight (split between A and B)</div>
+        </div>
+        <span class="code-label">Start Node B (peer) first</span>
+        <pre><code>python -m network.mpc_shard0 \
+  --role B \
+  --port 50063 \
+  --peer localhost:50061 \
+  --shards-dir shards_smolvlm</code></pre>
+        <span class="code-label">Then start Node A (entry, registers)</span>
+        <pre><code>python -m network.mpc_shard0 \
+  --role A \
+  --port 50061 \
+  --peer localhost:50063 \
+  --registry localhost:50050 \
+  --shards-dir shards_smolvlm \
+  --eth-address 0xYourAddress</code></pre>
+      </div>
+
+      <!-- Guard Node -->
+      <div class="node-card" id="guard">
+        <h3>
+          &#128737; Guard Node
+          <span class="tag">Lightweight</span>
+        </h3>
+        <p>
+          An IP-hiding relay between the client and the compute pipeline. The guard
+          sees the client's IP but cannot read the onion-encrypted payload. Compute
+          nodes never learn who sent the request.
+        </p>
+        <div class="meta">
+          <div class="meta-item"><strong>GPU:</strong> Not required</div>
+          <div class="meta-item"><strong>Weights:</strong> Not required</div>
+          <div class="meta-item"><strong>Stake:</strong> Not required</div>
+          <div class="meta-item"><strong>Earns:</strong> guard_fee_ratio (default 5%) of compute rate per relay</div>
+        </div>
+        <span class="code-label">Start command</span>
+        <pre><code>python -m network.guard_node \
+  --port 50060 \
+  --registry localhost:50050</code></pre>
+      </div>
+
+      <!-- Verifier Node -->
+      <div class="node-card" id="verifier">
+        <h3>
+          &#128269; Verifier Node
+          <span class="tag">GPU Required</span>
+          <span class="tag">Security</span>
+        </h3>
+        <p>
+          A standalone process that pulls verification tickets from the registry,
+          re-executes the computation with the same shard weights, and compares
+          output hashes. If a mismatch is found, it submits a fraud proof that
+          triggers on-chain slashing of the cheating node.
+        </p>
+        <div class="meta">
+          <div class="meta-item"><strong>GPU:</strong> Required (for re-execution)</div>
+          <div class="meta-item"><strong>Weights:</strong> All shard files (loaded lazily)</div>
+          <div class="meta-item"><strong>Stake:</strong> Not required</div>
+          <div class="meta-item"><strong>Earns:</strong> Not yet (future: bounties)</div>
+        </div>
+        <span class="code-label">Start command</span>
+        <pre><code>python -m network.verifier_node \
+  --registry localhost:50050 \
+  --poll-interval 5 \
+  --shards-dir shards_smolvlm</code></pre>
+        <div class="info-box">
+          <p>
+            <strong>Context-free verification:</strong> The verifier never sees user
+            identity, session ID, or which node computed the original result. It only
+            receives: shard index + input activation + expected output. Privacy is
+            preserved even during fraud detection.
+          </p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Summary Table -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Quick <span class="accent">Reference</span></h2>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Node Type</th>
+              <th>GPU</th>
+              <th>Weights</th>
+              <th>Stake</th>
+              <th>Module</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Registry</strong></td>
+              <td>No</td>
+              <td>No</td>
+              <td>Operator</td>
+              <td><code>network.registry_server</code></td>
+            </tr>
+            <tr>
+              <td><strong>Daemon</strong></td>
+              <td>No</td>
+              <td>No</td>
+              <td>No</td>
+              <td><code>network.daemon_node</code></td>
+            </tr>
+            <tr>
+              <td><strong>Compute</strong></td>
+              <td>Yes</td>
+              <td>1 shard</td>
+              <td>Required</td>
+              <td><code>node.server</code></td>
+            </tr>
+            <tr>
+              <td><strong>Vision</strong></td>
+              <td>Yes</td>
+              <td>Vision shard</td>
+              <td>Required</td>
+              <td><code>node.server</code></td>
+            </tr>
+            <tr>
+              <td><strong>MPC (A+B)</strong></td>
+              <td>Yes</td>
+              <td>Shard 0</td>
+              <td>A only</td>
+              <td><code>network.mpc_shard0</code></td>
+            </tr>
+            <tr>
+              <td><strong>Guard</strong></td>
+              <td>No</td>
+              <td>No</td>
+              <td>No</td>
+              <td><code>network.guard_node</code></td>
+            </tr>
+            <tr>
+              <td><strong>Verifier</strong></td>
+              <td>Yes</td>
+              <td>All shards</td>
+              <td>No</td>
+              <td><code>network.verifier_node</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="nodes.html">Nodes</a>
+        <a href="economics.html">Economics</a>
+        <a href="protocol.html">Protocol</a>
+        <a href="getting-started.html">Get Started</a>
+      </div>
+      <p>UNFED AI is open-source software. No single entity controls the network.</p>
+    </div>
+  </footer>
+
+  <script src="js/nav.js"></script>
+</body>
+</html>

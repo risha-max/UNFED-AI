@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UNFED AI Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+    <!-- Top bar -->
+    <header class="topbar">
+        <div class="topbar-brand">
+            <span class="brand-icon">&#9670;</span>
+            <span class="brand-name">UNFED AI</span>
+            <span class="brand-tag">Decentralized Inference</span>
+        </div>
+        <nav class="topbar-tabs">
+            <button class="tab-btn active" data-tab="chat">Chat</button>
+            <button class="tab-btn" data-tab="network">Network</button>
+            <button class="tab-btn" data-tab="chain">Chain</button>
+        </nav>
+        <div class="topbar-status">
+            <span class="status-dot" id="statusDot"></span>
+            <span class="status-text" id="statusText">Connecting...</span>
+        </div>
+    </header>
+
+    <!-- ================================================================ -->
+    <!-- Tab 1: Chat -->
+    <!-- ================================================================ -->
+    <main class="tab-content active" id="tab-chat">
+        <div class="chat-layout">
+            <!-- Conversation panel -->
+            <div class="chat-main">
+                <div class="chat-messages" id="chatMessages">
+                    <div class="chat-welcome">
+                        <h2>UNFED AI</h2>
+                        <p>Private, decentralized inference. Your queries are split across nodes — no single node sees the full picture.</p>
+                        <p class="hint">Type a message or drop an image to get started.</p>
+                    </div>
+                </div>
+
+                <!-- Input area -->
+                <div class="chat-input-area">
+                    <div class="image-preview" id="imagePreview" style="display:none;">
+                        <img id="imagePreviewImg" src="" alt="preview">
+                        <button class="image-remove" id="imageRemoveBtn" title="Remove image">&times;</button>
+                    </div>
+                    <div class="chat-input-row">
+                        <label class="upload-btn" id="uploadBtn" title="Upload image">
+                            <input type="file" id="imageInput" accept="image/*" hidden>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                <circle cx="8.5" cy="8.5" r="1.5"/>
+                                <polyline points="21 15 16 10 5 21"/>
+                            </svg>
+                        </label>
+                        <textarea class="chat-input" id="chatInput"
+                            placeholder="Type your message..."
+                            rows="1"></textarea>
+                        <button class="send-btn" id="sendBtn" title="Send">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="22" y1="2" x2="11" y2="13"/>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings sidebar -->
+            <aside class="chat-sidebar">
+                <h3>Settings</h3>
+
+                <div class="setting-group">
+                    <label>Wallet</label>
+                    <input type="text" id="walletAddress"
+                           placeholder="0x... (leave empty for demo)"
+                           spellcheck="false" autocomplete="off">
+                    <p class="setting-hint" id="walletHint">
+                        Your Ethereum address for escrow billing.
+                        Each wallet has its own deposit balance.
+                    </p>
+                </div>
+
+                <div class="setting-group">
+                    <label>Cluster</label>
+                    <select id="clusterSelect">
+                        <option value="">Auto (default)</option>
+                    </select>
+                    <p class="setting-hint">Select a cluster or leave on Auto</p>
+                </div>
+
+                <div class="setting-group">
+                    <label>Model</label>
+                    <select id="modelSelect">
+                        <option value="qwen2" disabled>Qwen2.5-0.5B (text) — not installed</option>
+                        <option value="qwen2_vl" disabled>Qwen2-VL-2B (vision) — not installed</option>
+                        <option value="smolvlm" selected>SmolVLM-256M (vision)</option>
+                    </select>
+                </div>
+
+                <div class="setting-group">
+                    <label>Max tokens</label>
+                    <input type="number" id="maxTokens" value="100" min="1" max="1000">
+                </div>
+
+                <div class="setting-group">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="useGuard">
+                        <span>Guard relay</span>
+                    </label>
+                    <p class="setting-hint">Hide your IP from compute nodes</p>
+                </div>
+
+                <div class="setting-group">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="useVoting">
+                        <span>Voting verification</span>
+                    </label>
+                    <p class="setting-hint">Double-check one shard per query</p>
+                </div>
+
+                <div class="setting-group">
+                    <h4>Generation Stats</h4>
+                    <div class="stats-grid" id="genStats">
+                        <div class="stat">
+                            <span class="stat-label">Tokens</span>
+                            <span class="stat-value" id="statTokens">—</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">Time</span>
+                            <span class="stat-value" id="statTime">—</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">Speed</span>
+                            <span class="stat-value" id="statSpeed">—</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </main>
+
+    <!-- ================================================================ -->
+    <!-- Tab 2: Network -->
+    <!-- ================================================================ -->
+    <main class="tab-content" id="tab-network">
+        <div class="network-layout">
+            <!-- Circuit visualization -->
+            <div class="circuit-panel">
+                <h3>Active Circuit</h3>
+                <p class="circuit-hint" id="circuitHint">Send a message in the Chat tab to see the active circuit.</p>
+                <div class="circuit-container" id="circuitContainer" style="display:none;">
+
+                    <!-- Vision circuit (shown for multimodal) -->
+                    <div class="circuit-section" id="visionCircuitSection" style="display:none;">
+                        <h4>Vision Pipeline</h4>
+                        <div class="circuit-path" id="visionCircuitPath"></div>
+                    </div>
+
+                    <!-- Text circuit -->
+                    <div class="circuit-section" id="textCircuitSection">
+                        <h4>Text Pipeline</h4>
+                        <div class="circuit-path" id="textCircuitPath"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Node list -->
+            <div class="nodes-panel">
+                <div class="nodes-header">
+                    <h3>Registered Nodes</h3>
+                    <button class="refresh-btn" id="refreshNodesBtn">Refresh</button>
+                </div>
+                <div class="nodes-list" id="nodesList">
+                    <p class="nodes-empty">Loading nodes...</p>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- ================================================================ -->
+    <!-- Tab 3: Chain -->
+    <!-- ================================================================ -->
+    <main class="tab-content" id="tab-chain">
+        <!-- Explainer banner -->
+        <div class="chain-explainer">
+            <div class="chain-explainer-icon">&#9939;</div>
+            <div class="chain-explainer-text">
+                <h3>Mini-Chain &mdash; Compute Ledger</h3>
+                <p>
+                    Every time a node computes a shard (embedding, transformer layer, etc.),
+                    it records a <strong>compute share</strong> &mdash; cryptographic proof
+                    that real work was done. Shares are bundled into <strong>blocks</strong>
+                    and gossiped across the network, forming a lightweight side-chain
+                    (similar to Monero's P2Pool share-chain).
+                </p>
+                <p>
+                    Blocks are only created when actual inference happens &mdash; no empty blocks.
+                    After every <strong>6 blocks</strong>, a <strong>settlement</strong> tallies
+                    each node's contributions for fair reward distribution.
+                    MPC nodes record <strong>two shares per computation</strong> (one for each
+                    party in the secret-sharing pair).
+                </p>
+            </div>
+        </div>
+
+        <div class="chain-layout">
+            <!-- Block list -->
+            <div class="blocks-panel">
+                <div class="blocks-header">
+                    <h3>Block Explorer</h3>
+                    <button class="refresh-btn" id="refreshChainBtn">Refresh</button>
+                </div>
+                <p class="blocks-subtitle">
+                    Each node proposes blocks containing its own compute shares
+                    (like a miner's coinbase). Different blocks come from different
+                    nodes &mdash; the full contribution picture is in the sidebar.
+                    Click a block to expand.
+                </p>
+                <div class="blocks-list" id="blocksList">
+                    <p class="blocks-empty">Loading chain...</p>
+                </div>
+            </div>
+
+            <!-- Stats sidebar -->
+            <aside class="chain-sidebar">
+                <div class="chain-stats-card">
+                    <h3>Chain Stats</h3>
+                    <p class="chain-card-hint">
+                        Live metrics from the distributed ledger.
+                    </p>
+                    <div class="chain-stats-grid" id="chainStats">
+                        <div class="stat">
+                            <span class="stat-label">Height</span>
+                            <span class="stat-value" id="chainHeight">—</span>
+                            <span class="stat-hint">Blocks since genesis</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">Total shares</span>
+                            <span class="stat-value" id="chainShares">—</span>
+                            <span class="stat-hint">Compute units recorded</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">Settlements</span>
+                            <span class="stat-value" id="chainSettlements">—</span>
+                            <span class="stat-hint">Payout cycles completed</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">Latest hash</span>
+                            <span class="stat-value mono" id="chainLatestHash">—</span>
+                            <span class="stat-hint">SHA-256 of the tip block</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="chain-stats-card fee-market-card">
+                    <h3>Fee Market <span class="badge badge-eip1559">EIP-1559</span></h3>
+                    <p class="chain-card-hint">
+                        Dynamic pricing based on network utilization. The base fee adjusts
+                        automatically &mdash; up when the network is busy, down when idle.
+                        Clients can add a priority tip to be served first.
+                    </p>
+                    <div class="fee-stats-grid" id="feeStats">
+                        <div class="fee-stat">
+                            <span class="fee-stat-label">Base Fee</span>
+                            <span class="fee-stat-value" id="feeBaseFee">&mdash;</span>
+                            <span class="fee-stat-unit">per token</span>
+                        </div>
+                        <div class="fee-stat">
+                            <span class="fee-stat-label">Utilization</span>
+                            <div class="utilization-gauge" id="feeUtilGauge">
+                                <div class="utilization-fill" id="feeUtilFill" style="width:0%"></div>
+                            </div>
+                            <span class="fee-stat-value-sm" id="feeUtilPct">0%</span>
+                        </div>
+                        <div class="fee-stat">
+                            <span class="fee-stat-label">Est. Cost (100 tok)</span>
+                            <span class="fee-stat-value" id="feeEstCost">&mdash;</span>
+                        </div>
+                        <div class="fee-stat">
+                            <span class="fee-stat-label">Suggested Tip</span>
+                            <span class="fee-stat-value" id="feeSugTip">&mdash;</span>
+                        </div>
+                    </div>
+                    <div class="fee-roles">
+                        <div class="fee-role">
+                            <span class="fee-role-icon">&#9881;</span>
+                            <span class="fee-role-label">Compute/MPC</span>
+                            <span class="fee-role-weight">1.0x share</span>
+                        </div>
+                        <div class="fee-role">
+                            <span class="fee-role-icon">&#128737;</span>
+                            <span class="fee-role-label">Guard relay</span>
+                            <span class="fee-role-weight">0.05x share</span>
+                        </div>
+                        <div class="fee-role">
+                            <span class="fee-role-icon">&#9878;</span>
+                            <span class="fee-role-label">Daemon</span>
+                            <span class="fee-role-weight">unpaid infra</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="chain-stats-card">
+                    <h3>Node Contributions</h3>
+                    <p class="chain-card-hint">
+                        How much work each node has done (weighted). Compute/MPC shares
+                        count as 1.0, guard relay shares count as 0.05.
+                        MPC pairs each get credit for shared computation.
+                    </p>
+                    <div class="contributions-chart" id="contributionsChart">
+                        <p class="chart-empty">No contributions yet &mdash; send a query to generate compute shares.</p>
+                    </div>
+                </div>
+
+                <div class="chain-stats-card">
+                    <h3>Settlements</h3>
+                    <p class="chain-card-hint">
+                        Every 6 blocks, the chain produces a settlement that
+                        tallies shares per node &mdash; like a mining pool payout round.
+                        This determines who gets rewarded and how much.
+                    </p>
+                    <div class="settlements-list" id="settlementsList">
+                        <p class="settlements-empty">No settlements yet &mdash; need at least 6 blocks of compute activity.</p>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </main>
+
+    <!-- Scripts -->
+    <script src="/static/app.js"></script>
+    <script src="/static/chat.js"></script>
+    <script src="/static/network.js"></script>
+    <script src="/static/chain.js"></script>
+</body>
+</html>

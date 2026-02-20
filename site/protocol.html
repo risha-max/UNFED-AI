@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Protocol — UNFED AI</title>
+  <meta name="description" content="UNFED AI protocol: P2Pool share chain, verification tickets, fraud proofs, optimistic rollup settlements, and gossip discovery.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { primaryColor: '#1c2128', primaryTextColor: '#e6edf3', lineColor: '#00d4aa', secondaryColor: '#161b22' } });</script>
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container">
+      <a href="index.html" class="nav-logo">
+        <img src="img/logo.svg" alt="UNFED AI" width="28" height="28">
+        UNFED AI
+      </a>
+      <button class="nav-toggle" aria-label="Menu">&#9776;</button>
+      <ul class="nav-links">
+        <li><a href="about.html">About</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="nodes.html">Nodes</a></li>
+        <li><a href="economics.html">Economics</a></li>
+        <li><a href="protocol.html">Protocol</a></li>
+        <li><a href="getting-started.html">Get Started</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Page Header -->
+  <section class="page-header">
+    <div class="container">
+      <h1><span class="accent">Protocol</span></h1>
+      <p>The internal mechanisms that make UNFED AI trustless: share chains, verification, fraud detection, and settlement.</p>
+    </div>
+  </section>
+
+  <!-- Share Chain -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Share <span class="accent">Chain</span></h2>
+        <p>A P2Pool-style side-chain that records every unit of work.</p>
+      </div>
+
+      <div class="split">
+        <div class="split-item">
+          <h3>What is it?</h3>
+          <p>
+            Like Monero's P2Pool, the share chain is a lightweight side-chain
+            that records <strong>compute shares</strong> &mdash; proof that a node
+            performed a forward pass. Shares are bundled into blocks every ~10
+            seconds by the daemon node.
+          </p>
+          <p>
+            Each block contains a list of <code>ComputeShare</code> entries, the
+            block's hash, the parent hash, the miner's node ID, and a timestamp.
+          </p>
+        </div>
+
+        <div class="split-item">
+          <h3>ComputeShare structure</h3>
+          <pre><code>{
+  "node_id": "0xAbC123...",
+  "shard_index": 1,
+  "tokens_processed": 42,
+  "weight": 1.0,
+  "timestamp": 1739500000.0
+}</code></pre>
+          <p>
+            The <code>weight</code> field determines payout proportionality.
+            Default weight is 1.0 per forward pass; vision shards and guard
+            relays may have different weights.
+          </p>
+        </div>
+      </div>
+
+      <div class="diagram-wrap" style="margin-top: 32px;">
+        <div class="mermaid">
+graph LR
+  B1["Block N-2"] --> B2["Block N-1"] --> B3["Block N"]
+  B3 --> B4["Block N+1 (pending)"]
+  subgraph B3_detail ["Block N"]
+    S1["Share: Node A, shard 0, w=1.0"]
+    S2["Share: Node B, shard 1, w=1.0"]
+    S3["Share: Node C, shard 1, w=1.0"]
+  end
+        </div>
+        <p class="diagram-caption">Share chain blocks contain compute shares from all active nodes.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Verification Tickets -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Verification <span class="accent">Tickets</span></h2>
+        <p>Random spot-checks that keep nodes honest without checking every computation.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Sampling</h3>
+            <p>
+              During prefill forward passes, each node randomly decides whether to
+              record a verification ticket. Default sampling rate: <strong>5%</strong>.
+              This is configurable via <code>--sampling-rate</code>.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Ticket Contents</h3>
+            <p>
+              A ticket records: <strong>shard index</strong>, <strong>input activation tensor</strong>
+              (the hidden states that entered this shard), and <strong>output activation hash</strong>
+              (SHA-256 of the hidden states that left this shard). No user identity, session ID,
+              or original prompt text is included.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Submission</h3>
+            <p>
+              Tickets are submitted to the registry via the <code>SubmitTicket</code> gRPC.
+              The registry queues them for the verifier to pull. Tickets are stored
+              without any association to the client session.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="info-box">
+        <p>
+          <strong>Context-free by design:</strong> Verification tickets contain only
+          the mathematical inputs and outputs of a shard computation. The verifier
+          has no way to determine <em>who</em> sent the original request or
+          <em>what</em> the user asked.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Fraud Proofs -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Fraud <span class="accent">Proofs</span></h2>
+        <p>How the verifier detects and reports cheating.</p>
+      </div>
+
+      <div class="diagram-wrap">
+        <div class="mermaid">
+sequenceDiagram
+  participant N as Compute Node
+  participant R as Registry
+  participant V as Verifier
+
+  N->>R: SubmitTicket(shard, input, output_hash)
+  V->>R: PullTickets()
+  R->>V: [ticket_1, ticket_2, ...]
+  V->>V: Re-execute Forward(shard, input)
+  V->>V: Compare output_hash
+  alt Hash matches
+    V->>V: Ticket OK, discard
+  else Hash mismatch
+    V->>R: SubmitFraudProof(node_id, evidence)
+    R->>R: Validate proof
+    R->>R: slashNode() on-chain
+  end
+        </div>
+        <p class="diagram-caption">Verification lifecycle: from ticket creation to potential slashing.</p>
+      </div>
+
+      <div class="split" style="margin-top: 32px;">
+        <div class="split-item">
+          <h3>What counts as cheating?</h3>
+          <ul>
+            <li>Returning random activations instead of computing the actual forward pass</li>
+            <li>Using lower-precision weights to save compute</li>
+            <li>Injecting noise or bias into outputs</li>
+            <li>Skipping layers in the transformer</li>
+          </ul>
+        </div>
+
+        <div class="split-item">
+          <h3>Why it works</h3>
+          <ul>
+            <li>Cheating nodes don't know <em>which</em> forward passes will be sampled</li>
+            <li>The verifier holds the same shard weights and can exactly reproduce results</li>
+            <li>Even a small corruption produces a completely different output hash</li>
+            <li>The cost of getting caught (slashing) far exceeds the cost of computing honestly</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Settlement -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Optimistic <span class="accent">Settlement</span></h2>
+        <p>An optimistic rollup approach: post first, challenge later.</p>
+      </div>
+
+      <div class="flow">
+        <div class="flow-item">
+          <h4>1. Post Settlement</h4>
+          <p>
+            The daemon produces a <code>SettlementSummary</code> periodically, containing:
+            total weighted shares per node, total tokens processed, block range, and a
+            settlement hash. The payment contract posts this as a pending settlement.
+          </p>
+        </div>
+
+        <div class="flow-item">
+          <h4>2. Challenge Window</h4>
+          <p>
+            A configurable window (default: 60 seconds) during which any participant
+            can challenge the settlement. If a fraud proof is submitted during this
+            window, the settlement can be invalidated and the cheating node slashed.
+          </p>
+        </div>
+
+        <div class="flow-item">
+          <h4>3. Finalize and Pay</h4>
+          <p>
+            After the challenge window closes with no disputes, the settlement is
+            finalized. Revenue is calculated from accumulated token usage, then
+            distributed proportionally to nodes based on their weighted shares.
+            On-chain <code>settleJob()</code> transfers tokens from escrow to nodes.
+          </p>
+        </div>
+      </div>
+
+      <div class="info-box">
+        <p>
+          <strong>Why optimistic?</strong> Instead of verifying every computation
+          before payment (expensive), settlements are assumed correct and only
+          challenged if fraud is detected. This keeps throughput high while
+          maintaining security guarantees.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Gossip Protocol -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Gossip <span class="accent">Discovery</span></h2>
+        <p>How clients find clusters and registries find each other.</p>
+      </div>
+
+      <div class="split">
+        <div class="split-item">
+          <h3>Seed List</h3>
+          <p>
+            Clients start with a hardcoded or configurable seed list of known
+            registry addresses. This bootstraps the initial connection, similar
+            to Bitcoin's DNS seeds.
+          </p>
+          <pre><code>seeds:
+  - registry.cluster-a.example:50050
+  - registry.cluster-b.example:50050</code></pre>
+        </div>
+
+        <div class="split-item">
+          <h3>Peer Exchange</h3>
+          <p>
+            Registries periodically gossip with each other via the
+            <code>ExchangePeers</code> RPC, sharing their list of known registries.
+            This allows the network to grow organically without a central directory.
+          </p>
+          <pre><code># Automatic peer discovery
+Registry A &lt;--gossip--&gt; Registry B
+Registry B &lt;--gossip--&gt; Registry C
+# A now knows about C</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="nodes.html">Nodes</a>
+        <a href="economics.html">Economics</a>
+        <a href="protocol.html">Protocol</a>
+        <a href="getting-started.html">Get Started</a>
+      </div>
+      <p>UNFED AI is open-source software. No single entity controls the network.</p>
+    </div>
+  </footer>
+
+  <script src="js/nav.js"></script>
+</body>
+</html>

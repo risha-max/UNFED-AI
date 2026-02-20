@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Getting Started — UNFED AI</title>
+  <meta name="description" content="Quickstart guide: split a model, start a cluster, run nodes, and open the dashboard. Local testing with Anvil and Foundry.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container">
+      <a href="index.html" class="nav-logo">
+        <img src="img/logo.svg" alt="UNFED AI" width="28" height="28">
+        UNFED AI
+      </a>
+      <button class="nav-toggle" aria-label="Menu">&#9776;</button>
+      <ul class="nav-links">
+        <li><a href="about.html">About</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="nodes.html">Nodes</a></li>
+        <li><a href="economics.html">Economics</a></li>
+        <li><a href="protocol.html">Protocol</a></li>
+        <li><a href="getting-started.html">Get Started</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Page Header -->
+  <section class="page-header">
+    <div class="container">
+      <h1>Getting <span class="accent">Started</span></h1>
+      <p>From zero to running your own UNFED AI cluster in minutes. This guide walks through local development setup.</p>
+    </div>
+  </section>
+
+  <!-- Prerequisites -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Pre<span class="accent">requisites</span></h2>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-icon">&#128013;</div>
+          <h3>Python 3.11+</h3>
+          <p>Required for all node types. Install via your system package manager or pyenv.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">&#128293;</div>
+          <h3>PyTorch 2.0+</h3>
+          <p>With CUDA support for GPU nodes. CPU works for registry, daemon, and guard nodes.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">&#129302;</div>
+          <h3>A Model</h3>
+          <p>Any HuggingFace transformer model. We recommend <code>HuggingFaceTB/SmolVLM-256M-Instruct</code> for testing.</p>
+        </div>
+      </div>
+
+      <span class="code-label" style="margin-top: 32px;">Install Python dependencies</span>
+      <pre><code>pip install torch safetensors grpcio grpcio-tools protobuf
+pip install transformers  # for model downloading
+pip install fastapi uvicorn websockets  # for web dashboard
+pip install web3  # for on-chain staking (optional)</code></pre>
+    </div>
+  </section>
+
+  <!-- Step 1: Split a Model -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Step 1: <span class="accent">Split</span> a Model</h2>
+        <p>Use <code>unfed-tools</code> to inspect and split a model into shards.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">A</div>
+          <div class="step-content">
+            <h3>Inspect the model</h3>
+            <p>See what you're working with: architecture, layer count, parameter count.</p>
+            <pre><code>python -m tools inspect /path/to/model</code></pre>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">B</div>
+          <div class="step-content">
+            <h3>Split into shards</h3>
+            <p>
+              Split the model into N text shards (and optionally a vision shard
+              for multimodal models). This creates a <code>shards/</code> directory
+              with individual weight files and a v2 manifest.
+            </p>
+            <pre><code>python -m tools split /path/to/model \
+  --output shards_smolvlm \
+  --num-text-shards 2</code></pre>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">C</div>
+          <div class="step-content">
+            <h3>Verify the split</h3>
+            <p>Confirm that the shards are valid and the manifest is correct.</p>
+            <pre><code>python -m tools verify shards_smolvlm</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Step 2: Start Registry -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Step 2: Start the <span class="accent">Registry</span></h2>
+        <p>The registry is the cluster coordinator — start it first.</p>
+      </div>
+
+      <span class="code-label">Create a cluster config</span>
+      <pre><code>{
+  "cluster_name": "my-local-cluster",
+  "operator_address": "0xOperatorAddress",
+  "default_min_stake": 100,
+  "default_slash_fraction": 0.5,
+  "default_price_per_input_token": 0.0001,
+  "default_price_per_output_token": 0.001,
+  "default_reward_scheme": "proportional"
+}</code></pre>
+
+      <span class="code-label">Start the registry</span>
+      <pre><code>python -m network.registry_server \
+  --port 50050 \
+  --cluster-config cluster_config.json</code></pre>
+
+      <div class="info-box">
+        <p>
+          <strong>Tip:</strong> The registry serves the model manifest to nodes
+          automatically. Point <code>--shards-dir</code> at the split output if
+          you want manifest auto-discovery.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Step 3: Start Daemon -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Step 3: Start the <span class="accent">Daemon</span></h2>
+        <p>The chain daemon records compute shares and produces settlement blocks.</p>
+      </div>
+
+      <pre><code>python -m network.daemon_node \
+  --port 50070 \
+  --registry localhost:50050 \
+  --db ~/.unfed/chain.db</code></pre>
+
+      <p>
+        The daemon connects to the registry, syncs share chain state, and begins
+        accepting shares from compute nodes. Settlement blocks are produced
+        approximately every 10 seconds.
+      </p>
+    </div>
+  </section>
+
+  <!-- Step 4: Start Compute Nodes -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Step 4: Start <span class="accent">Compute</span> Nodes</h2>
+        <p>One node per shard. Each loads its weights and registers with the cluster.</p>
+      </div>
+
+      <span class="code-label">Shard 0 (has embedding layer)</span>
+      <pre><code>python -m node.server \
+  --shard-index 0 \
+  --port 50051 \
+  --model-type smolvlm \
+  --shards-dir shards_smolvlm \
+  --registry localhost:50050 \
+  --eth-address 0xNodeAddress1</code></pre>
+
+      <span class="code-label">Shard 1 (has LM head)</span>
+      <pre><code>python -m node.server \
+  --shard-index 1 \
+  --port 50052 \
+  --model-type smolvlm \
+  --shards-dir shards_smolvlm \
+  --registry localhost:50050 \
+  --eth-address 0xNodeAddress2</code></pre>
+
+      <div class="info-box">
+        <p>
+          <strong>Note:</strong> If on-chain staking is enabled, each node must have
+          staked at least <code>min_stake</code> tokens before the registry will
+          accept its registration.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Step 5: Optional Components -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Step 5: <span class="accent">Optional</span> Components</h2>
+        <p>Add privacy and security layers to your cluster.</p>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <h3>MPC Pair</h3>
+          <p>Replace shard 0 with a privacy-preserving MPC pair.</p>
+          <pre><code># Start MPC Node B first
+python -m network.mpc_shard0 \
+  --role B --port 50063 \
+  --peer localhost:50061 \
+  --shards-dir shards_smolvlm
+
+# Then start MPC Node A
+python -m network.mpc_shard0 \
+  --role A --port 50061 \
+  --peer localhost:50063 \
+  --registry localhost:50050 \
+  --shards-dir shards_smolvlm \
+  --eth-address 0xMPCAddress</code></pre>
+        </div>
+
+        <div class="card">
+          <h3>Guard Node</h3>
+          <p>Hide client IPs from compute nodes.</p>
+          <pre><code>python -m network.guard_node \
+  --port 50060 \
+  --registry localhost:50050</code></pre>
+        </div>
+
+        <div class="card">
+          <h3>Verifier Node</h3>
+          <p>Spot-check computations and detect fraud.</p>
+          <pre><code>python -m network.verifier_node \
+  --registry localhost:50050 \
+  --poll-interval 5 \
+  --shards-dir shards_smolvlm</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Step 6: Dashboard -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Step 6: Open the <span class="accent">Dashboard</span></h2>
+        <p>The web UI for sending prompts and monitoring the network.</p>
+      </div>
+
+      <pre><code>python -m web.server \
+  --port 8080 \
+  --registry localhost:50050</code></pre>
+
+      <p>
+        Open <code>http://localhost:8080</code> in your browser. You can type prompts,
+        attach images (for multimodal models), and watch tokens stream in real-time.
+        The dashboard shows per-request cost based on the cluster's token pricing.
+      </p>
+    </div>
+  </section>
+
+  <!-- On-Chain Setup -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>On-Chain <span class="accent">Staking</span> Setup</h2>
+        <p>For local testing with Foundry's Anvil.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Install Foundry</h3>
+            <pre><code>curl -L https://foundry.paradigm.xyz | bash
+foundryup</code></pre>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Start Anvil (local chain)</h3>
+            <pre><code>anvil --block-time 2</code></pre>
+            <p>This starts a local Ethereum node with pre-funded accounts.</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Deploy contracts</h3>
+            <pre><code># Deploy ERC-20 token
+forge create contracts/UnfedToken.sol:UnfedToken \
+  --rpc-url http://localhost:8545 \
+  --private-key $DEPLOYER_KEY
+
+# Deploy escrow contract
+forge create contracts/UnfedEscrow.sol:UnfedEscrow \
+  --rpc-url http://localhost:8545 \
+  --private-key $DEPLOYER_KEY \
+  --constructor-args $TOKEN_ADDRESS $OPERATOR_ADDRESS</code></pre>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">4</div>
+          <div class="step-content">
+            <h3>Fund and stake nodes</h3>
+            <pre><code># Transfer tokens to a node address
+cast send $TOKEN_ADDRESS \
+  "transfer(address,uint256)" $NODE_ADDRESS 200000000000000000000 \
+  --rpc-url http://localhost:8545 --private-key $DEPLOYER_KEY
+
+# Approve escrow to spend tokens
+cast send $TOKEN_ADDRESS \
+  "approve(address,uint256)" $ESCROW_ADDRESS 200000000000000000000 \
+  --rpc-url http://localhost:8545 --private-key $NODE_KEY
+
+# Stake
+cast send $ESCROW_ADDRESS \
+  "stakeNode(uint256)" 200000000000000000000 \
+  --rpc-url http://localhost:8545 --private-key $NODE_KEY</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="info-box">
+        <p>
+          <strong>Convenience:</strong> The <code>start_smolvlm_staked.sh</code> script
+          automates the entire process: Anvil startup, contract deployment, token
+          distribution, staking, and launching all nodes. Check the repository for
+          the full script.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- What's Next -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>What's <span class="accent">Next</span></h2>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <h3>Learn the Architecture</h3>
+          <p>Understand how sharding, MPC, and onion routing work together.</p>
+          <a href="architecture.html" class="btn btn-secondary" style="margin-top: 12px;">Architecture &rarr;</a>
+        </div>
+
+        <div class="card">
+          <h3>Explore Economics</h3>
+          <p>Dive into pricing, staking, slashing, and reward schemes.</p>
+          <a href="economics.html" class="btn btn-secondary" style="margin-top: 12px;">Economics &rarr;</a>
+        </div>
+
+        <div class="card">
+          <h3>Understand the Protocol</h3>
+          <p>Share chains, verification tickets, fraud proofs, and settlements.</p>
+          <a href="protocol.html" class="btn btn-secondary" style="margin-top: 12px;">Protocol &rarr;</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="nodes.html">Nodes</a>
+        <a href="economics.html">Economics</a>
+        <a href="protocol.html">Protocol</a>
+        <a href="getting-started.html">Get Started</a>
+      </div>
+      <p>UNFED AI is open-source software. No single entity controls the network.</p>
+    </div>
+  </footer>
+
+  <script src="js/nav.js"></script>
+</body>
+</html>

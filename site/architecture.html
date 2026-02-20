@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture — UNFED AI</title>
+  <meta name="description" content="Technical architecture of UNFED AI: model sharding, MPC privacy, onion routing, and the multimodal vision pipeline.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { primaryColor: '#1c2128', primaryTextColor: '#e6edf3', lineColor: '#00d4aa', secondaryColor: '#161b22' } });</script>
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container">
+      <a href="index.html" class="nav-logo">
+        <img src="img/logo.svg" alt="UNFED AI" width="28" height="28">
+        UNFED AI
+      </a>
+      <button class="nav-toggle" aria-label="Menu">&#9776;</button>
+      <ul class="nav-links">
+        <li><a href="about.html">About</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="nodes.html">Nodes</a></li>
+        <li><a href="economics.html">Economics</a></li>
+        <li><a href="protocol.html">Protocol</a></li>
+        <li><a href="getting-started.html">Get Started</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Page Header -->
+  <section class="page-header">
+    <div class="container">
+      <h1><span class="accent">Architecture</span></h1>
+      <p>How UNFED AI splits models across nodes and protects your privacy at every step.</p>
+    </div>
+  </section>
+
+  <!-- High-level Overview -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Inference <span class="accent">Pipeline</span></h2>
+        <p>A text prompt flows through the network from client to response.</p>
+      </div>
+
+      <div class="diagram-wrap">
+        <div class="mermaid">
+graph LR
+  Client["Client"] -->|"onion-encrypted"| Guard["Guard Node"]
+  Guard -->|"peel layer 1"| MPC_A["MPC Node A"]
+  MPC_A <-->|"secret shares"| MPC_B["MPC Node B"]
+  MPC_A -->|"activations"| Shard1["Shard 1"]
+  Shard1 -->|"activations"| ShardN["Shard N"]
+  ShardN -->|"tokens"| Client
+        </div>
+        <p class="diagram-caption">Text inference: client request flows through guard, MPC pair, and compute shards.</p>
+      </div>
+
+      <div class="info-box">
+        <p>
+          <strong>Key insight:</strong> No single node in this pipeline sees both
+          the original prompt <em>and</em> the final output. The MPC pair protects
+          the embedding; subsequent shards only see intermediate hidden states.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Model Sharding -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Model <span class="accent">Sharding</span></h2>
+        <p>Transformer models are split layer-by-layer across independent nodes.</p>
+      </div>
+
+      <div class="diagram-wrap">
+        <div class="mermaid">
+graph TB
+  subgraph model ["Full Transformer Model"]
+    Embed["Embedding + Layers 0-14"] --> Mid["Layers 15-29"]
+    Mid --> Head["LM Head + Sampling"]
+  end
+  subgraph network ["UNFED Network"]
+    S0["Shard 0 (MPC Pair)"] --> S1["Shard 1 (Compute Node)"]
+  end
+  Embed -.->|"maps to"| S0
+  Mid -.->|"maps to"| S1
+        </div>
+        <p class="diagram-caption">A 30-layer model split into 2 shards, each served by a different operator.</p>
+      </div>
+
+      <p style="max-width:800px; margin:0 auto;">
+        The <code>unfed-tools split</code> command takes a HuggingFace model and produces
+        a <strong>manifest</strong> (JSON) describing the shard boundaries, plus individual
+        weight files in <code>.safetensors</code> or <code>.pt</code> format. Each shard
+        is self-contained &mdash; a node only needs its own weight file and the manifest.
+      </p>
+    </div>
+  </section>
+
+  <!-- MPC Deep-Dive -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Multi-Party <span class="accent">Computation</span></h2>
+        <p>How shard 0 protects the most sensitive step &mdash; turning words into numbers.</p>
+      </div>
+
+      <div class="split">
+        <div class="split-item">
+          <h3>The Problem</h3>
+          <p>
+            The embedding layer converts raw token IDs (your actual words) into
+            dense vectors. Whoever runs this layer can trivially reconstruct
+            your prompt. This is the most privacy-critical part of inference.
+          </p>
+        </div>
+
+        <div class="split-item">
+          <h3>The Solution</h3>
+          <p>
+            Shard 0 is served by an <strong>MPC pair</strong> &mdash; two independent
+            nodes (A and B). Token IDs are secret-shared before the embedding
+            lookup. Each node computes on its share; neither can reconstruct
+            the original tokens.
+          </p>
+        </div>
+      </div>
+
+      <div class="diagram-wrap" style="margin-top:32px;">
+        <div class="mermaid">
+sequenceDiagram
+  participant C as Client
+  participant A as MPC_Node_A
+  participant B as MPC_Node_B
+  participant S1 as Shard_1
+
+  C->>A: token_ids (encrypted)
+  A->>A: Generate random shares
+  A->>B: share_B
+  A->>A: Compute on share_A
+  B->>B: Compute on share_B
+  B->>A: partial_result_B
+  A->>A: Reconstruct hidden_states
+  A->>S1: hidden_states (activations only)
+        </div>
+        <p class="diagram-caption">MPC protocol: neither Node A nor Node B can reconstruct the original token IDs.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Onion Routing -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Onion <span class="accent">Routing</span></h2>
+        <p>Each request is encrypted in layers, one per node in the circuit.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Circuit Construction</h3>
+            <p>
+              The client discovers available nodes via the registry and builds a circuit.
+              It fetches each node's public key (X25519) and constructs an onion-encrypted
+              blob with one encryption layer per hop.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Layer Peeling</h3>
+            <p>
+              Each node decrypts its layer, reads the next-hop address, and forwards
+              the remaining encrypted blob. Nodes only know their predecessor and
+              successor &mdash; not the full circuit.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Guard Node (Optional)</h3>
+            <p>
+              An optional guard node sits between the client and the first compute
+              node. It sees the client's IP but cannot read the encrypted payload.
+              The compute nodes never learn who sent the request.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Vision Pipeline -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Multimodal <span class="accent">Vision</span> Pipeline</h2>
+        <p>How image understanding is added without breaking the privacy model.</p>
+      </div>
+
+      <div class="diagram-wrap">
+        <div class="mermaid">
+graph LR
+  Img["Image"] --> VS["Vision Shard"]
+  VS -->|"image embeddings"| MPC["MPC Pair (Shard 0)"]
+  Prompt["Text Prompt"] --> MPC
+  MPC -->|"merged activations"| S1["Text Shard 1"]
+  S1 -->|"tokens"| Client["Client"]
+        </div>
+        <p class="diagram-caption">Multimodal pipeline: vision embeddings are merged with text at shard 0.</p>
+      </div>
+
+      <p style="max-width:800px; margin:0 auto;">
+        For vision-language models (SmolVLM, Qwen2-VL), a dedicated <strong>vision shard</strong>
+        processes the image through a ViT encoder and connector. The resulting image embeddings
+        are injected at shard 0 alongside the text tokens. From there, the pipeline is identical
+        to text-only inference.
+      </p>
+    </div>
+  </section>
+
+  <!-- Manifest System -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Manifest <span class="accent">System</span></h2>
+        <p>A declarative JSON format that describes how a model is sharded.</p>
+      </div>
+
+      <pre><code>{
+  "model_id": "HuggingFaceTB/SmolVLM-256M-Instruct",
+  "format_version": 2,
+  "architecture": {
+    "text": {
+      "hidden_size": 1536,
+      "num_layers": 30,
+      "num_heads": 12,
+      "vocab_size": 49152,
+      ...
+    }
+  },
+  "text_shards": [
+    { "shard_index": 0, "layer_start": 0, "layer_end": 15,
+      "has_embedding": true, "file": "text_shard_0.pt" },
+    { "shard_index": 1, "layer_start": 15, "layer_end": 30,
+      "has_lm_head": true, "file": "text_shard_1.pt" }
+  ],
+  "vision_shards": [
+    { "shard_index": 0, "layer_start": 0, "layer_end": 12,
+      "has_embeddings": true, "has_connector": true,
+      "file": "vision_shard_0.pt" }
+  ]
+}</code></pre>
+
+      <p style="max-width:800px; margin:0 auto;">
+        The v2 manifest format includes full architecture config, enabling the
+        <strong>generic runtime</strong> &mdash; nodes can serve any transformer
+        model without model-specific code.
+        The <code>unfed-tools</code> CLI handles inspection, splitting, verification,
+        and publishing of manifests.
+      </p>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="nodes.html">Nodes</a>
+        <a href="economics.html">Economics</a>
+        <a href="protocol.html">Protocol</a>
+        <a href="getting-started.html">Get Started</a>
+      </div>
+      <p>UNFED AI is open-source software. No single entity controls the network.</p>
+    </div>
+  </footer>
+
+  <script src="js/nav.js"></script>
+</body>
+</html>

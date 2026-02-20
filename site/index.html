@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UNFED AI — Decentralized, Privacy-Preserving AI Inference</title>
+  <meta name="description" content="UNFED AI is a decentralized network for private AI inference. No single node sees your full input. Powered by MPC, model sharding, and on-chain staking.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container">
+      <a href="index.html" class="nav-logo">
+        <img src="img/logo.svg" alt="UNFED AI" width="28" height="28">
+        UNFED AI
+      </a>
+      <button class="nav-toggle" aria-label="Menu">&#9776;</button>
+      <ul class="nav-links">
+        <li><a href="about.html">About</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="nodes.html">Nodes</a></li>
+        <li><a href="economics.html">Economics</a></li>
+        <li><a href="protocol.html">Protocol</a></li>
+        <li><a href="getting-started.html">Get Started</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <h1>Decentralized,<br><span class="accent">Privacy-Preserving</span><br>AI Inference</h1>
+      <p class="subtitle">
+        Run large language models across a network of independent nodes.
+        No single node sees your full input. Cryptographic protocols protect
+        your prompts. On-chain staking keeps nodes honest.
+      </p>
+      <div class="hero-cta">
+        <a href="getting-started.html" class="btn btn-primary">Run a Node</a>
+        <a href="about.html" class="btn btn-secondary">Learn More</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Feature Cards -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Why <span class="accent">UNFED AI</span></h2>
+        <p>Three pillars that make decentralized inference private, secure, and fair.</p>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-icon">&#128274;</div>
+          <h3>Privacy via MPC</h3>
+          <p>
+            Your prompt is secret-shared between two independent MPC nodes
+            at the embedding layer. No single node ever sees the raw text
+            you typed. Inference happens on encrypted shares.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">&#127760;</div>
+          <h3>Decentralized Sharding</h3>
+          <p>
+            Transformer models are split into shards served by independent operators.
+            Each node holds only a slice of the model &mdash; no single entity controls
+            the full pipeline.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-icon">&#9939;</div>
+          <h3>Trustless Economics</h3>
+          <p>
+            Nodes stake tokens on-chain via an ERC-20 escrow contract. Cheating nodes
+            are detected by verifiers and slashed automatically. Honest work is rewarded
+            proportionally through a P2Pool-style share chain.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>How It <span class="accent">Works</span></h2>
+        <p>From prompt to response in four steps, across a privacy-preserving pipeline.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Client sends a prompt</h3>
+            <p>
+              The client encrypts the request using onion routing layers &mdash; one layer
+              per node in the circuit. An optional guard node hides the client's IP address.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>MPC protects the embedding</h3>
+            <p>
+              Shard 0 runs as an MPC pair &mdash; two nodes that perform the embedding
+              and first transformer layers on secret-shared inputs. Neither node
+              can reconstruct the original tokens.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Compute shards process layers</h3>
+            <p>
+              Activations flow through the remaining shards (each run by an independent
+              operator). Each shard processes its transformer layers and forwards the
+              hidden states to the next node.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">4</div>
+          <div class="step-content">
+            <h3>Response streamed back</h3>
+            <p>
+              The last shard samples tokens from the LM head and streams them back
+              through the circuit. Compute shares are recorded on the share chain
+              for settlement and payment.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cluster Marketplace -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>The Cluster <span class="accent">Marketplace</span></h2>
+        <p>
+          Like Monero mining pools, UNFED AI registries compete in a free market.
+        </p>
+      </div>
+      <div class="split">
+        <div class="split-item">
+          <h3>Operators create clusters</h3>
+          <p>
+            Any operator can deploy a registry, set economic rules (pricing, staking
+            minimums, slash fractions), and publish model manifests. Each cluster
+            is an independent business.
+          </p>
+        </div>
+        <div class="split-item">
+          <h3>Nodes and clients choose freely</h3>
+          <p>
+            Nodes join whichever cluster offers the best deal. Clients discover clusters
+            via seed lists and peer-exchange gossip, then pick based on price, latency,
+            and model availability.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="nodes.html">Nodes</a>
+        <a href="economics.html">Economics</a>
+        <a href="protocol.html">Protocol</a>
+        <a href="getting-started.html">Get Started</a>
+      </div>
+      <p>UNFED AI is open-source software. No single entity controls the network.</p>
+    </div>
+  </footer>
+
+  <script src="js/nav.js"></script>
+</body>
+</html>

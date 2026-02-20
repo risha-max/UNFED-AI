@@ -1,0 +1,48 @@
+{
+  "_comment": "UNFED AI — Compute Node Config. Copy to compute_config.json and adjust.",
+
+  "role": "compute",
+  "port": 50051,
+  "host": "[::]",
+  "advertise": "localhost:50051",
+  "registry": "localhost:50050",
+
+  "shard_index": 0,
+  "model_name": "Qwen/Qwen2.5-0.5B",
+  "model_type": "qwen2",
+  "shards_dir": "shards",
+  "manifest_path": "shards/manifest.json",
+  "max_memory_gb": 4.0,
+
+  "session_timeout_seconds": 300,
+  "eos_token_id": 151643,
+
+  "kv_quantize": "none",
+  "kv_offload_enabled": false,
+  "kv_offload_after_seconds": 30.0,
+  "max_kv_memory_gb": 0,
+  "prefill_chunk_size": 0,
+
+  "verification_sampling_rate": 0.05,
+  "ticket_submit_interval_seconds": 10,
+
+  "serve_shards_enabled": true,
+  "max_upload_rate_mbps": 0,
+  "max_concurrent_transfers": 0,
+  "inference_priority": true,
+
+  "shard_transfer_timeout": 600.0,
+  "shard_chunk_size": 1048576,
+
+  "grpc_max_workers": 4,
+  "grpc_max_message_mb": 256,
+  "heartbeat_interval_seconds": 10,
+
+  "connect_timeout": 10.0,
+  "forward_timeout": 60.0,
+  "max_retries": 3,
+  "retry_backoff_base": 1.0,
+  "retry_backoff_max": 10.0,
+  "keepalive_time_ms": 30000,
+  "keepalive_timeout_ms": 10000
+}

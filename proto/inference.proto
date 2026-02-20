@@ -1,0 +1,395 @@
+syntax = "proto3";
+
+package unfed;
+
+import "registry.proto";
+
+// Service exposed by each inference node in the pipeline.
+service InferenceNode {
+  // Forward pass: receives an activation tensor (or token IDs for the first node),
+  // runs through this node's layers, and returns the result.
+  // For intermediate nodes: returns the activation tensor for the next node.
+  // For the last node: returns the generated token.
+  rpc Forward(ForwardRequest) returns (ForwardResponse);
+
+  // Transfer a shard file to a requesting node (BitTorrent-style P2P weight distribution).
+  rpc GetShard(GetShardRequest) returns (stream ShardChunk);
+
+  // Commit: compute forward pass and return only the output hash (for voting).
+  // The node holds the output in memory for a follow-up Forward call.
+  rpc Commit(CommitRequest) returns (CommitResponse);
+
+  // Share-chain gossip: push a new block to this peer (daemon-to-daemon).
+  rpc GossipBlock(BlockMessage) returns (GossipResponse);
+
+  // Share-chain sync: request blocks from a given height onward.
+  rpc GetBlocks(GetBlocksRequest) returns (GetBlocksResponse);
+
+  // Submit compute shares to the daemon after each forward pass.
+  // Compute nodes call this instead of managing their own chain.
+  rpc SubmitShares(SubmitSharesRequest) returns (SubmitSharesResponse);
+
+  // Subscribe to new blocks in real-time (server-stream, light-wallet mode).
+  // Returns historical blocks from from_height, then keeps streaming new ones.
+  rpc SubscribeBlocks(SubscribeBlocksRequest) returns (stream BlockMessage);
+
+  // Get the current fee estimate from the daemon's fee oracle.
+  rpc GetFeeEstimate(FeeEstimateRequest) returns (FeeEstimateResponse);
+
+  // Capacity verification: registry challenges node to prove reported resources.
+  rpc VerifyCapacity(VerifyCapacityRequest) returns (VerifyCapacityResponse);
+}
+
+// Guard relay service — lightweight relay between client and compute pipeline.
+// The guard sees the client's IP but cannot read the encrypted request payload.
+service GuardRelay {
+  // Relay an encrypted request to a compute node and return the encrypted response.
+  rpc Relay(RelayRequest) returns (RelayResponse);
+}
+
+message ForwardRequest {
+  // Unique session identifier — ties KV cache state across token steps.
+  string session_id = 1;
+
+  // Serialized activation tensor from the previous node.
+  // Empty for the first node (which uses token_ids instead).
+  bytes activation_data = 2;
+
+  // Tensor shape dimensions, needed to reconstruct the tensor.
+  repeated int32 tensor_shape = 3;
+
+  // Input token IDs — only used by the first node to embed the prompt.
+  repeated int32 token_ids = 4;
+
+  // If true, this is the first call for this session (prefill).
+  // If false, this is a decode step (single token).
+  bool is_prefill = 5;
+
+  // Dynamic circuit routing: ordered list of remaining node addresses.
+  // Each node pops the first entry and forwards to it.
+  // Empty list = this is the last node (return token to caller).
+  // When onion routing is active, this field is ignored — routing comes from the onion.
+  repeated string remaining_circuit = 6;
+
+  // Onion routing: encrypted blob containing the circuit.
+  // Each node peels one layer to discover its next hop.
+  bytes onion_blob = 7;
+
+  // Ephemeral public key for this onion layer (32 bytes).
+  // Used with the node's private key to derive the decryption key.
+  bytes onion_ephemeral_key = 8;
+
+  // Computational randomness routing: when true, each node selects
+  // the next hop based on hash(activation_output) instead of using
+  // the circuit embedded in the request.
+  bool use_random_routing = 9;
+
+  // Response key material: client sends per-node keys so each node can
+  // encrypt the return path. Format: list of 32-byte AES keys, one per hop.
+  repeated bytes response_keys = 10;
+
+  // Prefix caching: reuse KV cache from a previous session.
+  // If set, the node clones the first prefix_length tokens of KV cache
+  // from the source session, avoiding redundant prefill computation.
+  string prefix_session_id = 11;
+  int32 prefix_length = 12;
+
+  // --- Vision / multimodal fields ---
+
+  // Preprocessed image pixel data (normalized float tensor, serialized).
+  // Used by the first vision shard to run patch embedding.
+  bytes image_pixels = 13;
+
+  // Image grid dimensions: [temporal, height_patches, width_patches].
+  // Needed by ViT for 2D positional embeddings and PatchMerger reshape.
+  repeated int32 image_grid_thw = 14;
+
+  // Vision pipeline output: image embeddings from the vision encoder.
+  // Sent to the first text shard for merging into the text sequence.
+  bytes image_embeddings = 15;
+  repeated int32 image_embeddings_shape = 16;
+
+  // Number of image placeholder tokens in the text token_ids sequence.
+  // Used by the first text shard to verify the merge dimensions match.
+  int32 num_image_tokens = 17;
+
+  // 3D position IDs for M-RoPE (multimodal rotary position embeddings).
+  // Shape: [3, seq_len] — rows are (temporal, height, width).
+  // Text positions use the same value for all 3 dims; vision positions
+  // come from the image grid.
+  bytes mrope_position_ids = 18;
+  repeated int32 mrope_position_shape = 19;
+
+  // If true, activation_data is gzip-compressed (application-level).
+  bool compressed = 20;
+
+  // --- Fee fields ---
+
+  // Client's max fee per token (set by client from fee oracle estimate).
+  double fee_per_token = 21;
+
+  // Priority tip per token (optional, goes to first-responding node).
+  double tip = 22;
+
+  // Wire dtype for activation serialization: "float16" halves transfer size.
+  // Empty or "float32" = default full precision.
+  string wire_dtype = 23;
+}
+
+message ForwardResponse {
+  // Serialized activation tensor for the next node.
+  // Empty if this is the last node (which returns a token instead).
+  bytes activation_data = 1;
+
+  // Tensor shape dimensions.
+  repeated int32 tensor_shape = 2;
+
+  // Generated token ID — only set by the last node.
+  int32 token_id = 3;
+
+  // True if the last node produced a token (to distinguish token_id=0 from "no token").
+  bool has_token = 4;
+
+  // True if the generated token is EOS.
+  bool is_eos = 5;
+
+  // Commitment hash for computational randomness routing.
+  // Each intermediate node includes hash(activation) as a commitment
+  // that the receiver can verify.
+  string activation_commitment = 6;
+
+  // Encrypted response: layered encryption for return-path privacy.
+  // Each node wraps the response in an encryption layer.
+  // Only the client can decrypt all layers to read the token.
+  bytes encrypted_response = 7;
+
+  // If true, activation_data is gzip-compressed (application-level).
+  bool compressed = 8;
+}
+
+// --- Shard Transfer (P2P weight distribution) ---
+
+message GetShardRequest {
+  string model_id = 1;
+  int32 shard_index = 2;
+  int64 offset = 3;             // Byte offset to start from (0 = beginning)
+  int64 length = 4;             // Bytes to read (0 = entire file)
+}
+
+message ShardChunk {
+  bytes data = 1;                // Chunk of shard file data
+  int64 offset = 2;             // Byte offset in the full file
+  int64 total_size = 3;         // Total file size in bytes
+  string shard_hash = 4;        // SHA256 hash of the complete shard (sent in first chunk)
+  string chunk_hash = 5;        // SHA256 hash of this individual chunk (for piece-level verification)
+}
+
+// --- Guard Relay ---
+
+message RelayRequest {
+  // Encrypted payload — the guard cannot read this.
+  // Contains a serialized ForwardRequest encrypted for Node 0's key.
+  bytes encrypted_payload = 1;
+
+  // Target compute node address (the guard forwards to this address).
+  string target_address = 2;
+
+  // Ephemeral public key for the guard's onion layer.
+  bytes guard_ephemeral_key = 3;
+}
+
+message RelayResponse {
+  // Encrypted response from the compute pipeline.
+  // The guard cannot read this — it's encrypted for the client.
+  bytes encrypted_payload = 1;
+}
+
+// --- Voting (Commit-then-Reveal) ---
+
+message CommitRequest {
+  string session_id = 1;
+  bytes activation_data = 2;     // Input activations
+  repeated int32 tensor_shape = 3;
+  repeated int32 token_ids = 4;  // For shard 0 (embedding)
+  bool is_prefill = 5;
+}
+
+message CommitResponse {
+  // SHA256 hash of the output (commitment).
+  // The node does NOT send the actual output — only the hash.
+  string output_hash = 1;
+
+  // Unique ID for this commitment, used to retrieve the cached output later.
+  string commit_id = 2;
+
+  // Token (only for last shard).
+  int32 token_id = 3;
+  bool has_token = 4;
+}
+
+// --- MPC (2-party Beaver-triple-based secure computation for shard 0) ---
+
+// Service for inter-MPC-node communication (Node A <-> Node B).
+service MPCPeer {
+  // Send an embedding share and Beaver triple shares to the peer at the
+  // start of a session's MPC computation.
+  rpc SendShare(MPCSendShareRequest) returns (MPCSendShareResponse);
+
+  // Exchange epsilon/delta values during a secure multiplication.
+  // Both parties call this simultaneously for each multiply operation.
+  rpc Exchange(MPCExchangeRequest) returns (MPCExchangeResponse);
+
+  // Signal peer to return its final share after layer 0 is complete.
+  rpc CollectShare(MPCCollectRequest) returns (MPCCollectResponse);
+
+  // OT-based Beaver triple generation: base OT setup round.
+  rpc OTBaseSetup(OTBaseSetupRequest) returns (OTBaseSetupResponse);
+
+  // OT-based Beaver triple generation: extension round.
+  rpc OTExtend(OTExtendRequest) returns (OTExtendResponse);
+}
+
+// --- OT (Oblivious Transfer for Beaver triple generation) ---
+
+message OTBaseSetupRequest {
+  string session_id = 1;
+  // Receiver's public key pairs for κ base OTs (2 * κ * 32 bytes)
+  repeated bytes pk_pairs = 2;  // alternating pk_0, pk_1 for each base OT
+}
+
+message OTBaseSetupResponse {
+  // Sender's encrypted responses for κ base OTs
+  repeated bytes ciphertexts = 1;  // alternating ct_0, ct_1 for each base OT
+}
+
+message OTExtendRequest {
+  string session_id = 1;
+  // u columns for the IKNP extension (κ columns of ceil(n/8) bytes each)
+  repeated bytes u_columns = 2;
+  int32 n_triples = 3;           // Number of triples requested
+  repeated int32 shape = 4;      // Tensor shape for triples
+}
+
+message OTExtendResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message MPCSendShareRequest {
+  string session_id = 1;
+  // The peer's embedding share (party_1's share)
+  bytes share_data = 2;
+  repeated int32 share_shape = 3;
+  // Beaver triple shares for the peer (all triples for the session, concatenated)
+  // Each triple is serialized as (a, b, c) bytes with shape metadata.
+  repeated MPCTriplePayload triples = 4;
+  // Model architecture info the peer needs
+  int32 num_layers = 5;
+  int32 hidden_size = 6;
+  int32 seq_len = 7;
+}
+
+message MPCTriplePayload {
+  string op_id = 1;             // Identifies which operation this triple is for
+  bytes a_data = 2;
+  bytes b_data = 3;
+  bytes c_data = 4;
+  repeated int32 shape = 5;     // Shape of a tensor
+  repeated int32 b_shape = 6;   // Shape of b tensor (if different from a, e.g. matmul)
+  repeated int32 c_shape = 7;   // Shape of c tensor (if different from a, e.g. matmul)
+}
+
+message MPCSendShareResponse {
+  bool accepted = 1;
+  string error = 2;
+}
+
+message MPCExchangeRequest {
+  string session_id = 1;
+  string op_id = 2;             // Unique operation identifier within the session
+  bytes epsilon_data = 3;       // This party's epsilon share (x_i - a_i)
+  bytes delta_data = 4;         // This party's delta share (y_i - b_i)
+  repeated int32 shape = 5;     // Shape of epsilon tensor
+  repeated int32 delta_shape = 6; // Shape of delta tensor (if different from epsilon)
+}
+
+message MPCExchangeResponse {
+  bytes epsilon_data = 1;       // Peer's epsilon share
+  bytes delta_data = 2;         // Peer's delta share
+  repeated int32 shape = 3;     // Shape of epsilon tensor
+  repeated int32 delta_shape = 4; // Shape of delta tensor (if different from epsilon)
+}
+
+message MPCCollectRequest {
+  string session_id = 1;
+}
+
+message MPCCollectResponse {
+  bytes share_data = 1;         // Peer's final share of layer 0 output
+  repeated int32 share_shape = 2;
+}
+
+// --- Distributed Share-Chain (P2P mini-blockchain) ---
+
+message ShareProto {
+  string node_id = 1;
+  int32 shard_index = 2;
+  string session_id = 3;
+  string activation_hash = 4;
+  int32 tokens_processed = 5;
+  double timestamp = 6;
+  double share_weight = 7;            // 1.0 for compute/MPC, GUARD_FEE_RATIO for guard
+}
+
+message BlockMessage {
+  int32 index = 1;                    // Block height
+  string previous_hash = 2;          // Hash of the previous block
+  repeated ShareProto shares = 3;    // Compute shares in this block
+  double timestamp = 4;
+  string block_hash = 5;             // SHA256 hash of block contents
+  string proposer_id = 6;            // Node ID of the block proposer
+}
+
+message GossipResponse {
+  bool accepted = 1;                  // True if the block was accepted
+  string reason = 2;                  // Rejection reason (if any)
+  int32 current_height = 3;          // This peer's current chain height
+}
+
+message GetBlocksRequest {
+  int32 from_height = 1;             // Request blocks starting from this height
+}
+
+message GetBlocksResponse {
+  repeated BlockMessage blocks = 1;   // Blocks from from_height onward
+  int32 chain_height = 2;            // Sender's current chain height
+}
+
+// --- Daemon RPCs (compute nodes → daemon) ---
+
+message SubmitSharesRequest {
+  repeated ShareProto shares = 1;     // Compute shares to submit
+  string submitter_id = 2;           // Node ID of the submitting compute node
+}
+
+message SubmitSharesResponse {
+  int32 accepted = 1;                 // Number of shares accepted
+  int32 pending_pool_size = 2;       // Current size of daemon's pending pool
+}
+
+message SubscribeBlocksRequest {
+  int32 from_height = 1;             // Start streaming from this height (0 = all)
+}
+
+// --- Fee Oracle (daemon serves this) ---
+
+message FeeEstimateRequest {
+  int32 estimated_tokens = 1;         // Expected tokens to generate
+}
+
+message FeeEstimateResponse {
+  double base_fee = 1;               // Current base fee per token
+  double utilization = 2;            // Network utilization (0.0-1.0+)
+  double estimated_cost = 3;         // base_fee * estimated_tokens
+  double suggested_tip = 4;          // Suggested tip for priority (0 if idle)
+}

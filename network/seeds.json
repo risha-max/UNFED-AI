@@ -1,0 +1,6 @@
+{
+  "registries": [
+    "localhost:50050"
+  ],
+  "description": "Seed registries for bootstrapping. In production, these would be public DNS-resolvable addresses (e.g. registry1.unfed.ai:50050). The client tries each in order until one responds."
+}

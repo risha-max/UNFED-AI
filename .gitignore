@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+*.env
+deployed.env
+contracts/deployed.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model weights (large files)
+*.safetensors
+*.bin
+*.pt
+*.onnx
+
+# Foundry
+contracts/cache/
+contracts/out/
+
+# Shard directories (model weights)
+shards/
+shards_*/
+model_cache/
+
+# Benchmark/temp output
+model-search.json
+_baseline_override.py
+
+# Misc
+node_modules/
