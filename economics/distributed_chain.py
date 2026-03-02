@@ -57,6 +57,12 @@ def share_to_proto(share: ComputeShare) -> inference_pb2.ShareProto:
         tokens_processed=share.tokens_processed,
         timestamp=share.timestamp,
         share_weight=share.share_weight,
+        session_nonce=share.session_nonce,
+        step_index=share.step_index,
+        timestamp_ms=share.timestamp_ms,
+        signature=share.signature,
+        payload_hash_version=share.payload_hash_version,
+        validated=share.validated,
     )
 
 
@@ -70,6 +76,12 @@ def proto_to_share(proto: inference_pb2.ShareProto) -> ComputeShare:
         tokens_processed=proto.tokens_processed,
         timestamp=proto.timestamp,
         share_weight=proto.share_weight if proto.share_weight > 0 else 1.0,
+        session_nonce=proto.session_nonce,
+        step_index=proto.step_index,
+        timestamp_ms=proto.timestamp_ms,
+        signature=bytes(proto.signature),
+        payload_hash_version=proto.payload_hash_version or "v1",
+        validated=bool(proto.validated),
     )
 
 

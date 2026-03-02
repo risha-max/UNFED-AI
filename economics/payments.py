@@ -59,6 +59,10 @@ class Settlement:
     challenged: bool = False
     finalized: bool = False
     total_payout: float = 0.0
+    daemon_recipient: str = ""
+    verifier_recipient: str = ""
+    daemon_fee_bps: int = 0
+    verifier_fee_bps: int = 0
 
 
 # --- Stake Manager ---
@@ -208,6 +212,10 @@ class PaymentContract:
         self._escrow_balance: float = 0.0
         self._settlements: list[Settlement] = []
         self._lock = threading.Lock()
+        self._default_daemon_recipient: str = ""
+        self._default_verifier_recipient: str = ""
+        self._default_daemon_fee_bps: int = 0
+        self._default_verifier_fee_bps: int = 0
 
         if self._onchain_escrow:
             print("[PaymentContract] On-chain escrow attached — "
@@ -260,7 +268,15 @@ class PaymentContract:
             return self._fee_oracle.get_base_fee()
         return self.price_per_share
 
-    def post_settlement(self, summary: SettlementSummary) -> Settlement:
+    def post_settlement(
+        self,
+        summary: SettlementSummary,
+        *,
+        daemon_recipient: str | None = None,
+        verifier_recipient: str | None = None,
+        daemon_fee_bps: int | None = None,
+        verifier_fee_bps: int | None = None,
+    ) -> Settlement:
         """
         Post a settlement from the share-chain.
 
@@ -286,6 +302,22 @@ class PaymentContract:
             posted_at=now,
             challenge_deadline=now + self.challenge_window,
             total_payout=total_payout,
+            daemon_recipient=(
+                self._default_daemon_recipient
+                if daemon_recipient is None else (daemon_recipient or "")
+            ),
+            verifier_recipient=(
+                self._default_verifier_recipient
+                if verifier_recipient is None else (verifier_recipient or "")
+            ),
+            daemon_fee_bps=(
+                self._default_daemon_fee_bps
+                if daemon_fee_bps is None else int(max(0, daemon_fee_bps))
+            ),
+            verifier_fee_bps=(
+                self._default_verifier_fee_bps
+                if verifier_fee_bps is None else int(max(0, verifier_fee_bps))
+            ),
         )
 
         with self._lock:
@@ -297,6 +329,65 @@ class PaymentContract:
               f"challenge window={self.challenge_window}s")
 
         return settlement
+
+    def set_infra_policy(
+        self,
+        *,
+        daemon_recipient: str = "",
+        verifier_recipient: str = "",
+        daemon_fee_bps: int = 0,
+        verifier_fee_bps: int = 0,
+    ) -> None:
+        """Set default infra payout policy used for new settlements."""
+        self._default_daemon_recipient = daemon_recipient or ""
+        self._default_verifier_recipient = verifier_recipient or ""
+        self._default_daemon_fee_bps = int(max(0, daemon_fee_bps))
+        self._default_verifier_fee_bps = int(max(0, verifier_fee_bps))
+
+    def _settlement_payout_split(self, settlement: Settlement) -> dict[str, float]:
+        """Compute payout map for compute nodes + infra recipients."""
+        total_revenue = settlement.total_payout
+        daemon_fee_bps = int(max(0, settlement.daemon_fee_bps))
+        verifier_fee_bps = int(max(0, settlement.verifier_fee_bps))
+        max_fee_bps = min(9999, daemon_fee_bps + verifier_fee_bps)
+        if daemon_fee_bps + verifier_fee_bps != max_fee_bps:
+            scale = max_fee_bps / max(1, daemon_fee_bps + verifier_fee_bps)
+            daemon_fee_bps = int(daemon_fee_bps * scale)
+            verifier_fee_bps = int(verifier_fee_bps * scale)
+        daemon_cut = total_revenue * (daemon_fee_bps / 10000.0)
+        verifier_cut = total_revenue * (verifier_fee_bps / 10000.0)
+        if not settlement.daemon_recipient:
+            daemon_cut = 0.0
+        if not settlement.verifier_recipient:
+            verifier_cut = 0.0
+        node_pool = max(0.0, total_revenue - daemon_cut - verifier_cut)
+
+        payouts: dict[str, float] = {}
+        total_shares = settlement.summary.total_shares
+        for node_id, weighted_shares in settlement.summary.node_shares.items():
+            payout = 0.0
+            if total_shares > 0:
+                payout = node_pool * (weighted_shares / total_shares)
+            if payout > 0:
+                payouts[node_id] = payouts.get(node_id, 0.0) + payout
+
+        if daemon_cut > 0 and settlement.daemon_recipient:
+            payouts[settlement.daemon_recipient] = (
+                payouts.get(settlement.daemon_recipient, 0.0) + daemon_cut
+            )
+        if verifier_cut > 0 and settlement.verifier_recipient:
+            payouts[settlement.verifier_recipient] = (
+                payouts.get(settlement.verifier_recipient, 0.0) + verifier_cut
+            )
+        return payouts
+
+    def settlement_payout_split(self, settlement_hash: str) -> dict[str, float]:
+        """Get computed payout split for a posted settlement hash."""
+        with self._lock:
+            for settlement in self._settlements:
+                if settlement.settlement_hash == settlement_hash:
+                    return self._settlement_payout_split(settlement)
+        return {}
 
     def challenge_settlement(self, settlement_hash: str,
                              fraud_node_id: str) -> bool:
@@ -341,15 +432,8 @@ class PaymentContract:
                 if now < s.challenge_deadline:
                     continue
 
-                total_revenue = s.total_payout
-                total_shares = s.summary.total_shares
-
-                for node_id, weighted_shares in s.summary.node_shares.items():
-                    if total_shares > 0:
-                        proportion = weighted_shares / total_shares
-                        payout = total_revenue * proportion
-                    else:
-                        payout = 0.0
+                payouts = self._settlement_payout_split(s)
+                for node_id, payout in payouts.items():
                     if payout > 0 and payout <= self._escrow_balance:
                         self._escrow_balance -= payout
                         self.stakes.credit_earnings(node_id, payout)
@@ -358,9 +442,9 @@ class PaymentContract:
                 finalized += 1
 
                 print(f"[Contract] Settlement finalized: "
-                      f"revenue={total_revenue:.6f}, "
-                      f"{total_shares:.2f} shares, "
-                      f"{len(s.summary.node_shares)} nodes paid")
+                      f"revenue={s.total_payout:.6f}, "
+                      f"{s.summary.total_shares:.2f} shares, "
+                      f"{len(payouts)} recipients paid")
 
         return finalized
 
@@ -402,9 +486,9 @@ class SettlementProcessor:
         self._processed_count = 0
         self._running = False
 
-    def process_settlement(self, summary: SettlementSummary):
+    def process_settlement(self, summary: SettlementSummary, **kwargs):
         """Process a single settlement."""
-        self.contract.post_settlement(summary)
+        self.contract.post_settlement(summary, **kwargs)
         self._processed_count += 1
 
     def run_finalization(self) -> int:

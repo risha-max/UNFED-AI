@@ -21,6 +21,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import config
 import registry_pb2
 import registry_pb2_grpc
+from network.share_auth import (
+    generate_signing_keypair,
+    key_file_paths,
+    public_key_from_private,
+    registration_pop_payload,
+    sign_bytes,
+)
 
 
 class RegistryClient:
@@ -35,7 +42,9 @@ class RegistryClient:
                  shard_index: int, layer_start: int, layer_end: int,
                  has_embedding: bool = False, has_lm_head: bool = False,
                  public_key: bytes = b"",
-                 node_type: str = "compute") -> bool:
+                 node_type: str = "compute",
+                 share_signing_public_key: bytes = b"",
+                 share_signing_pop: bytes = b"") -> bool:
         """Register a node with the registry."""
         try:
             response = self._stub.Register(registry_pb2.RegisterRequest(
@@ -49,6 +58,8 @@ class RegistryClient:
                 has_lm_head=has_lm_head,
                 public_key=public_key,
                 node_type=node_type,
+                share_signing_public_key=share_signing_public_key,
+                share_signing_pop=share_signing_pop,
             ))
             return response.success
         except grpc.RpcError as e:
@@ -94,6 +105,42 @@ class RegistryClient:
             ))
         except grpc.RpcError as e:
             print(f"[Discovery] Failed to get pool health: {e.details()}")
+            return None
+
+    def register_verifier(self, verifier_id: str, address: str = ""):
+        try:
+            return self._stub.RegisterVerifier(
+                registry_pb2.RegisterVerifierRequest(
+                    verifier_id=verifier_id,
+                    address=address,
+                )
+            )
+        except grpc.RpcError as e:
+            print(f"[Discovery] Failed to register verifier: {e.details()}")
+            return None
+
+    def verifier_heartbeat(self, verifier_id: str):
+        try:
+            return self._stub.VerifierHeartbeat(
+                registry_pb2.VerifierHeartbeatRequest(verifier_id=verifier_id)
+            )
+        except grpc.RpcError:
+            return None
+
+    def get_verifier_config(self, verifier_id: str = ""):
+        try:
+            return self._stub.GetVerifierConfig(
+                registry_pb2.GetVerifierConfigRequest(verifier_id=verifier_id)
+            )
+        except grpc.RpcError as e:
+            print(f"[Discovery] Failed to get verifier config: {e.details()}")
+            return None
+
+    def get_verifier_health(self):
+        try:
+            return self._stub.GetVerifierHealth(registry_pb2.GetVerifierHealthRequest())
+        except grpc.RpcError as e:
+            print(f"[Discovery] Failed to get verifier health: {e.details()}")
             return None
 
     def discover_compute(self, model_id: str = "") -> list:
@@ -441,6 +488,12 @@ class RegistryPool:
             f"get_pool_health({model_id})",
         )
 
+    def get_verifier_health(self):
+        return self._try_each(
+            lambda c: c.get_verifier_health(),
+            "get_verifier_health",
+        )
+
     def find_healthy_registry(self) -> str | None:
         """Ping registries and return the first responsive one."""
         for addr in self._addresses:
@@ -615,6 +668,10 @@ class NodeRegistration:
         from network.onion import generate_keypair, public_key_to_bytes
         self.private_key, self.public_key = generate_keypair()
         self.public_key_bytes = public_key_to_bytes(self.public_key)
+        self.share_signing_private_key = self._load_or_create_share_signing_key()
+        self.share_signing_public_key = public_key_from_private(
+            self.share_signing_private_key
+        )
 
         self._client = RegistryClient(registry_address)
         self._heartbeat_thread = None
@@ -622,6 +679,14 @@ class NodeRegistration:
 
     def start(self) -> bool:
         """Register with the registry and start heartbeating."""
+        pop_payload = registration_pop_payload(
+            node_id=self.node_id,
+            address=self.address,
+            model_id=self.model_id,
+            shard_index=self.shard_index,
+            node_type=self.node_type,
+        )
+        share_signing_pop = sign_bytes(self.share_signing_private_key, pop_payload)
         success = self._client.register(
             node_id=self.node_id,
             address=self.address,
@@ -633,6 +698,8 @@ class NodeRegistration:
             has_lm_head=self.has_lm_head,
             public_key=self.public_key_bytes,
             node_type=self.node_type,
+            share_signing_public_key=self.share_signing_public_key,
+            share_signing_pop=share_signing_pop,
         )
 
         if success:
@@ -666,6 +733,17 @@ class NodeRegistration:
                         has_lm_head=self.has_lm_head,
                         public_key=self.public_key_bytes,
                         node_type=self.node_type,
+                        share_signing_public_key=self.share_signing_public_key,
+                        share_signing_pop=sign_bytes(
+                            self.share_signing_private_key,
+                            registration_pop_payload(
+                                node_id=self.node_id,
+                                address=self.address,
+                                model_id=self.model_id,
+                                shard_index=self.shard_index,
+                                node_type=self.node_type,
+                            ),
+                        ),
                     )
 
     def stop(self):
@@ -677,3 +755,22 @@ class NodeRegistration:
     @property
     def short_id(self) -> str:
         return self.node_id[:8]
+
+    def _load_or_create_share_signing_key(self) -> bytes:
+        priv_path, pub_path = key_file_paths(self.node_id)
+        os.makedirs(os.path.dirname(priv_path), exist_ok=True)
+        if os.path.exists(priv_path):
+            with open(priv_path, "rb") as f:
+                private_bytes = f.read()
+            if len(private_bytes) == 32:
+                return private_bytes
+        private_bytes, public_bytes = generate_signing_keypair()
+        with open(priv_path, "wb") as f:
+            f.write(private_bytes)
+        with open(pub_path, "wb") as f:
+            f.write(public_bytes)
+        try:
+            os.chmod(priv_path, 0o600)
+        except OSError:
+            pass
+        return private_bytes

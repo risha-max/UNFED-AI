@@ -19,6 +19,22 @@ def resolve_mpc_required_flag() -> bool:
     return True
 
 
+def resolve_verifier_required_flag() -> bool:
+    """Default true unless UNFED_REQUIRE_VERIFIER is explicitly false-like."""
+    raw = os.environ.get("UNFED_REQUIRE_VERIFIER", "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def resolve_daemon_required_flag() -> bool:
+    """Default true unless UNFED_REQUIRE_DAEMON is explicitly false-like."""
+    raw = os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class Coverage:
     covered_shards: int
@@ -39,6 +55,12 @@ class AdmissionResult:
     mpc_available: bool
     text: Coverage
     vision: Coverage
+    verifier_required: bool = True
+    healthy_verifier_count: int = 0
+    required_verifier_count: int = 1
+    daemon_required: bool = True
+    healthy_daemon_count: int = 0
+    required_daemon_count: int = 1
 
 
 def _coverage_for(nodes: list) -> Coverage:
@@ -57,6 +79,8 @@ def preflight_model_admission(
     *,
     require_vision: bool = False,
     require_mpc: bool | None = None,
+    require_verifier: bool | None = None,
+    require_daemon: bool | None = None,
 ) -> AdmissionResult:
     selected_model = (model_id or "").strip()
     if not selected_model:
@@ -69,9 +93,23 @@ def preflight_model_admission(
             mpc_available=False,
             text=Coverage(0, 0),
             vision=Coverage(0, 0),
+            verifier_required=resolve_verifier_required_flag()
+            if require_verifier is None else bool(require_verifier),
+            daemon_required=resolve_daemon_required_flag()
+            if require_daemon is None else bool(require_daemon),
         )
 
     mpc_required = resolve_mpc_required_flag() if require_mpc is None else bool(require_mpc)
+    verifier_required = (
+        resolve_verifier_required_flag()
+        if require_verifier is None
+        else bool(require_verifier)
+    )
+    daemon_required = (
+        resolve_daemon_required_flag()
+        if require_daemon is None
+        else bool(require_daemon)
+    )
     all_nodes = discovery.discover(selected_model)
     if not all_nodes:
         return AdmissionResult(
@@ -83,6 +121,8 @@ def preflight_model_admission(
             mpc_available=False,
             text=Coverage(0, 0),
             vision=Coverage(0, 0),
+            verifier_required=verifier_required,
+            daemon_required=daemon_required,
         )
 
     text_nodes = [n for n in all_nodes if n.node_type in ("compute", "mpc")]
@@ -104,6 +144,8 @@ def preflight_model_admission(
             mpc_available=mpc_available,
             text=text,
             vision=vision,
+            verifier_required=verifier_required,
+            daemon_required=daemon_required,
         )
 
     if mpc_required and not mpc_available:
@@ -119,6 +161,8 @@ def preflight_model_admission(
             mpc_available=mpc_available,
             text=text,
             vision=vision,
+            verifier_required=verifier_required,
+            daemon_required=daemon_required,
         )
 
     if require_vision and not vision.complete:
@@ -134,7 +178,81 @@ def preflight_model_admission(
             mpc_available=mpc_available,
             text=text,
             vision=vision,
+            verifier_required=verifier_required,
+            daemon_required=daemon_required,
         )
+
+    healthy_verifier_count = 0
+    required_verifier_count = 1
+    if verifier_required:
+        health = None
+        get_health = getattr(discovery, "get_verifier_health", None)
+        if callable(get_health):
+            health = get_health()
+        if health is not None:
+            healthy_verifier_count = int(
+                getattr(health, "healthy_verifier_count", 0) or 0
+            )
+            required_verifier_count = int(
+                getattr(health, "required_verifier_count", 1) or 1
+            )
+            is_healthy = bool(getattr(health, "healthy", False))
+        else:
+            is_healthy = False
+        if not is_healthy:
+            return AdmissionResult(
+                ok=False,
+                reason="missing_verifier",
+                message=(
+                    "No healthy verifier quorum available for admission "
+                    f"({healthy_verifier_count}/{required_verifier_count})."
+                ),
+                model_id=selected_model,
+                mpc_required=mpc_required,
+                mpc_available=mpc_available,
+                text=text,
+                vision=vision,
+                verifier_required=verifier_required,
+                healthy_verifier_count=healthy_verifier_count,
+                required_verifier_count=required_verifier_count,
+                daemon_required=daemon_required,
+            )
+
+    healthy_daemon_count = 0
+    required_daemon_count = 1
+    if daemon_required:
+        daemon_nodes = []
+        try:
+            daemon_nodes = [
+                n for n in discovery.discover("")
+                if getattr(n, "node_type", "") == "daemon"
+            ]
+        except Exception:
+            daemon_nodes = [
+                n for n in all_nodes
+                if getattr(n, "node_type", "") == "daemon"
+            ]
+        healthy_daemon_count = len(daemon_nodes)
+        if healthy_daemon_count < required_daemon_count:
+            return AdmissionResult(
+                ok=False,
+                reason="missing_daemon",
+                message=(
+                    "No healthy daemon available for admission "
+                    f"({healthy_daemon_count}/{required_daemon_count})."
+                ),
+                model_id=selected_model,
+                mpc_required=mpc_required,
+                mpc_available=mpc_available,
+                text=text,
+                vision=vision,
+                verifier_required=verifier_required,
+                healthy_verifier_count=healthy_verifier_count,
+                required_verifier_count=required_verifier_count,
+                daemon_required=daemon_required,
+                healthy_daemon_count=healthy_daemon_count,
+                required_daemon_count=required_daemon_count,
+            )
 
     return AdmissionResult(
         ok=True,
@@ -145,6 +263,12 @@ def preflight_model_admission(
         mpc_available=mpc_available,
         text=text,
         vision=vision,
+        verifier_required=verifier_required,
+        healthy_verifier_count=healthy_verifier_count,
+        required_verifier_count=required_verifier_count,
+        daemon_required=daemon_required,
+        healthy_daemon_count=healthy_daemon_count,
+        required_daemon_count=required_daemon_count,
     )
 
 
@@ -153,6 +277,8 @@ def pick_first_eligible_model(
     *,
     require_vision: bool = False,
     require_mpc: bool | None = None,
+    require_verifier: bool | None = None,
+    require_daemon: bool | None = None,
 ) -> tuple[str | None, AdmissionResult | None]:
     model_ids = sorted({m.model_id for m in discovery.list_models() if getattr(m, "model_id", "")})
     first_failure = None
@@ -162,6 +288,8 @@ def pick_first_eligible_model(
             mid,
             require_vision=require_vision,
             require_mpc=require_mpc,
+            require_verifier=require_verifier,
+            require_daemon=require_daemon,
         )
         if result.ok:
             return mid, result

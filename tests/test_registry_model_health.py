@@ -7,6 +7,11 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "proto"))
 
 import registry_pb2
 from network.registry_server import RegistryServicer
+from network.share_auth import (
+    generate_signing_keypair,
+    registration_pop_payload,
+    sign_bytes,
+)
 
 
 def _register_node(
@@ -17,9 +22,11 @@ def _register_node(
     shard_index: int,
     node_type: str,
 ):
+    priv, pub = generate_signing_keypair()
+    address = f"localhost:{50050 + shard_index}"
     req = registry_pb2.RegisterRequest(
         node_id=node_id,
-        address=f"localhost:{50050 + shard_index}",
+        address=address,
         model_id=model_id,
         shard_index=shard_index,
         layer_start=shard_index,
@@ -27,6 +34,17 @@ def _register_node(
         has_embedding=(shard_index == 0),
         has_lm_head=False,
         node_type=node_type,
+        share_signing_public_key=pub,
+        share_signing_pop=sign_bytes(
+            priv,
+            registration_pop_payload(
+                node_id=node_id,
+                address=address,
+                model_id=model_id,
+                shard_index=shard_index,
+                node_type=node_type,
+            ),
+        ),
     )
     resp = svc.Register(req, None)
     assert resp.success is True

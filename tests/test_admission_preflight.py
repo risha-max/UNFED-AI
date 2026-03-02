@@ -12,7 +12,16 @@ class _FakeDiscovery:
         self._nodes = list(nodes)
 
     def discover(self, model_id: str):
+        if not model_id:
+            return list(self._nodes) + [_node(-1, "daemon")]
         return list(self._nodes)
+
+    def get_verifier_health(self):
+        return SimpleNamespace(
+            healthy_verifier_count=1,
+            required_verifier_count=1,
+            healthy=True,
+        )
 
 
 def test_preflight_rejects_missing_mpc_by_default(monkeypatch):
@@ -51,3 +60,23 @@ def test_preflight_rejects_multimodal_when_vision_incomplete(monkeypatch):
     )
     assert result.ok is False
     assert result.reason == "incomplete_vision_coverage"
+
+
+def test_preflight_rejects_missing_daemon_by_default(monkeypatch):
+    monkeypatch.delenv("UNFED_REQUIRE_MPC", raising=False)
+    monkeypatch.delenv("UNFED_REQUIRE_DAEMON", raising=False)
+    discovery = _FakeDiscovery([_node(0, "mpc"), _node(1, "compute")])
+    # Force discovery() with empty model_id to return no daemon.
+    discovery.discover = lambda model_id: [_node(0, "mpc"), _node(1, "compute")]
+    result = preflight_model_admission(discovery, "model-x")
+    assert result.ok is False
+    assert result.reason == "missing_daemon"
+
+
+def test_preflight_accepts_without_daemon_when_override_disabled(monkeypatch):
+    monkeypatch.setenv("UNFED_REQUIRE_DAEMON", "0")
+    monkeypatch.delenv("UNFED_REQUIRE_MPC", raising=False)
+    discovery = _FakeDiscovery([_node(0, "mpc"), _node(1, "compute")])
+    discovery.discover = lambda model_id: [_node(0, "mpc"), _node(1, "compute")]
+    result = preflight_model_admission(discovery, "model-x")
+    assert result.ok is True

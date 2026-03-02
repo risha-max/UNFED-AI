@@ -17,13 +17,23 @@ class _DummyTokenizer:
 
 class _FakeDiscoveryNoMpc:
     def discover(self, model_id: str):
-        return [
+        nodes = [
             SimpleNamespace(shard_index=0, node_type="compute"),
             SimpleNamespace(shard_index=1, node_type="compute"),
         ]
+        if not model_id:
+            nodes.append(SimpleNamespace(shard_index=-1, node_type="daemon"))
+        return nodes
 
     def build_circuit(self, model_id: str):
         return (["node-a:50051", "node-b:50052"], [b"pk-a", b"pk-b"])
+
+    def get_verifier_health(self):
+        return SimpleNamespace(
+            healthy_verifier_count=1,
+            required_verifier_count=1,
+            healthy=True,
+        )
 
     def close(self):
         return None

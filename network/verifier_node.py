@@ -19,9 +19,11 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 import os
 import time
+import uuid
 
 import grpc
 
@@ -49,26 +51,101 @@ def _proto_to_ticket(proto) -> VerificationTicket:
     )
 
 
+def _parse_policy(config_json: str) -> dict:
+    defaults = {
+        "poll_interval_seconds": 5.0,
+        "max_tickets_per_poll": 10,
+        "heartbeat_timeout_seconds": 30,
+    }
+    if not config_json:
+        return defaults
+    try:
+        parsed = json.loads(config_json)
+    except json.JSONDecodeError:
+        return defaults
+    for key in defaults:
+        if key in parsed:
+            defaults[key] = parsed[key]
+    return defaults
+
+
 def run_verifier(registry_address: str = None, poll_interval: float = 5.0,
-                 max_tickets_per_poll: int = 10, shards_dir: str = None):
+                 max_tickets_per_poll: int = 10, shards_dir: str = None,
+                 verifier_id: str = "", advertise_address: str = ""):
     """Run the verifier loop."""
     addr = registry_address or config.REGISTRY_ADDRESS
     channel = grpc.insecure_channel(addr)
     stub = registry_pb2_grpc.RegistryStub(channel)
+    verifier_id = verifier_id or f"verifier-{uuid.uuid4().hex[:12]}"
 
     verifier = Verifier(shards_dir=shards_dir)
+    policy = {
+        "poll_interval_seconds": poll_interval,
+        "max_tickets_per_poll": max_tickets_per_poll,
+        "heartbeat_timeout_seconds": 30,
+    }
+
+    # Bootstrap registration with registry-owned policy.
+    while True:
+        try:
+            reg = stub.RegisterVerifier(
+                registry_pb2.RegisterVerifierRequest(
+                    verifier_id=verifier_id,
+                    address=advertise_address,
+                )
+            )
+            if reg.success:
+                policy = _parse_policy(reg.config_json)
+                break
+            print(f"[Verifier] Register failed: {reg.message}")
+        except grpc.RpcError:
+            print("[Verifier] Registry unreachable during register, retrying...")
+        time.sleep(2)
 
     print(f"[Verifier] Connected to registry at {addr}")
-    print(f"[Verifier] Polling every {poll_interval}s for up to {max_tickets_per_poll} tickets")
+    print(f"[Verifier] ID: {verifier_id}")
+    print(
+        f"[Verifier] Polling every {policy['poll_interval_seconds']}s "
+        f"for up to {policy['max_tickets_per_poll']} tickets"
+    )
     print(f"[Verifier] Waiting for verification tickets...")
     print()
+    next_heartbeat = 0.0
+    next_config_refresh = 0.0
 
     try:
         while True:
             try:
+                now = time.time()
+                if now >= next_heartbeat:
+                    hb = stub.VerifierHeartbeat(
+                        registry_pb2.VerifierHeartbeatRequest(verifier_id=verifier_id)
+                    )
+                    if not hb.acknowledged:
+                        reg = stub.RegisterVerifier(
+                            registry_pb2.RegisterVerifierRequest(
+                                verifier_id=verifier_id,
+                                address=advertise_address,
+                            )
+                        )
+                        if reg.success:
+                            policy = _parse_policy(reg.config_json)
+                    elif hb.config_json:
+                        policy = _parse_policy(hb.config_json)
+                    timeout = max(3.0, float(policy["heartbeat_timeout_seconds"]))
+                    next_heartbeat = now + max(1.0, timeout / 3.0)
+
+                if now >= next_config_refresh:
+                    cfg = stub.GetVerifierConfig(
+                        registry_pb2.GetVerifierConfigRequest(verifier_id=verifier_id)
+                    )
+                    if cfg.success:
+                        policy = _parse_policy(cfg.config_json)
+                    next_config_refresh = now + 15.0
+
                 # Pull pending tickets
                 resp = stub.GetPendingTickets(registry_pb2.GetPendingTicketsRequest(
-                    max_tickets=max_tickets_per_poll,
+                    max_tickets=int(policy["max_tickets_per_poll"]),
                 ))
 
                 tickets = [_proto_to_ticket(t) for t in resp.tickets]
@@ -113,7 +190,7 @@ def run_verifier(registry_address: str = None, poll_interval: float = 5.0,
                 else:
                     print(f"[Verifier] gRPC error: {e.details()}")
 
-            time.sleep(poll_interval)
+            time.sleep(float(policy["poll_interval_seconds"]))
 
     except KeyboardInterrupt:
         print(f"\n[Verifier] Shutting down...")
@@ -131,7 +208,17 @@ if __name__ == "__main__":
                         help="Max tickets per poll")
     parser.add_argument("--shards-dir", type=str, default=None,
                         help="Shards directory (for loading model weights)")
+    parser.add_argument("--verifier-id", type=str, default="",
+                        help="Stable verifier identity (default: auto-generated)")
+    parser.add_argument("--advertise", type=str, default="",
+                        help="Verifier advertised address for registry metadata")
     args = parser.parse_args()
 
-    run_verifier(args.registry, args.poll_interval, args.max_tickets,
-                 shards_dir=args.shards_dir)
+    run_verifier(
+        args.registry,
+        args.poll_interval,
+        args.max_tickets,
+        shards_dir=args.shards_dir,
+        verifier_id=args.verifier_id,
+        advertise_address=args.advertise,
+    )

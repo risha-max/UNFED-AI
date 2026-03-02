@@ -50,9 +50,18 @@ class ComputeShare:
     tokens_processed: int
     timestamp: float = field(default_factory=time.time)
     share_weight: float = 1.0
+    session_nonce: str = ""
+    step_index: int = 0
+    timestamp_ms: int = 0
+    signature: bytes = b""
+    payload_hash_version: str = "v1"
+    validated: bool = True
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data["signature_hex"] = self.signature.hex() if self.signature else ""
+        data.pop("signature", None)
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> 'ComputeShare':
@@ -64,11 +73,21 @@ class ComputeShare:
             tokens_processed=d["tokens_processed"],
             timestamp=d.get("timestamp", 0.0),
             share_weight=d.get("share_weight", 1.0),
+            session_nonce=d.get("session_nonce", ""),
+            step_index=d.get("step_index", 0),
+            timestamp_ms=d.get("timestamp_ms", 0),
+            signature=(bytes.fromhex(d["signature_hex"])
+                       if d.get("signature_hex")
+                       else bytes(d.get("signature", b""))),
+            payload_hash_version=d.get("payload_hash_version", "v1"),
+            validated=bool(d.get("validated", True)),
         )
 
     def hash(self) -> str:
         data = f"{self.node_id}:{self.shard_index}:{self.session_id}:" \
-               f"{self.activation_hash}:{self.tokens_processed}:{self.timestamp}"
+               f"{self.activation_hash}:{self.tokens_processed}:{self.timestamp}:" \
+               f"{self.session_nonce}:{self.step_index}:{self.timestamp_ms}:" \
+               f"{self.payload_hash_version}:{int(self.validated)}"
         return hashlib.sha256(data.encode()).hexdigest()
 
 
@@ -368,6 +387,8 @@ class ShareChain:
         for i in range(start_idx, end_idx + 1):
             block = self._chain[i]
             for share in block.shares:
+                if not getattr(share, "validated", False):
+                    continue
                 weight = getattr(share, 'share_weight', 1.0)
                 node_shares[share.node_id] = node_shares.get(share.node_id, 0.0) + weight
                 total += weight
@@ -423,6 +444,8 @@ class ShareChain:
         for i in range(start_idx, end_idx + 1):
             block = self._chain[i]
             for share in block.shares:
+                if not getattr(share, "validated", False):
+                    continue
                 weight = getattr(share, 'share_weight', 1.0)
                 node_shares[share.node_id] = node_shares.get(share.node_id, 0.0) + weight
                 total += weight

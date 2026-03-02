@@ -37,6 +37,7 @@ import inference_pb2
 import inference_pb2_grpc
 
 from network.admission import resolve_mpc_required_flag
+from network.share_auth import registration_pop_payload, verify_signature
 from economics.share_chain import ShareChain, ComputeShare
 from economics.payments import StakeManager, PaymentContract, SettlementProcessor
 from economics.model_pools import PoolRegistry, PoolManifest
@@ -119,7 +120,8 @@ class NodeRecord:
     def __init__(self, node_id: str, address: str, model_id: str,
                  shard_index: int, layer_start: int, layer_end: int,
                  has_embedding: bool, has_lm_head: bool,
-                 public_key: bytes = b"", node_type: str = "compute"):
+                 public_key: bytes = b"", node_type: str = "compute",
+                 share_signing_public_key: bytes = b""):
         self.node_id = node_id
         self.address = address
         self.model_id = model_id
@@ -130,6 +132,7 @@ class NodeRecord:
         self.has_lm_head = has_lm_head
         self.public_key = public_key
         self.node_type = node_type
+        self.share_signing_public_key = share_signing_public_key
         self.last_heartbeat = time.time()
         self.registered_at = time.time()
 
@@ -146,7 +149,19 @@ class NodeRecord:
             last_heartbeat=self.last_heartbeat,
             public_key=self.public_key,
             node_type=self.node_type,
+            share_signing_public_key=self.share_signing_public_key,
         )
+
+
+class VerifierRecord:
+    """In-memory record of a registered verifier node."""
+
+    def __init__(self, verifier_id: str, address: str, payout_address: str = ""):
+        self.verifier_id = verifier_id
+        self.address = address
+        self.payout_address = payout_address
+        self.last_heartbeat = time.time()
+        self.registered_at = time.time()
 
 
 class RegistryServicer(registry_pb2_grpc.RegistryServicer):
@@ -157,6 +172,9 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                  no_chain: bool = False):
         self._nodes: dict[str, NodeRecord] = {}  # node_id -> NodeRecord
         self._lock = threading.Lock()
+        self._verifiers: dict[str, VerifierRecord] = {}
+        self._verifier_lock = threading.Lock()
+        self._verifier_health_last_change = time.time()
 
         # --- Cluster identity ---
         self._cluster_config = cluster_config or ClusterConfig(
@@ -252,7 +270,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         # NOTE: No start_block_production() — registry is a passive peer.
         # It receives blocks via GossipBlock RPCs from compute nodes.
         # Start background payment finalization
-        self._settlement_processor.start_background_finalization(interval=10.0)
+        # Finalization is driven from _settlement_loop so we can enforce
+        # fail-closed verifier health gates.
 
         # Start background cleanup thread
         self._cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
@@ -288,18 +307,45 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         last_count = 0
         # Track on-chain settlements pending finalization
         onchain_pending: list[tuple[str, float]] = []  # (hash, deadline)
+        gate_last_state: tuple[bool, bool] | None = None
 
         while True:
             time.sleep(5)
             settlements = self._share_chain.get_settlements()
+            verifier_ok = self._verifier_healthy()
+            daemon_ok = self._daemon_healthy()
+            infra_ok = verifier_ok and daemon_ok
+            if gate_last_state is None or gate_last_state != (verifier_ok, daemon_ok):
+                v_state = "healthy" if verifier_ok else "unhealthy"
+                d_state = "healthy" if daemon_ok else "unhealthy"
+                print(f"[Registry] Verifier gate={v_state}, daemon gate={d_state}")
+                gate_last_state = (verifier_ok, daemon_ok)
+
             if len(settlements) > last_count:
+                if not infra_ok:
+                    # Fail closed: do not advance settlement cursor until infra recovers.
+                    continue
                 for s in settlements[last_count:]:
-                    self._settlement_processor.process_settlement(s)
+                    if s.total_shares <= 0:
+                        print("[Registry] Skipping settlement with zero validated shares")
+                        continue
+                    daemon_recipient = self._select_daemon_recipient()
+                    verifier_recipient = self._select_verifier_recipient()
+                    self._settlement_processor.process_settlement(
+                        s,
+                        daemon_recipient=daemon_recipient,
+                        verifier_recipient=verifier_recipient,
+                        daemon_fee_bps=int(self._cluster_config.daemon_fee_bps),
+                        verifier_fee_bps=int(self._cluster_config.verifier_fee_bps),
+                    )
 
                     # Post on-chain if escrow is enabled
                     if self._onchain_escrow and s.node_shares:
                         try:
-                            nodes = list(s.node_shares.keys())
+                            payout_map = self._payment_contract.settlement_payout_split(
+                                s.settlement_hash
+                            )
+                            nodes = list(payout_map.keys())
                             invalid_nodes = [n for n in nodes if not _is_eth_address(n)]
                             if invalid_nodes:
                                 print(
@@ -308,11 +354,10 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                                     "This usually means replayed legacy share-chain data."
                                 )
                                 continue
-                            # Convert weighted shares to token amounts
-                            # (use 1e18 scale for ERC-20 wei)
+                            # Convert token-denominated payouts to wei.
                             amounts = [
-                                int(shares * 1e18)
-                                for shares in s.node_shares.values()
+                                int(amount * 1e18)
+                                for amount in payout_map.values()
                             ]
                             self._onchain_escrow.post_settlement(
                                 s.settlement_hash, nodes, amounts)
@@ -327,17 +372,23 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
                 last_count = len(settlements)
 
+            # Fail-closed: freeze finalization when verifier or daemon is unhealthy.
+            if infra_ok:
+                self._settlement_processor.run_finalization()
+
             # Finalize expired on-chain settlements
             if self._onchain_escrow and onchain_pending:
                 now = time.time()
                 still_pending = []
                 for s_hash, deadline in onchain_pending:
-                    if now >= deadline:
+                    if now >= deadline and verifier_ok and daemon_ok:
                         try:
                             self._onchain_escrow.finalize_settlement(s_hash)
                         except Exception as e:
                             print(f"[Registry] On-chain finalization "
                                   f"failed: {e}")
+                    elif now >= deadline and (not verifier_ok or not daemon_ok):
+                        still_pending.append((s_hash, deadline))
                     else:
                         still_pending.append((s_hash, deadline))
                 onchain_pending = still_pending
@@ -419,6 +470,82 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     })
                     print(f"[Registry] ORPHANED shard {record.shard_index} "
                           f"for {record.model_id} — queued for reassignment")
+
+        self._remove_stale_verifiers()
+
+    def _remove_stale_verifiers(self):
+        timeout = max(1, int(self._cluster_config.verifier_heartbeat_timeout_seconds))
+        now = time.time()
+        with self._verifier_lock:
+            stale = [
+                vid for vid, rec in self._verifiers.items()
+                if now - rec.last_heartbeat > timeout
+            ]
+            for vid in stale:
+                rec = self._verifiers.pop(vid)
+                print(f"[Registry] Removed stale verifier {vid[:8]}... ({rec.address})")
+                self._verifier_health_last_change = now
+
+    def _healthy_verifier_count(self) -> int:
+        timeout = max(1, int(self._cluster_config.verifier_heartbeat_timeout_seconds))
+        now = time.time()
+        with self._verifier_lock:
+            return sum(
+                1 for rec in self._verifiers.values()
+                if (now - rec.last_heartbeat) <= timeout
+            )
+
+    def _verifier_healthy(self) -> bool:
+        return self._healthy_verifier_count() >= int(self._cluster_config.verifier_required_count)
+
+    def _healthy_daemon_count(self) -> int:
+        timeout = max(1, int(self._cluster_config.daemon_heartbeat_timeout_seconds))
+        now = time.time()
+        with self._lock:
+            return sum(
+                1 for rec in self._nodes.values()
+                if rec.node_type == "daemon" and (now - rec.last_heartbeat) <= timeout
+            )
+
+    def _daemon_healthy(self) -> bool:
+        return self._healthy_daemon_count() >= int(self._cluster_config.daemon_required_count)
+
+    def _select_daemon_recipient(self) -> str:
+        """Pick deterministic daemon payout recipient from healthy daemon set."""
+        timeout = max(1, int(self._cluster_config.daemon_heartbeat_timeout_seconds))
+        now = time.time()
+        with self._lock:
+            healthy = [
+                rec.node_id for rec in self._nodes.values()
+                if rec.node_type == "daemon" and (now - rec.last_heartbeat) <= timeout
+            ]
+        healthy.sort()
+        return healthy[0] if healthy else ""
+
+    def _select_verifier_recipient(self) -> str:
+        """Pick deterministic verifier payout recipient from healthy verifier set."""
+        timeout = max(1, int(self._cluster_config.verifier_heartbeat_timeout_seconds))
+        now = time.time()
+        with self._verifier_lock:
+            healthy = [
+                rec.payout_address for rec in self._verifiers.values()
+                if rec.payout_address and (now - rec.last_heartbeat) <= timeout
+            ]
+        healthy.sort()
+        return healthy[0] if healthy else ""
+
+    def _effective_verifier_config_json(self) -> str:
+        policy = {
+            "poll_interval_seconds": float(self._cluster_config.verifier_poll_interval_seconds),
+            "max_tickets_per_poll": int(self._cluster_config.verifier_max_tickets_per_poll),
+            "sampling_baseline": float(self._cluster_config.verifier_sampling_baseline),
+            "sampling_suspicious": float(self._cluster_config.verifier_sampling_suspicious),
+            "sampling_max": float(self._cluster_config.verifier_sampling_max),
+            "adaptive_enabled": bool(self._cluster_config.verifier_adaptive_enabled),
+            "heartbeat_timeout_seconds": int(self._cluster_config.verifier_heartbeat_timeout_seconds),
+            "required_count": int(self._cluster_config.verifier_required_count),
+        }
+        return json.dumps(policy)
 
     # ------------------------------------------------------------------
     # Auto-assignment
@@ -783,6 +910,35 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 return registry_pb2.RegisterResponse(
                     success=False, message=msg)
 
+        # --- Share signing key proof-of-possession gate ---
+        if request.node_type in ("compute", "mpc"):
+            if len(request.share_signing_public_key) != 32:
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="share_signing_public_key must be 32 bytes",
+                )
+            if not request.share_signing_pop:
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="share_signing_pop is required",
+                )
+            pop_payload = registration_pop_payload(
+                node_id=request.node_id,
+                address=request.address,
+                model_id=request.model_id,
+                shard_index=request.shard_index,
+                node_type=request.node_type or "compute",
+            )
+            if not verify_signature(
+                bytes(request.share_signing_public_key),
+                pop_payload,
+                bytes(request.share_signing_pop),
+            ):
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="invalid share_signing_pop signature",
+                )
+
         with self._lock:
             record = NodeRecord(
                 node_id=request.node_id,
@@ -795,6 +951,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 has_lm_head=request.has_lm_head,
                 public_key=request.public_key,
                 node_type=request.node_type or "compute",
+                share_signing_public_key=bytes(request.share_signing_public_key),
             )
             self._nodes[request.node_id] = record
 
@@ -828,6 +985,86 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 return registry_pb2.HeartbeatResponse(acknowledged=True)
 
         return registry_pb2.HeartbeatResponse(acknowledged=False)
+
+    def RegisterVerifier(self, request, context):
+        """Register a verifier process and return effective verifier config."""
+        verifier_id = (request.verifier_id or "").strip()
+        if not verifier_id:
+            return registry_pb2.RegisterVerifierResponse(
+                success=False, message="verifier_id is required"
+            )
+        payout_address = ""
+        if _is_eth_address(verifier_id):
+            payout_address = verifier_id
+        elif _is_eth_address(request.address or ""):
+            payout_address = request.address
+
+        # When on-chain escrow is active and verifier payouts are enabled,
+        # verifier recipient must be a staked EVM address.
+        if self._onchain_escrow and int(self._cluster_config.verifier_fee_bps) > 0:
+            if not payout_address:
+                return registry_pb2.RegisterVerifierResponse(
+                    success=False,
+                    message="verifier must provide EVM payout identity when verifier_fee_bps > 0",
+                )
+            if not self._onchain_escrow.is_eligible(payout_address):
+                min_stake = self._onchain_escrow.min_stake()
+                return registry_pb2.RegisterVerifierResponse(
+                    success=False,
+                    message=f"verifier stake too low. Minimum: {min_stake} wei",
+                )
+        with self._verifier_lock:
+            self._verifiers[verifier_id] = VerifierRecord(
+                verifier_id=verifier_id,
+                address=request.address or "",
+                payout_address=payout_address,
+            )
+            self._verifier_health_last_change = time.time()
+        print(f"[Registry] Verifier registered: {verifier_id[:8]}... at {request.address}")
+        return registry_pb2.RegisterVerifierResponse(
+            success=True,
+            message="registered",
+            config_json=self._effective_verifier_config_json(),
+        )
+
+    def VerifierHeartbeat(self, request, context):
+        """Update verifier heartbeat and return latest effective config."""
+        verifier_id = (request.verifier_id or "").strip()
+        if not verifier_id:
+            return registry_pb2.VerifierHeartbeatResponse(
+                acknowledged=False,
+                config_json=self._effective_verifier_config_json(),
+            )
+        with self._verifier_lock:
+            rec = self._verifiers.get(verifier_id)
+            if rec is None:
+                return registry_pb2.VerifierHeartbeatResponse(
+                    acknowledged=False,
+                    config_json=self._effective_verifier_config_json(),
+                )
+            rec.last_heartbeat = time.time()
+        return registry_pb2.VerifierHeartbeatResponse(
+            acknowledged=True,
+            config_json=self._effective_verifier_config_json(),
+        )
+
+    def GetVerifierConfig(self, request, context):
+        """Return current effective verifier config."""
+        return registry_pb2.GetVerifierConfigResponse(
+            success=True,
+            message="ok",
+            config_json=self._effective_verifier_config_json(),
+        )
+
+    def GetVerifierHealth(self, request, context):
+        """Return verifier liveness health for fail-closed gates."""
+        healthy_count = self._healthy_verifier_count()
+        required_count = int(self._cluster_config.verifier_required_count)
+        return registry_pb2.GetVerifierHealthResponse(
+            healthy_verifier_count=healthy_count,
+            required_verifier_count=required_count,
+            healthy=healthy_count >= required_count,
+        )
 
     def Unregister(self, request, context):
         """Remove a node from the registry."""
@@ -983,6 +1220,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 session_id=ticket.ticket_id,  # use ticket_id as proxy
                 activation_hash=str(hash(ticket.expected_output_data))[:16],
                 tokens_processed=1,
+                validated=False,
             )
             self._share_chain.add_share(share)
 

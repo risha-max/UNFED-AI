@@ -28,6 +28,7 @@ import signal
 import sys
 import time
 import threading
+import uuid
 from concurrent import futures
 
 import grpc
@@ -50,6 +51,12 @@ from network.onion import peel_onion, encrypt_response
 from network.randomness import compute_activation_hash, select_next_node, SessionCircuit
 from network.verification import TicketCollector
 from network.zk_verification import create_commitment
+from network.share_auth import (
+    PAYLOAD_HASH_VERSION,
+    SharePayload,
+    canonical_share_payload_bytes,
+    sign_bytes,
+)
 from economics.distributed_chain import (
     share_to_proto, block_to_proto, proto_to_block, proto_to_share,
 )
@@ -303,6 +310,12 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._daemon_address: str = ""
         self._share_buffer: list[ComputeShare] = []
         self._share_buffer_lock = threading.Lock()
+        self._require_daemon = (
+            os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
+            not in ("0", "false", "no", "off")
+        )
+        self._session_nonce_by_session: dict[str, str] = {}
+        self._session_step_by_session: dict[str, int] = {}
 
     def init_daemon_connection(self, node_id: str, registry_address: str = None,
                                self_address: str = ""):
@@ -333,13 +346,13 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 )
                 print(f"[Node] Connected to chain daemon at {daemon.address}")
             else:
-                print(f"[Node] No daemon found — shares will be buffered locally")
+                print("[Node] No daemon found")
                 # Start background thread to retry daemon discovery
                 t = threading.Thread(target=self._daemon_discovery_loop,
                                      args=(registry_addr,), daemon=True)
                 t.start()
         except grpc.RpcError:
-            print(f"[Node] Registry unreachable — shares will be buffered locally")
+            print("[Node] Registry unreachable while discovering daemon")
 
     def _daemon_discovery_loop(self, registry_addr: str):
         """Background loop to discover daemon if not found on startup."""
@@ -372,6 +385,8 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         If the daemon is unreachable, buffer locally and retry later.
         """
         if self._daemon_stub is None:
+            if self._require_daemon:
+                raise RuntimeError("Daemon is required but unavailable for share submission.")
             with self._share_buffer_lock:
                 self._share_buffer.append(share)
             return
@@ -385,9 +400,60 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 timeout=5,
             )
         except grpc.RpcError:
+            if self._require_daemon:
+                raise RuntimeError("Daemon became unreachable during share submission.")
             # Daemon unreachable — buffer locally
             with self._share_buffer_lock:
                 self._share_buffer.append(share)
+
+    def _build_signed_share(
+        self,
+        *,
+        session_id: str,
+        activation_hash: str,
+        tokens_processed: int = 1,
+        share_weight: float = 1.0,
+    ) -> ComputeShare:
+        nonce = self._session_nonce_by_session.get(session_id)
+        if nonce is None:
+            nonce = uuid.uuid4().hex
+            self._session_nonce_by_session[session_id] = nonce
+            self._session_step_by_session[session_id] = 0
+        step_index = self._session_step_by_session.get(session_id, 0)
+        self._session_step_by_session[session_id] = step_index + 1
+        timestamp = time.time()
+        timestamp_ms = int(timestamp * 1000)
+        payload = SharePayload(
+            node_id=self.registration.node_id,
+            shard_index=self.shard_index,
+            session_id=session_id,
+            session_nonce=nonce,
+            step_index=step_index,
+            activation_hash=activation_hash,
+            tokens_processed=tokens_processed,
+            share_weight=share_weight,
+            timestamp_ms=timestamp_ms,
+            payload_hash_version=PAYLOAD_HASH_VERSION,
+        )
+        signature = sign_bytes(
+            self.registration.share_signing_private_key,
+            canonical_share_payload_bytes(payload),
+        )
+        return ComputeShare(
+            node_id=payload.node_id,
+            shard_index=payload.shard_index,
+            session_id=payload.session_id,
+            activation_hash=payload.activation_hash,
+            tokens_processed=payload.tokens_processed,
+            timestamp=timestamp,
+            share_weight=payload.share_weight,
+            session_nonce=payload.session_nonce,
+            step_index=payload.step_index,
+            timestamp_ms=payload.timestamp_ms,
+            signature=signature,
+            payload_hash_version=payload.payload_hash_version,
+            validated=False,
+        )
 
     def _flush_share_buffer(self):
         """Send any buffered shares to the daemon."""
@@ -477,6 +543,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         forward_ok = False
         emitted_token = False
         sampled_token = None
+        if self._require_daemon and self._daemon_stub is None:
+            context.set_details("Daemon is required but unavailable.")
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            return inference_pb2.ForwardResponse()
 
         # Track active inferences for bandwidth priority
         with self._inference_lock:
@@ -578,9 +648,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
             # --- Record compute share on the distributed chain ---
             if self.registration:
-                share = ComputeShare(
-                    node_id=self.registration.node_id,
-                    shard_index=self.shard_index,
+                share = self._build_signed_share(
                     session_id=session_id,
                     activation_hash="",
                     tokens_processed=1,

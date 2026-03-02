@@ -188,6 +188,37 @@ class TestPaymentContract:
         # (10+20)*0.0001 + (1+2)*0.001 = 0.003 + 0.003 = 0.006
         assert abs(settlement.total_payout - 0.006) < 1e-9
 
+    def test_infra_fee_split_allocates_daemon_and_verifier(self, payment_contract):
+        payment_contract.deposit_to_escrow(1000.0)
+        payment_contract.set_infra_policy(
+            daemon_recipient="daemon_1",
+            verifier_recipient="verifier_1",
+            daemon_fee_bps=200,   # 2%
+            verifier_fee_bps=100, # 1%
+        )
+        payment_contract.report_usage(100, 50)  # payout = 0.06
+        summary = _make_settlement({"node_A": 6.0, "node_B": 4.0})
+        settlement = payment_contract.post_settlement(summary)
+        split = payment_contract.settlement_payout_split(settlement.settlement_hash)
+        assert split["daemon_1"] == pytest.approx(0.0012, rel=1e-9)
+        assert split["verifier_1"] == pytest.approx(0.0006, rel=1e-9)
+        # Remaining 97% to compute nodes
+        assert split["node_A"] == pytest.approx(0.03492, rel=1e-9)
+        assert split["node_B"] == pytest.approx(0.02328, rel=1e-9)
+
+    def test_infra_fee_without_recipients_falls_back_to_compute_pool(self, payment_contract):
+        payment_contract.report_usage(100, 50)  # payout = 0.06
+        summary = _make_settlement({"node_A": 1.0})
+        settlement = payment_contract.post_settlement(
+            summary,
+            daemon_fee_bps=200,
+            verifier_fee_bps=100,
+            daemon_recipient="",
+            verifier_recipient="",
+        )
+        split = payment_contract.settlement_payout_split(settlement.settlement_hash)
+        assert split["node_A"] == pytest.approx(0.06, rel=1e-9)
+
 
 class TestSettlementProcessor:
     """Tests for the settlement processor."""

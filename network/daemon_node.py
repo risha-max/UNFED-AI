@@ -30,6 +30,7 @@ import signal
 import sys
 import threading
 import time
+from collections import defaultdict
 
 logger = logging.getLogger("unfed.daemon")
 from concurrent import futures
@@ -52,6 +53,7 @@ from economics.share_chain import ShareChain, ComputeShare, Block
 from economics.distributed_chain import (
     share_to_proto, proto_to_share, block_to_proto, proto_to_block,
 )
+from network.share_auth import SharePayload, canonical_share_payload_bytes, verify_signature
 
 _SIMPLE_LOGS_ENABLED = True
 _COLOR_ENABLED = (
@@ -120,10 +122,26 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
       - GossipBlock: daemon-to-daemon block propagation
     """
 
-    def __init__(self, chain: ShareChain, node_id: str, fee_oracle=None):
+    def __init__(self, chain: ShareChain, node_id: str, fee_oracle=None,
+                 registry_address: str | None = None):
         self.chain = chain
         self.node_id = node_id
         self.fee_oracle = fee_oracle
+        self.registry_address = registry_address or config.REGISTRY_ADDRESS
+        self._strict_share_auth = (
+            os.environ.get("UNFED_STRICT_SHARE_AUTH", "1").strip().lower()
+            not in ("0", "false", "off", "no")
+        )
+        self._max_clock_skew_ms = int(os.environ.get("UNFED_SHARE_MAX_SKEW_MS", "120000"))
+        self._max_shares_per_session_node = int(
+            os.environ.get("UNFED_MAX_SHARES_PER_SESSION_NODE", "4096")
+        )
+        self._seen_keys: set[tuple[str, str, str, int]] = set()
+        self._last_step: dict[tuple[str, str, int], int] = {}
+        self._accepted_count: dict[tuple[str, str], int] = defaultdict(int)
+        self._reason_counters: dict[str, int] = defaultdict(int)
+        self._signer_cache: dict[str, bytes] = {}
+        self._signer_cache_ts = 0.0
 
         # Subscribers for SubscribeBlocks streaming RPC
         self._subscribers: list[queue.Queue] = []
@@ -134,15 +152,101 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
     def SubmitShares(self, request, context):
         """Accept compute shares from a compute/MPC node."""
         shares = [proto_to_share(s) for s in request.shares]
-        self.chain.add_shares(shares)
+        accepted: list[ComputeShare] = []
+        for share in shares:
+            ok, reason = self._validate_share(share, request.submitter_id)
+            if ok:
+                share.validated = True
+                accepted.append(share)
+            else:
+                self._reason_counters[reason] += 1
+        if accepted:
+            self.chain.add_shares(accepted)
 
         submitter = request.submitter_id[:8] if request.submitter_id else "unknown"
-        _simple_log(f"[Daemon] Received {len(shares)} share(s) from {submitter}...")
+        _simple_log(
+            f"[Daemon] Received {len(shares)} share(s) from {submitter}... "
+            f"accepted={len(accepted)}"
+        )
 
         return inference_pb2.SubmitSharesResponse(
-            accepted=len(shares),
+            accepted=len(accepted),
             pending_pool_size=len(self.chain._pending_shares),
         )
+
+    def _validate_share(self, share: ComputeShare, submitter_id: str) -> tuple[bool, str]:
+        if not self._strict_share_auth:
+            return True, "ok_relaxed"
+        if submitter_id and share.node_id != submitter_id:
+            return False, "submitter_mismatch"
+        if not share.signature:
+            return False, "missing_signature"
+        if not share.session_nonce:
+            return False, "missing_session_nonce"
+        if share.timestamp_ms <= 0:
+            return False, "missing_timestamp_ms"
+        now_ms = int(time.time() * 1000)
+        if abs(now_ms - int(share.timestamp_ms)) > self._max_clock_skew_ms:
+            return False, "stale_timestamp"
+        if not self._verify_share_signature(share):
+            return False, "invalid_signature"
+        replay_key = (share.session_id, share.session_nonce, share.node_id, int(share.step_index))
+        if replay_key in self._seen_keys:
+            return False, "replay"
+        order_key = (share.session_id, share.node_id, int(share.shard_index))
+        prev = self._last_step.get(order_key)
+        if prev is not None and int(share.step_index) <= prev:
+            return False, "non_monotonic_step"
+        cap_key = (share.session_id, share.node_id)
+        if self._accepted_count[cap_key] >= self._max_shares_per_session_node:
+            return False, "cap_exceeded"
+        self._seen_keys.add(replay_key)
+        self._last_step[order_key] = int(share.step_index)
+        self._accepted_count[cap_key] += 1
+        return True, "ok"
+
+    def _verify_share_signature(self, share: ComputeShare) -> bool:
+        public_key = self._signer_cache.get(share.node_id)
+        if public_key is None:
+            self._refresh_signer_cache(force=True)
+            public_key = self._signer_cache.get(share.node_id)
+        if not public_key:
+            return False
+        payload = SharePayload(
+            node_id=share.node_id,
+            shard_index=int(share.shard_index),
+            session_id=share.session_id,
+            session_nonce=share.session_nonce,
+            step_index=int(share.step_index),
+            activation_hash=share.activation_hash,
+            tokens_processed=int(share.tokens_processed),
+            share_weight=float(share.share_weight),
+            timestamp_ms=int(share.timestamp_ms),
+            payload_hash_version=share.payload_hash_version or "v1",
+        )
+        return verify_signature(
+            public_key,
+            canonical_share_payload_bytes(payload),
+            share.signature,
+        )
+
+    def _refresh_signer_cache(self, force: bool = False):
+        now = time.time()
+        if not force and (now - self._signer_cache_ts) < 15:
+            return
+        try:
+            channel = grpc.insecure_channel(self.registry_address, options=config.GRPC_OPTIONS)
+            stub = registry_pb2_grpc.RegistryStub(channel)
+            resp = stub.Discover(registry_pb2.DiscoverRequest(model_id=""), timeout=5)
+            new_cache: dict[str, bytes] = {}
+            for node in resp.nodes:
+                if node.share_signing_public_key:
+                    new_cache[node.node_id] = bytes(node.share_signing_public_key)
+            self._signer_cache = new_cache
+            self._signer_cache_ts = now
+            channel.close()
+        except grpc.RpcError:
+            pass
 
     # --- SubscribeBlocks (light-wallet streaming) ---
 
@@ -508,7 +612,8 @@ class DaemonRegistration:
 def serve(port: int = 50070, host: str = "[::]",
           advertise_address: str = None,
           registry_address: str = None,
-          db_path: str = None):
+          db_path: str = None,
+          node_id: str = ""):
     """Start the chain daemon.
 
     Args:
@@ -524,7 +629,7 @@ def serve(port: int = 50070, host: str = "[::]",
     db_path = db_path or os.path.expanduser(
         getattr(config, 'CHAIN_DB_PATH', '~/.unfed/chain.db'))
     public_address = advertise_address or f"localhost:{port}"
-    node_id = str(uuid.uuid4())
+    node_id = (node_id or "").strip() or str(uuid.uuid4())
 
     print(f"[Daemon] Starting chain daemon")
     print(f"[Daemon]   Port: {port}")
@@ -565,7 +670,12 @@ def serve(port: int = 50070, host: str = "[::]",
         futures.ThreadPoolExecutor(max_workers=10),
         options=config.GRPC_OPTIONS,
     )
-    servicer = DaemonServicer(chain, node_id, fee_oracle=fee_oracle)
+    servicer = DaemonServicer(
+        chain,
+        node_id,
+        fee_oracle=fee_oracle,
+        registry_address=registry_address,
+    )
     inference_pb2_grpc.add_InferenceNodeServicer_to_server(servicer, server)
 
     bind_address = f"{host}:{port}"
@@ -630,6 +740,8 @@ if __name__ == "__main__":
                         help="Registry address (default: from config)")
     parser.add_argument("--db", default=None,
                         help="SQLite database path (default: ~/.unfed/chain.db)")
+    parser.add_argument("--eth-address", default="",
+                        help="Stable daemon node identity (recommended: staked EVM address)")
     parser.add_argument("--quiet", action="store_true",
                         help="Disable simple daemon status logs")
     args = parser.parse_args()
@@ -644,4 +756,5 @@ if __name__ == "__main__":
         advertise_address=args.advertise,
         registry_address=args.registry,
         db_path=args.db,
+        node_id=args.eth_address,
     )

@@ -72,6 +72,18 @@ service Registry {
 
   // Request a role/shard assignment from the registry based on hardware capacity.
   rpc RequestAssignment(RequestAssignmentRequest) returns (RequestAssignmentResponse);
+
+  // Register a verifier process and get effective verifier config.
+  rpc RegisterVerifier(RegisterVerifierRequest) returns (RegisterVerifierResponse);
+
+  // Heartbeat from a verifier process; also returns latest effective config.
+  rpc VerifierHeartbeat(VerifierHeartbeatRequest) returns (VerifierHeartbeatResponse);
+
+  // Fetch effective verifier config directly.
+  rpc GetVerifierConfig(GetVerifierConfigRequest) returns (GetVerifierConfigResponse);
+
+  // Get current verifier health summary for fail-closed gates.
+  rpc GetVerifierHealth(GetVerifierHealthRequest) returns (GetVerifierHealthResponse);
 }
 
 // --- Verification ---
@@ -140,6 +152,8 @@ message RegisterRequest {
   bool has_lm_head = 8;          // True if this shard includes norm + LM head
   bytes public_key = 9;          // X25519 public key for onion routing (32 bytes)
   string node_type = 10;         // "compute" or "guard"
+  bytes share_signing_public_key = 11;  // Ed25519 public key for share auth (32 bytes)
+  bytes share_signing_pop = 12;         // Signature proving ownership of share_signing_public_key
 }
 
 message RegisterResponse {
@@ -185,6 +199,7 @@ message NodeInfo {
   double last_heartbeat = 9;     // Unix timestamp of last heartbeat
   bytes public_key = 10;         // X25519 public key for onion routing (32 bytes)
   string node_type = 11;         // "compute" or "guard"
+  bytes share_signing_public_key = 12;  // Ed25519 public key for signed shares
 }
 
 message DiscoverResponse {
@@ -379,6 +394,46 @@ message RequestAssignmentResponse {
   bool success = 1;
   string message = 2;
   Assignment assignment = 3;
+}
+
+// --- Verifier lifecycle/config/health ---
+
+message RegisterVerifierRequest {
+  string verifier_id = 1;
+  string address = 2;
+}
+
+message RegisterVerifierResponse {
+  bool success = 1;
+  string message = 2;
+  string config_json = 3;
+}
+
+message VerifierHeartbeatRequest {
+  string verifier_id = 1;
+}
+
+message VerifierHeartbeatResponse {
+  bool acknowledged = 1;
+  string config_json = 2;
+}
+
+message GetVerifierConfigRequest {
+  string verifier_id = 1;
+}
+
+message GetVerifierConfigResponse {
+  bool success = 1;
+  string message = 2;
+  string config_json = 3;
+}
+
+message GetVerifierHealthRequest {}
+
+message GetVerifierHealthResponse {
+  int32 healthy_verifier_count = 1;
+  int32 required_verifier_count = 2;
+  bool healthy = 3;
 }
 
 message VerifyCapacityRequest {

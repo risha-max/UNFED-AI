@@ -110,6 +110,14 @@ source .venv/bin/activate
 python -m network.daemon_node --port 50070 --registry localhost:50050
 ```
 
+Recommended in on-chain mode (stake-gated registration): run daemon with a staked
+identity so it can register and receive infra rewards:
+
+```bash
+python -m network.daemon_node --port 50070 --registry localhost:50050 \
+  --eth-address 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+```
+
 ## 6) Start nodes
 
 Use these 4 wallets:

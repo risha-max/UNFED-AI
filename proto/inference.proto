@@ -314,6 +314,12 @@ message ShareProto {
   int32 tokens_processed = 5;
   double timestamp = 6;
   double share_weight = 7;            // 1.0 for compute/MPC, 0.0 for daemon
+  string session_nonce = 8;
+  int32 step_index = 9;
+  int64 timestamp_ms = 10;
+  bytes signature = 11;
+  string payload_hash_version = 12;
+  bool validated = 13;
 }
 
 message BlockMessage {

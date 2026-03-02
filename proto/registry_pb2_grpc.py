@@ -138,6 +138,26 @@ class RegistryStub(object):
                 request_serializer=registry__pb2.RequestAssignmentRequest.SerializeToString,
                 response_deserializer=registry__pb2.RequestAssignmentResponse.FromString,
                 _registered_method=True)
+        self.RegisterVerifier = channel.unary_unary(
+                '/unfed.Registry/RegisterVerifier',
+                request_serializer=registry__pb2.RegisterVerifierRequest.SerializeToString,
+                response_deserializer=registry__pb2.RegisterVerifierResponse.FromString,
+                _registered_method=True)
+        self.VerifierHeartbeat = channel.unary_unary(
+                '/unfed.Registry/VerifierHeartbeat',
+                request_serializer=registry__pb2.VerifierHeartbeatRequest.SerializeToString,
+                response_deserializer=registry__pb2.VerifierHeartbeatResponse.FromString,
+                _registered_method=True)
+        self.GetVerifierConfig = channel.unary_unary(
+                '/unfed.Registry/GetVerifierConfig',
+                request_serializer=registry__pb2.GetVerifierConfigRequest.SerializeToString,
+                response_deserializer=registry__pb2.GetVerifierConfigResponse.FromString,
+                _registered_method=True)
+        self.GetVerifierHealth = channel.unary_unary(
+                '/unfed.Registry/GetVerifierHealth',
+                request_serializer=registry__pb2.GetVerifierHealthRequest.SerializeToString,
+                response_deserializer=registry__pb2.GetVerifierHealthResponse.FromString,
+                _registered_method=True)
 
 
 class RegistryServicer(object):
@@ -293,6 +313,34 @@ class RegistryServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RegisterVerifier(self, request, context):
+        """Register a verifier process and get effective verifier config.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def VerifierHeartbeat(self, request, context):
+        """Heartbeat from a verifier process; also returns latest effective config.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetVerifierConfig(self, request, context):
+        """Fetch effective verifier config directly.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetVerifierHealth(self, request, context):
+        """Get current verifier health summary for fail-closed gates.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RegistryServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -395,6 +443,26 @@ def add_RegistryServicer_to_server(servicer, server):
                     servicer.RequestAssignment,
                     request_deserializer=registry__pb2.RequestAssignmentRequest.FromString,
                     response_serializer=registry__pb2.RequestAssignmentResponse.SerializeToString,
+            ),
+            'RegisterVerifier': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterVerifier,
+                    request_deserializer=registry__pb2.RegisterVerifierRequest.FromString,
+                    response_serializer=registry__pb2.RegisterVerifierResponse.SerializeToString,
+            ),
+            'VerifierHeartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.VerifierHeartbeat,
+                    request_deserializer=registry__pb2.VerifierHeartbeatRequest.FromString,
+                    response_serializer=registry__pb2.VerifierHeartbeatResponse.SerializeToString,
+            ),
+            'GetVerifierConfig': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetVerifierConfig,
+                    request_deserializer=registry__pb2.GetVerifierConfigRequest.FromString,
+                    response_serializer=registry__pb2.GetVerifierConfigResponse.SerializeToString,
+            ),
+            'GetVerifierHealth': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetVerifierHealth,
+                    request_deserializer=registry__pb2.GetVerifierHealthRequest.FromString,
+                    response_serializer=registry__pb2.GetVerifierHealthResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -941,6 +1009,114 @@ class Registry(object):
             '/unfed.Registry/RequestAssignment',
             registry__pb2.RequestAssignmentRequest.SerializeToString,
             registry__pb2.RequestAssignmentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegisterVerifier(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/RegisterVerifier',
+            registry__pb2.RegisterVerifierRequest.SerializeToString,
+            registry__pb2.RegisterVerifierResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def VerifierHeartbeat(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/VerifierHeartbeat',
+            registry__pb2.VerifierHeartbeatRequest.SerializeToString,
+            registry__pb2.VerifierHeartbeatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetVerifierConfig(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/GetVerifierConfig',
+            registry__pb2.GetVerifierConfigRequest.SerializeToString,
+            registry__pb2.GetVerifierConfigResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetVerifierHealth(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/GetVerifierHealth',
+            registry__pb2.GetVerifierHealthRequest.SerializeToString,
+            registry__pb2.GetVerifierHealthResponse.FromString,
             options,
             channel_credentials,
             insecure,

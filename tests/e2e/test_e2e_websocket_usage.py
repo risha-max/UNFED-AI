@@ -40,11 +40,14 @@ class _FakeDiscovery:
         return (["vision-a:50061"], [b"pk"])
 
     def discover(self, model_id: str):
-        return [
+        nodes = [
             _FakeNode("mpc-a:50049", 0, "mpc"),
             _FakeNode("node-b:50052", 1, "compute"),
             _FakeNode("vision-a:50061", 0, "vision"),
         ]
+        if not model_id:
+            nodes.append(_FakeNode("daemon:50070", -1, "daemon"))
+        return nodes
 
     def discover_compute(self, model_id: str):
         return [_FakeNode("node-b:50052", 1, "compute")]
@@ -52,17 +55,27 @@ class _FakeDiscovery:
     def discover_mpc(self, model_id: str):
         return [_FakeNode("mpc-a:50049", 0, "mpc")]
 
+    def get_verifier_health(self):
+        class _H:
+            healthy_verifier_count = 1
+            required_verifier_count = 1
+            healthy = True
+        return _H()
+
 
 class _FakeDiscoveryNoMpc(_FakeDiscovery):
     def build_circuit(self, model_id: str):
         return (["node-a:50051", "node-b:50052"], [b"pk-a", b"pk-b"])
 
     def discover(self, model_id: str):
-        return [
+        nodes = [
             _FakeNode("node-a:50051", 0, "compute"),
             _FakeNode("node-b:50052", 1, "compute"),
             _FakeNode("vision-a:50061", 0, "vision"),
         ]
+        if not model_id:
+            nodes.append(_FakeNode("daemon:50070", -1, "daemon"))
+        return nodes
 
     def discover_compute(self, model_id: str):
         return [
@@ -72,6 +85,15 @@ class _FakeDiscoveryNoMpc(_FakeDiscovery):
 
     def discover_mpc(self, model_id: str):
         return []
+
+
+class _FakeDiscoveryNoDaemon(_FakeDiscovery):
+    def discover(self, model_id: str):
+        return [
+            _FakeNode("mpc-a:50049", 0, "mpc"),
+            _FakeNode("node-b:50052", 1, "compute"),
+            _FakeNode("vision-a:50061", 0, "vision"),
+        ]
 
 
 class _FakeWebSocket:
@@ -401,6 +423,36 @@ async def test_ws_usage_rejects_when_mpc_required_but_absent(monkeypatch):
     )
     assert any(
         m.get("type") == "error" and "missing MPC shard-0 entry" in m.get("message", "")
+        for m in ws.messages
+    )
+
+
+@pytest.mark.anyio
+async def test_ws_usage_rejects_when_daemon_required_but_absent(monkeypatch):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.delenv("UNFED_REQUIRE_MPC", raising=False)
+    monkeypatch.delenv("UNFED_REQUIRE_DAEMON", raising=False)
+    monkeypatch.setattr("client.client.UnfedClient", FakeClient)
+    monkeypatch.setattr(web_server, "get_discovery", lambda: _FakeDiscoveryNoDaemon())
+    monkeypatch.setattr(web_server, "_check_client_balance", lambda *_: (True, 10.0))
+
+    ws = _FakeWebSocket()
+    await web_server._run_generation(
+        websocket=ws,
+        prompt="hello",
+        image_path=None,
+        model_type="qwen2",
+        max_tokens=4,
+        use_voting=False,
+        model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct",
+        cluster_endpoint="",
+        client_address="0xabc",
+    )
+    assert any(
+        m.get("type") == "error" and "No healthy daemon available" in m.get("message", "")
         for m in ws.messages
     )
 

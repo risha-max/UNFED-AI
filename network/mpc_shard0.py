@@ -63,6 +63,12 @@ from network.mpc_protocols import (
     secure_rmsnorm, secure_softmax, secure_silu, secure_gate_up,
     secure_matmul, allocate_layer0_triples,
 )
+from network.share_auth import (
+    PAYLOAD_HASH_VERSION,
+    SharePayload,
+    canonical_share_payload_bytes,
+    sign_bytes,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +825,13 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._daemon_stub = None
         self._private_key = None
         self._peer_stub = None  # MPCPeerStub for calling Node B
+        self._registration_share_signing_private_key = None
+        self._session_nonce_by_session: dict[str, str] = {}
+        self._session_step_by_session: dict[str, int] = {}
+        self._require_daemon = (
+            os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
+            not in ("0", "false", "no", "off")
+        )
 
     def _connect_peer(self):
         """Connect to Node B's MPCPeer service."""
@@ -850,52 +863,86 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 print(f"[MPC-A] Connected to chain daemon at "
                       f"{daemon.address}")
             else:
-                print(f"[MPC-A] No daemon found — shares won't be recorded")
+                print("[MPC-A] No daemon found")
         except Exception:
             print(f"[MPC-A] Could not connect to daemon")
 
     def _record_dual_shares(self, session_id: str, output: torch.Tensor):
         """Submit compute shares for both MPC nodes to the daemon."""
         if not self._daemon_stub or not self._node_id:
+            if self._require_daemon:
+                raise RuntimeError("Daemon is required but unavailable for MPC share submission.")
             return
 
         act_hash = hashlib.sha256(
             output.contiguous().float().numpy().tobytes()
         ).hexdigest()[:16]
 
-        from economics.share_chain import ComputeShare
         from economics.distributed_chain import share_to_proto
-
-        share_a = ComputeShare(
-            node_id=self._node_id,
-            shard_index=0,
-            session_id=session_id,
-            activation_hash=act_hash,
-            tokens_processed=1,
-            share_weight=1.0,
-        )
-        share_b = ComputeShare(
-            node_id=self._peer_node_id,
-            shard_index=0,
-            session_id=session_id,
-            activation_hash=act_hash,
-            tokens_processed=1,
-            share_weight=1.0,
-        )
+        shares = [self._build_signed_share(self._node_id, session_id, act_hash)]
+        if self._peer_node_id and not self._peer_node_id.startswith("peer-of-"):
+            # TODO: emit peer-signed share once role-B signs and submits directly.
+            pass
 
         try:
             self._daemon_stub.SubmitShares(
                 inference_pb2.SubmitSharesRequest(
-                    shares=[share_to_proto(share_a),
-                            share_to_proto(share_b)],
+                    shares=[share_to_proto(s) for s in shares],
                     submitter_id=self._node_id,
                 ),
                 timeout=5,
             )
-            print(f"[MPC-A] Submitted dual shares for session "
+            print(f"[MPC-A] Submitted signed share(s) for session "
                   f"{session_id[:8]}...")
         except Exception:
+            if self._require_daemon:
+                raise RuntimeError("Daemon became unreachable during MPC share submission.")
             print(f"[MPC-A] Failed to submit shares to daemon")
+
+    def _build_signed_share(self, node_id: str, session_id: str, act_hash: str):
+        from economics.share_chain import ComputeShare
+        nonce = self._session_nonce_by_session.get(session_id)
+        if nonce is None:
+            nonce = uuid.uuid4().hex
+            self._session_nonce_by_session[session_id] = nonce
+            self._session_step_by_session[session_id] = 0
+        step = self._session_step_by_session.get(session_id, 0)
+        self._session_step_by_session[session_id] = step + 1
+        ts = time.time()
+        ts_ms = int(ts * 1000)
+        payload = SharePayload(
+            node_id=node_id,
+            shard_index=0,
+            session_id=session_id,
+            session_nonce=nonce,
+            step_index=step,
+            activation_hash=act_hash,
+            tokens_processed=1,
+            share_weight=1.0,
+            timestamp_ms=ts_ms,
+            payload_hash_version=PAYLOAD_HASH_VERSION,
+        )
+        if not self._registration_share_signing_private_key:
+            raise RuntimeError("MPC share signing key not initialized")
+        signature = sign_bytes(
+            self._registration_share_signing_private_key,
+            canonical_share_payload_bytes(payload),
+        )
+        return ComputeShare(
+            node_id=node_id,
+            shard_index=0,
+            session_id=session_id,
+            activation_hash=act_hash,
+            tokens_processed=1,
+            timestamp=ts,
+            share_weight=1.0,
+            session_nonce=nonce,
+            step_index=step,
+            timestamp_ms=ts_ms,
+            signature=signature,
+            payload_hash_version=PAYLOAD_HASH_VERSION,
+            validated=False,
+        )
 
     def Forward(self, request, context):
         """Handle a forward pass through the MPC layer (Node A only)."""
@@ -904,6 +951,10 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         try:
             if self.mpc.role != "A":
                 context.set_details("Only Node A accepts Forward requests")
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                return inference_pb2.ForwardResponse()
+            if self._require_daemon and self._daemon_stub is None:
+                context.set_details("Daemon is required but unavailable.")
                 context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
                 return inference_pb2.ForwardResponse()
 
@@ -1045,6 +1096,10 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     activation_data=activation_bytes,
                     tensor_shape=list(shape),
                     is_prefill=request.is_prefill,
+                    # MPC shard-0 serializes activations as float32 bytes.
+                    # Set wire_dtype explicitly so downstream shards never
+                    # decode using a global float16 default.
+                    wire_dtype="float32",
                 )
                 if request.remaining_circuit:
                     remaining = list(request.remaining_circuit)
@@ -1163,6 +1218,9 @@ def serve(role: str, port: int, peer_address: str, host: str = "[::]",
             servicer._peer_address = peer_address
             servicer._peer_node_id = f"peer-of-{registration.node_id[:8]}"
             servicer._private_key = registration.private_key
+            servicer._registration_share_signing_private_key = (
+                registration.share_signing_private_key
+            )
             print(f"[MPC-{role}] Registered as 'mpc' with registry "
                   f"at {registry_address}")
 

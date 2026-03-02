@@ -285,13 +285,46 @@ async def get_health(model_id: str = ""):
     try:
         discovery = get_discovery()
         health = discovery.get_pool_health(model_id)
+        daemon_count = len([
+            n for n in discovery.discover("")
+            if getattr(n, "node_type", "") == "daemon"
+        ])
+        verifier = None
+        get_verifier_health = getattr(discovery, "get_verifier_health", None)
+        if callable(get_verifier_health):
+            verifier = get_verifier_health()
         if health:
             return {
                 "model_id": health.model_id,
-                "total_nodes": health.total_nodes,
                 "total_shards": health.total_shards,
-                "is_healthy": health.is_healthy,
-                "shard_coverage": list(health.shard_coverage),
+                "is_healthy": health.overall_status == "healthy",
+                "overall_status": health.overall_status,
+                "can_serve": health.can_serve,
+                "shards": [
+                    {
+                        "shard_index": s.shard_index,
+                        "node_count": s.node_count,
+                        "status": s.status,
+                    }
+                    for s in health.shards
+                ],
+                "daemon_required": (
+                    os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
+                    not in ("0", "false", "no", "off")
+                ),
+                "daemon_count": daemon_count,
+                "verifier_required": (
+                    os.environ.get("UNFED_REQUIRE_VERIFIER", "1").strip().lower()
+                    not in ("0", "false", "no", "off")
+                ),
+                "healthy_verifier_count": (
+                    int(getattr(verifier, "healthy_verifier_count", 0) or 0)
+                    if verifier is not None else 0
+                ),
+                "required_verifier_count": (
+                    int(getattr(verifier, "required_verifier_count", 1) or 1)
+                    if verifier is not None else 1
+                ),
             }
         return {"error": "No health data available"}
     except Exception as e:
@@ -483,6 +516,10 @@ async def chain_fees():
             "estimated_cost_100": resp.estimated_cost,
             "suggested_tip": resp.suggested_tip,
             "daemon_available": True,
+            "daemon_required": (
+                os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
+                not in ("0", "false", "no", "off")
+            ),
         }
     except Exception as e:
         return {
