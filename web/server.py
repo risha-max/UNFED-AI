@@ -489,6 +489,8 @@ async def chain_node_totals():
 async def chain_fees():
     """Get current fee market data from the daemon's fee oracle."""
     import grpc as _grpc
+    import inference_pb2
+    import inference_pb2_grpc
     try:
         daemon = _discover_daemon()
         if not daemon:
@@ -501,7 +503,10 @@ async def chain_fees():
                 "fee_history": [],
             }
 
-        channel = _grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
+        channel = _grpc.insecure_channel(
+            daemon.address,
+            options=app_config.GRPC_OPTIONS,
+        )
         stub = inference_pb2_grpc.InferenceNodeStub(channel)
 
         resp = stub.GetFeeEstimate(
