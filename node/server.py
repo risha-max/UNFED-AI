@@ -17,11 +17,13 @@ Usage:
 """
 
 import argparse
+import builtins
 import hashlib
 import io
 import json
 import os
 import random
+import re
 import signal
 import sys
 import time
@@ -54,6 +56,57 @@ from economics.distributed_chain import (
 from economics.share_chain import ComputeShare
 
 _SIMPLE_LOGS_ENABLED = True
+_COLOR_ENABLED = (
+    os.environ.get("UNFED_COLOR", "1") != "0"
+    and "NO_COLOR" not in os.environ
+    and sys.stdout.isatty()
+)
+
+
+def _colorize_tagged_line(line: str) -> str:
+    if not _COLOR_ENABLED:
+        return line
+    m = re.match(r"^(\s*)(\[[^\]]+\])(.*)$", line)
+    if not m:
+        return line
+    lead, tag, tail = m.groups()
+    lower = tag.lower()
+    if "cheat" in lower:
+        code = "91"
+    elif "vision" in lower:
+        code = "95"
+    elif "mpc" in lower:
+        code = "94"
+    elif "auto" in lower:
+        code = "94"
+    elif "node" in lower:
+        code = "92"
+    elif "daemon" in lower:
+        code = "93"
+    elif "registry" in lower:
+        code = "96"
+    else:
+        code = "90"
+    return f"{lead}\x1b[{code}m{tag}\x1b[0m{tail}"
+
+
+def _colorize_text(text: str) -> str:
+    if not _COLOR_ENABLED or not text:
+        return text
+    return "\n".join(_colorize_tagged_line(part) for part in text.split("\n"))
+
+
+def print(*args, **kwargs):  # type: ignore[override]
+    text = kwargs.get("sep", " ").join(str(a) for a in args)
+    text = _colorize_text(text)
+    out_kwargs = {}
+    if "file" in kwargs:
+        out_kwargs["file"] = kwargs["file"]
+    if "flush" in kwargs:
+        out_kwargs["flush"] = kwargs["flush"]
+    if "end" in kwargs:
+        out_kwargs["end"] = kwargs["end"]
+    builtins.print(text, **out_kwargs)
 
 
 def _simple_log(message: str):
