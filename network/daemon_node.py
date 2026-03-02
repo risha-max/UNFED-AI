@@ -51,6 +51,13 @@ from economics.distributed_chain import (
     share_to_proto, proto_to_share, block_to_proto, proto_to_block,
 )
 
+_SIMPLE_LOGS_ENABLED = True
+
+
+def _simple_log(message: str):
+    if _SIMPLE_LOGS_ENABLED:
+        print(message)
+
 
 # ---------------------------------------------------------------------------
 # DaemonServicer — gRPC service
@@ -83,7 +90,7 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
         self.chain.add_shares(shares)
 
         submitter = request.submitter_id[:8] if request.submitter_id else "unknown"
-        print(f"[Daemon] Received {len(shares)} share(s) from {submitter}...")
+        _simple_log(f"[Daemon] Received {len(shares)} share(s) from {submitter}...")
 
         return inference_pb2.SubmitSharesResponse(
             accepted=len(shares),
@@ -213,8 +220,10 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
         if self.fee_oracle is not None:
             new_fee = self.fee_oracle.update(block)
             if len(block.shares) > 0:
-                print(f"[Daemon] Fee oracle updated: base_fee={new_fee:.6f}, "
-                      f"utilization={self.fee_oracle.get_utilization():.2%}")
+                _simple_log(
+                    f"[Daemon] Fee oracle updated: base_fee={new_fee:.6f}, "
+                    f"utilization={self.fee_oracle.get_utilization():.2%}"
+                )
         msg = block_to_proto(block, proposer_id=self.node_id)
         self._notify_subscribers(msg)
 
@@ -281,9 +290,11 @@ class GossipManager:
                 if self._running and self.chain.has_pending_shares():
                     block = self.chain.produce_block()
                     if block is not None:
-                        print(f"[Daemon] Produced block #{block.index}: "
-                              f"{len(block.shares)} shares "
-                              f"(hash={block.block_hash[:12]}...)")
+                        _simple_log(
+                            f"[Daemon] Produced block #{block.index}: "
+                            f"{len(block.shares)} shares "
+                            f"(hash={block.block_hash[:12]}...)"
+                        )
                         # Notify subscribers
                         self.servicer.notify_new_block(block)
                         # Gossip to peers
@@ -351,8 +362,10 @@ class GossipManager:
                 if accepted:
                     synced += 1
             if synced > 0:
-                print(f"[Daemon] Synced {synced} block(s) from {peer_address} "
-                      f"(height: {my_height} → {self.chain.get_tip_height()})")
+                _simple_log(
+                    f"[Daemon] Synced {synced} block(s) from {peer_address} "
+                    f"(height: {my_height} → {self.chain.get_tip_height()})"
+                )
             return synced
         except grpc.RpcError:
             return 0
@@ -531,8 +544,8 @@ def serve(port: int = 50070, host: str = "[::]",
     )
     gossip.start()
 
-    print(f"[Daemon] Ready. Chain daemon is running.")
-    print(f"[Daemon] Compute nodes should submit shares to {public_address}")
+    _simple_log("[Daemon] Ready. Chain daemon is running.")
+    _simple_log(f"[Daemon] Compute nodes should submit shares to {public_address}")
 
     # Graceful shutdown
     shutdown_event = threading.Event()
@@ -570,7 +583,13 @@ if __name__ == "__main__":
                         help="Registry address (default: from config)")
     parser.add_argument("--db", default=None,
                         help="SQLite database path (default: ~/.unfed/chain.db)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Disable simple daemon status logs")
     args = parser.parse_args()
+    if args.quiet:
+        import builtins
+        builtins.print = lambda *a, **k: None
+        _SIMPLE_LOGS_ENABLED = False
 
     serve(
         port=args.port,

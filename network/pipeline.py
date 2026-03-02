@@ -48,6 +48,7 @@ import config
 import inference_pb2
 import inference_pb2_grpc
 from network.discovery import RegistryClient
+from network.admission import preflight_model_admission, resolve_mpc_required_flag
 from network.resilience import create_resilient_channel
 
 
@@ -68,6 +69,7 @@ class PipelineScheduler:
         self.tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
         self.discovery = RegistryClient(registry_address)
         self.max_concurrent = max_concurrent
+        self._require_mpc = resolve_mpc_required_flag()
         self._stubs: dict[str, inference_pb2_grpc.InferenceNodeStub] = {}
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent * 2)
 
@@ -82,6 +84,13 @@ class PipelineScheduler:
         """Generate text for a single prompt (used internally)."""
         session_id = str(uuid.uuid4())
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids[0].tolist()
+        preflight = preflight_model_admission(
+            self.discovery,
+            config.MODEL_NAME,
+            require_mpc=self._require_mpc,
+        )
+        if not preflight.ok:
+            raise RuntimeError(preflight.message)
 
         if circuit is None:
             result = self.discovery.build_circuit(config.MODEL_NAME)
@@ -143,6 +152,14 @@ class PipelineScheduler:
         locks = [threading.Lock() for _ in prompts]
 
         # Build a shared circuit for all queries
+        preflight = preflight_model_admission(
+            self.discovery,
+            config.MODEL_NAME,
+            require_mpc=self._require_mpc,
+        )
+        if not preflight.ok:
+            raise RuntimeError(preflight.message)
+
         result = self.discovery.build_circuit(config.MODEL_NAME)
         if not result:
             print("[Pipeline] Cannot build circuit")

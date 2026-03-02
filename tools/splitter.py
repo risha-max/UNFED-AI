@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -37,7 +38,9 @@ from tools.inspector import (
     detect_format,
     load_hf_config,
     extract_architecture_from_config,
+    infer_architecture_from_keys,
 )
+from tools.gguf_utils import GGUFError, gguf_to_state_dict
 
 
 # Default piece size for P2P chunk hashing
@@ -106,6 +109,167 @@ def compute_chunk_hashes(path: str, chunk_size: int = P2P_PIECE_SIZE) -> list[st
                 break
             hashes.append(hashlib.sha256(piece).hexdigest())
     return hashes
+
+
+def _extract_layer_indices(state_dict_keys: list[str]) -> list[int]:
+    """Extract transformer layer indexes from canonical key names."""
+    patterns = (
+        re.compile(r"^model\.layers\.(\d+)\."),
+        re.compile(r"^layers\.(\d+)\."),
+    )
+    found: set[int] = set()
+    for key in state_dict_keys:
+        for pat in patterns:
+            match = pat.match(key)
+            if match:
+                found.add(int(match.group(1)))
+                break
+    return sorted(found)
+
+
+def _split_text_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    model_id: str,
+    output_dir: str,
+    output_format: str,
+    num_text_shards: int,
+) -> dict:
+    """Split a pre-loaded text-only state_dict into UNFED shard files.
+
+    This path is used for GGUF conversion where we don't have a full HF model
+    object to traverse, but keys are still in transformer-style naming.
+    """
+    key_list = list(state_dict.keys())
+    layer_indices = _extract_layer_indices(key_list)
+    if not layer_indices:
+        raise ValueError(
+            "GGUF does not expose supported transformer layer key names "
+            "(expected model.layers.<idx>.*). "
+            "Use original HF weights for splitting."
+        )
+
+    num_layers = max(layer_indices) + 1
+    if num_layers % num_text_shards != 0:
+        num_text_shards = _find_divisor(num_layers, num_text_shards)
+    layers_per_shard = num_layers // num_text_shards
+    ext = ".safetensors" if output_format == "safetensors" else ".pt"
+
+    weight_meta = {
+        k: (v.shape, str(v.dtype))
+        for k, v in state_dict.items()
+    }
+    inferred = infer_architecture_from_keys(weight_meta)
+    arch = {
+        "text": inferred.get("text", {}),
+        "vision": {},
+        "connector": {},
+    }
+
+    manifest = {
+        "model_id": model_id,
+        "model_type": inferred.get("model_type", "unknown"),
+        "format_version": 3,
+        "architecture": arch,
+        "stacks": {
+            "text_decoder": {
+                "stack_type": "decoder",
+                "num_layers": num_layers,
+                "layers_per_shard": layers_per_shard,
+                "num_shards": num_text_shards,
+                "architecture": arch["text"],
+            }
+        },
+        "shards": [],
+        "vision_shards": [],
+        "text_shards": [],
+        "source_format": "gguf",
+    }
+    manifest["text"] = {
+        "num_layers": num_layers,
+        "layers_per_shard": layers_per_shard,
+        "num_shards": num_text_shards,
+    }
+    manifest["vision"] = {
+        "num_layers": 0,
+        "layers_per_shard": 0,
+        "num_shards": 0,
+    }
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    embed_prefixes = ("model.embed_tokens.", "embed_tokens.")
+    norm_prefixes = ("model.norm.", "norm.")
+    head_prefixes = ("lm_head.",)
+    layer_pattern = re.compile(r"^(?:model\.)?layers\.(\d+)\.")
+
+    global_keys = []
+    for k in key_list:
+        if layer_pattern.match(k):
+            continue
+        if k.startswith(embed_prefixes) or k.startswith(norm_prefixes) or k.startswith(head_prefixes):
+            continue
+        global_keys.append(k)
+
+    for shard_idx in range(num_text_shards):
+        start_layer = shard_idx * layers_per_shard
+        end_layer = start_layer + layers_per_shard
+        is_first = shard_idx == 0
+        is_last = shard_idx == num_text_shards - 1
+
+        shard_sd: dict[str, torch.Tensor] = {}
+        for key, tensor in state_dict.items():
+            layer_match = layer_pattern.match(key)
+            if layer_match:
+                idx = int(layer_match.group(1))
+                if start_layer <= idx < end_layer:
+                    shard_sd[key] = tensor
+                continue
+            if is_first and key.startswith(embed_prefixes):
+                shard_sd[key] = tensor
+            elif is_last and (key.startswith(norm_prefixes) or key.startswith(head_prefixes)):
+                shard_sd[key] = tensor
+            elif is_first and key in global_keys:
+                shard_sd[key] = tensor
+
+        shard_file = f"text_shard_{shard_idx}{ext}"
+        shard_path = os.path.join(output_dir, shard_file)
+        save_shard(shard_sd, shard_path, output_format)
+        shard_size = os.path.getsize(shard_path)
+        shard_hash = compute_file_hash(shard_path)
+        chunk_hashes = compute_chunk_hashes(shard_path)
+
+        shard_entry = {
+            "shard_index": shard_idx,
+            "stack": "text_decoder",
+            "layer_start": start_layer,
+            "layer_end": end_layer,
+            "has_embedding": is_first,
+            "has_head": is_last,
+            "has_norm": is_last,
+            "file": shard_file,
+            "size_bytes": shard_size,
+            "sha256": shard_hash,
+            "chunk_size": P2P_PIECE_SIZE,
+            "chunk_hashes": chunk_hashes,
+        }
+        manifest["shards"].append(shard_entry)
+        manifest["text_shards"].append({
+            "shard_index": shard_idx,
+            "layer_start": start_layer,
+            "layer_end": end_layer,
+            "has_embedding": is_first,
+            "has_lm_head": is_last,
+            "file": shard_file,
+            "size_bytes": shard_size,
+            "sha256": shard_hash,
+            "chunk_size": P2P_PIECE_SIZE,
+            "chunk_hashes": chunk_hashes,
+        })
+
+    manifest_path = os.path.join(output_dir, "manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +683,32 @@ def split_model(
     print("[1/5] Inspecting model...")
     hf_config = None
     fmt = detect_format(model_path)
+    if fmt == "gguf":
+        print("  Detected GGUF input. Converting and splitting from tensor keys.")
+        try:
+            state_dict, gguf_meta = gguf_to_state_dict(model_path)
+        except GGUFError as exc:
+            raise ValueError(f"GGUF conversion failed: {exc}") from exc
+        manifest = _split_text_state_dict(
+            state_dict=state_dict,
+            model_id=gguf_meta.get("name") or model_path,
+            output_dir=output_dir,
+            output_format=output_format,
+            num_text_shards=num_text_shards,
+        )
+        elapsed = time.time() - start_time
+        total_shards = len(manifest.get("shards", []))
+        total_size = sum(s["size_bytes"] for s in manifest["shards"])
+        print()
+        print("=" * 60)
+        print(f"  GGUF split complete in {elapsed:.1f}s")
+        print(f"  Output:  {output_dir}/")
+        print(f"  Shards:  {total_shards} ({total_size / (1024 * 1024):.1f} MB total)")
+        print(f"  Format:  {output_format}")
+        print(f"  Manifest: {os.path.join(output_dir, 'manifest.json')}")
+        print("=" * 60)
+        return manifest
+
     if fmt == "hf_dir":
         hf_config = load_hf_config(model_path)
     elif fmt == "unknown":

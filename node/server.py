@@ -53,6 +53,13 @@ from economics.distributed_chain import (
 )
 from economics.share_chain import ComputeShare
 
+_SIMPLE_LOGS_ENABLED = True
+
+
+def _simple_log(message: str):
+    if _SIMPLE_LOGS_ENABLED:
+        print(message)
+
 
 def tensor_to_bytes(tensor: torch.Tensor,
                     compress: bool = None,
@@ -413,6 +420,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
     def Forward(self, request, context):
         """Handle a forward pass request."""
         session_id = request.session_id
+        start_ts = time.time()
+        forward_ok = False
+        emitted_token = False
+        sampled_token = None
 
         # Track active inferences for bandwidth priority
         with self._inference_lock:
@@ -577,6 +588,12 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     is_eos=is_eos,
                     activation_commitment=activation_commitment,
                 )
+                forward_ok = True
+                emitted_token = True
+                _simple_log(
+                    f"[Node] shard={self.shard_index} session={session_id[:8]} "
+                    f"token={sampled_token} eos={is_eos}"
+                )
 
                 # Encrypt the response for return-path privacy
                 if my_response_key:
@@ -606,6 +623,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     resp.encrypted_response = encrypt_response(
                         my_response_key, activation_bytes)
 
+                forward_ok = True
                 return resp
 
             else:
@@ -672,6 +690,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         activation_commitment=response.activation_commitment,
                     )
 
+                forward_ok = True
                 return response
 
         except Exception as e:
@@ -680,6 +699,11 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             return inference_pb2.ForwardResponse()
         finally:
+            if forward_ok and not emitted_token:
+                _simple_log(
+                    f"[Node] shard={self.shard_index} session={session_id[:8]} "
+                    f"forwarded in {(time.time() - start_ts) * 1000:.0f}ms"
+                )
             with self._inference_lock:
                 self._active_inferences -= 1
 
@@ -1742,7 +1766,13 @@ if __name__ == "__main__":
                         help="Path to TLS certificate PEM file")
     parser.add_argument("--tls-key", type=str, default=None,
                         help="Path to TLS private key PEM file")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Disable simple per-request service logs")
     args = parser.parse_args()
+    if args.quiet:
+        import builtins
+        builtins.print = lambda *a, **k: None
+        _SIMPLE_LOGS_ENABLED = False
 
     if args.auto:
         serve_auto(

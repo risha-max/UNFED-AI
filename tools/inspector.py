@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+from tools.gguf_utils import GGUFError, gguf_weight_keys, read_gguf_metadata
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,8 @@ def load_weight_keys(path: str) -> dict[str, tuple[torch.Size, str]]:
     elif ext in (".pt", ".pth", ".bin"):
         sd = torch.load(path, map_location="meta", weights_only=True)
         return {k: (v.shape, str(v.dtype)) for k, v in sd.items()}
+    elif ext == ".gguf":
+        return gguf_weight_keys(path)
 
     return {}
 
@@ -127,8 +130,12 @@ def gather_all_weights(model_path: str, fmt: str) -> dict[str, tuple[torch.Size,
                     all_keys.update(keys)
                 except Exception as e:
                     print(f"  Warning: could not load {f.name}: {e}")
-    elif fmt in ("safetensors", "pt"):
-        all_keys = load_weight_keys(model_path)
+    elif fmt in ("safetensors", "pt", "gguf"):
+        try:
+            all_keys = load_weight_keys(model_path)
+        except Exception as e:
+            print(f"  Warning: could not inspect {model_path}: {e}")
+            all_keys = {}
     else:
         print(f"  Cannot inspect format: {fmt}")
 
@@ -553,6 +560,7 @@ def inspect_model(model_path: str, fmt: str = "auto", verbose: bool = False) -> 
         "components": [],
         "recommendations": [],
         "weight_files": [],
+        "gguf": {},
     }
 
     # Detect format
@@ -574,6 +582,7 @@ def inspect_model(model_path: str, fmt: str = "auto", verbose: bool = False) -> 
 
     # Try loading config.json
     hf_config = None
+    gguf_meta = None
     if fmt == "hf_dir":
         hf_config = load_hf_config(model_path)
         if hf_config:
@@ -581,6 +590,15 @@ def inspect_model(model_path: str, fmt: str = "auto", verbose: bool = False) -> 
             report["architecture"] = extract_architecture_from_config(hf_config)
             report["model_type"] = hf_config.get("model_type", "unknown")
             report["architectures"] = hf_config.get("architectures", [])
+    elif fmt == "gguf":
+        try:
+            gguf_meta = read_gguf_metadata(model_path)
+            report["gguf"] = gguf_meta
+            report["config_source"] = "gguf metadata"
+            if gguf_meta.get("architecture"):
+                report["model_type"] = str(gguf_meta["architecture"])
+        except GGUFError as exc:
+            raise ValueError(str(exc)) from exc
 
     # Fill layer counts from config.json if available
     if hf_config:
@@ -659,6 +677,25 @@ def inspect_model(model_path: str, fmt: str = "auto", verbose: bool = False) -> 
     if has_pt and not has_safetensors:
         recs.append("Weights are in PyTorch pickle format. "
                      "Convert to safetensors for security: unfed convert <file> -o <out>.safetensors")
+    if fmt == "gguf":
+        dtypes = set(report.get("gguf", {}).get("tensor_dtypes", {}).keys())
+        unsupported = sorted(d for d in dtypes if d not in {"float16", "float32", "float64"})
+        if unsupported:
+            recs.append(
+                "GGUF uses unsupported/quantized tensor dtypes for conversion: "
+                + ", ".join(unsupported)
+                + ". Use non-quantized GGUF or original HF weights for splitting."
+            )
+        else:
+            recs.append(
+                "GGUF tensors are convertible. Run: "
+                "unfed convert <model.gguf> -o model.safetensors"
+            )
+        if report.get("num_text_layers", 0) == 0:
+            recs.append(
+                "Could not infer transformer layer layout from GGUF tensor names. "
+                "This GGUF may use llama.cpp key naming that is not directly splittable."
+            )
     total_params = report.get("total_params", 0)
     if total_params > 0:
         size_gb = total_params * 4 / (1024 ** 3)  # Assuming float32
@@ -674,7 +711,11 @@ def inspect_model(model_path: str, fmt: str = "auto", verbose: bool = False) -> 
 
 def run_inspect(args):
     """CLI handler for 'unfed inspect'."""
-    report = inspect_model(args.model_path, args.format, args.verbose)
+    try:
+        report = inspect_model(args.model_path, args.format, args.verbose)
+    except Exception as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
     _print_report(report, args.verbose)
 
 
@@ -697,6 +738,19 @@ def _print_report(report: dict, verbose: bool = False):
         print("  Weight files:")
         for f in report["weight_files"]:
             print(f"    {f['name']:40s}  {f['size_mb']:>8.1f} MB")
+        print()
+
+    if report.get("gguf"):
+        gguf = report["gguf"]
+        print("  GGUF metadata:")
+        print(f"    architecture                    {gguf.get('architecture', 'unknown')}")
+        print(f"    tensor_count                    {gguf.get('tensor_count', 0)}")
+        print(f"    total_tensor_bytes              {gguf.get('total_tensor_bytes', 0):,}")
+        if gguf.get("tensor_dtypes"):
+            dtype_summary = ", ".join(
+                f"{k}:{v}" for k, v in sorted(gguf["tensor_dtypes"].items())
+            )
+            print(f"    tensor_dtypes                   {dtype_summary}")
         print()
 
     if report["components"]:

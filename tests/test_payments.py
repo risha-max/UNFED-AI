@@ -180,6 +180,14 @@ class TestPaymentContract:
         status = payment_contract.get_status()
         assert "onchain" in status
 
+    def test_usage_accumulates_multiple_reports(self, payment_contract):
+        payment_contract.report_usage(10, 1)
+        payment_contract.report_usage(20, 2)
+        summary = _make_settlement({"node_A": 1.0})
+        settlement = payment_contract.post_settlement(summary)
+        # (10+20)*0.0001 + (1+2)*0.001 = 0.003 + 0.003 = 0.006
+        assert abs(settlement.total_payout - 0.006) < 1e-9
+
 
 class TestSettlementProcessor:
     """Tests for the settlement processor."""

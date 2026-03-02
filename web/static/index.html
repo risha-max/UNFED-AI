@@ -89,10 +89,11 @@
                 <div class="setting-group">
                     <label>Model</label>
                     <select id="modelSelect">
-                        <option value="qwen2" disabled>Qwen2.5-0.5B (text) — not installed</option>
-                        <option value="qwen2_vl" disabled>Qwen2-VL-2B (vision) — not installed</option>
-                        <option value="smolvlm" selected>SmolVLM-256M (vision)</option>
+                        <option value="" selected disabled>Loading models...</option>
                     </select>
+                    <p class="setting-hint" id="modelSourceHint">
+                        Dynamic model list from the connected registry.
+                    </p>
                 </div>
 
                 <div class="setting-group">

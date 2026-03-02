@@ -5,11 +5,13 @@
 const App = {
     // Shared state between tabs
     state: {
-        circuit: null,       // Current circuit info from WebSocket
-        nodes: [],           // All registered nodes
-        chatWs: null,        // Chat WebSocket connection
-        chainWs: null,       // Chain WebSocket connection
-        generating: false,   // Whether generation is in progress
+        circuit: null,          // Current circuit info from WebSocket
+        nodes: [],              // All registered nodes
+        chatWs: null,           // Chat WebSocket connection
+        chainWs: null,          // Chain WebSocket connection
+        generating: false,      // Whether generation is in progress
+        models: [],             // Resolved model catalog
+        selectedModelId: "",    // Active model_id
     },
 
     // Event bus for cross-tab communication
@@ -70,6 +72,143 @@ const App = {
             if (this.state.chatWs) {
                 this.state.chatWs.close();
             }
+        });
+    },
+
+    // ---- Model mode / selector ----
+    inferModelType(modelId) {
+        const lower = String(modelId || "").toLowerCase();
+        if (lower.includes("smolvlm")) return "smolvlm";
+        if (lower.includes("qwen2-vl") || lower.includes("qwen2_vl")) return "qwen2_vl";
+        return "qwen2";
+    },
+
+    isVisionCapable(modelType, modelId) {
+        if (modelType === "smolvlm" || modelType === "qwen2_vl") {
+            return true;
+        }
+        const lower = String(modelId || "").toLowerCase();
+        return lower.includes("vl") || lower.includes("vision");
+    },
+
+    normalizeRegistryModels(rawModels) {
+        return (rawModels || []).map((m) => {
+            const modelId = m.model_id || "";
+            const modelType = this.inferModelType(modelId);
+            const totalShards = Number(m.total_shards || 0);
+            const coveredShards = Number(m.covered_shards || 0);
+            const canServe = Boolean(
+                m.can_serve !== undefined ? m.can_serve : m.is_healthy
+            );
+            return {
+                model_id: modelId,
+                model_type: modelType,
+                vision_capable: this.isVisionCapable(modelType, modelId),
+                total_nodes: Number(m.total_nodes || 0),
+                total_shards: totalShards,
+                covered_shards: coveredShards,
+                can_serve: canServe,
+                label: `${modelId} (${coveredShards}/${totalShards} shards)`,
+            };
+        });
+    },
+
+    setModelSourceHint(text, isError = false) {
+        const hint = document.getElementById("modelSourceHint");
+        if (!hint) return;
+        hint.textContent = text;
+        hint.style.color = isError ? "#ef4444" : "";
+    },
+
+    populateModelSelect(models, placeholder) {
+        const select = document.getElementById("modelSelect");
+        if (!select) return;
+        select.innerHTML = "";
+
+        if (!models.length) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = placeholder;
+            opt.disabled = true;
+            opt.selected = true;
+            select.appendChild(opt);
+            this.state.models = [];
+            this.state.selectedModelId = "";
+            this.emit("modelSelectionChanged", null);
+            return;
+        }
+
+        const preferred = localStorage.getItem("unfed_model_registry") || "";
+        let selectedId = "";
+
+        models.forEach((m) => {
+            const opt = document.createElement("option");
+            opt.value = m.model_id;
+            opt.dataset.modelType = m.model_type;
+            opt.dataset.vision = m.vision_capable ? "true" : "false";
+            opt.dataset.canServe = m.can_serve ? "true" : "false";
+            opt.disabled = !m.can_serve;
+            opt.textContent = m.can_serve ? m.label : `${m.label} — unavailable`;
+            select.appendChild(opt);
+        });
+
+        if (preferred && models.some((m) => m.model_id === preferred && m.can_serve)) {
+            selectedId = preferred;
+        } else {
+            const firstHealthy = models.find((m) => m.can_serve);
+            selectedId = firstHealthy ? firstHealthy.model_id : "";
+        }
+
+        if (selectedId) {
+            select.value = selectedId;
+            this.state.selectedModelId = selectedId;
+            localStorage.setItem("unfed_model_registry", selectedId);
+            this.emit("modelSelectionChanged", this.getSelectedModel());
+            return;
+        }
+
+        this.state.selectedModelId = "";
+        this.emit("modelSelectionChanged", null);
+    },
+
+    getSelectedModel() {
+        const select = document.getElementById("modelSelect");
+        if (!select || !select.value) return null;
+        const modelId = select.value;
+        const modelType = select.selectedOptions[0]?.dataset?.modelType || this.inferModelType(modelId);
+        const visionCapable = select.selectedOptions[0]?.dataset?.vision === "true";
+        const canServe = select.selectedOptions[0]?.dataset?.canServe !== "false";
+        return {
+            model_id: modelId,
+            model_type: modelType,
+            vision_capable: visionCapable,
+            can_serve: canServe,
+        };
+    },
+
+    async refreshModelOptions() {
+        const data = await this.fetchJson("/api/models");
+        if (!data || data.error) {
+            this.populateModelSelect([], "Failed to load models from registry");
+            this.setModelSourceHint("Model discovery failed from registry.", true);
+            return;
+        }
+        const models = this.normalizeRegistryModels(data.models);
+        this.state.models = models;
+        this.populateModelSelect(models, "No models available in registry");
+        this.setModelSourceHint("Live model catalog from this registry.");
+    },
+
+    initModelMode() {
+        const select = document.getElementById("modelSelect");
+        if (!select) return;
+
+        select.addEventListener("change", () => {
+            const selected = this.getSelectedModel();
+            if (!selected) return;
+            this.state.selectedModelId = selected.model_id;
+            localStorage.setItem("unfed_model_registry", selected.model_id);
+            this.emit("modelSelectionChanged", selected);
         });
     },
 
@@ -256,8 +395,10 @@ const App = {
         this.initTabs();
         this.initWallet();
         this.initFaucet();
+        this.initModelMode();
         this.connectChat();
         this.connectChain();
+        this.refreshModelOptions();
 
         // Check registry health
         this.fetchJson('/api/network/nodes').then(data => {

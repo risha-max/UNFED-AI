@@ -22,6 +22,8 @@ Usage:
 
 import json
 import os
+import hashlib
+import re
 from typing import Optional
 
 from web3 import Web3
@@ -299,8 +301,7 @@ class OnChainEscrow:
         Returns:
             Transaction hash hex string
         """
-        hash_bytes = bytes.fromhex(
-            settlement_hash.replace("0x", "").ljust(64, "0")[:64])
+        hash_bytes = _to_bytes32_hash(settlement_hash)
         nodes = [Web3.to_checksum_address(a) for a in node_addresses]
         fn = self._contract.functions.postSettlement(
             hash_bytes, nodes, amounts_wei)
@@ -308,16 +309,14 @@ class OnChainEscrow:
 
     def finalize_settlement(self, settlement_hash: str) -> str:
         """Finalize a settlement after challenge window."""
-        hash_bytes = bytes.fromhex(
-            settlement_hash.replace("0x", "").ljust(64, "0")[:64])
+        hash_bytes = _to_bytes32_hash(settlement_hash)
         fn = self._contract.functions.finalizeSettlement(hash_bytes)
         return self._send_tx(
             fn, f"finalizeSettlement({settlement_hash[:16]}...)")
 
     def challenge_settlement(self, settlement_hash: str) -> str:
         """Challenge a settlement (fraud detected)."""
-        hash_bytes = bytes.fromhex(
-            settlement_hash.replace("0x", "").ljust(64, "0")[:64])
+        hash_bytes = _to_bytes32_hash(settlement_hash)
         fn = self._contract.functions.challengeSettlement(hash_bytes)
         return self._send_tx(
             fn, f"challengeSettlement({settlement_hash[:16]}...)")
@@ -401,3 +400,24 @@ def load_from_env(env_file: str) -> OnChainEscrow:
         operator_private_key=env["OPERATOR_PRIVATE_KEY"],
         token_address=env.get("TOKEN_ADDRESS", ""),
     )
+
+
+_HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _to_bytes32_hash(value: str) -> bytes:
+    """Convert settlement IDs to bytes32 accepted by the contract.
+
+    Accepts canonical hex settlement hashes (with or without 0x). For legacy
+    non-hex IDs (e.g., UUID strings), derives a deterministic bytes32 by
+    hashing the raw string with SHA-256.
+    """
+    if not value:
+        raise ValueError("settlement hash is required")
+
+    raw = value.strip()
+    no_prefix = raw[2:] if raw.startswith("0x") else raw
+    if _HEX64_RE.fullmatch(no_prefix):
+        return bytes.fromhex(no_prefix)
+
+    return hashlib.sha256(raw.encode("utf-8")).digest()

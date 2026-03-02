@@ -16,6 +16,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -37,6 +38,11 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "proto"))
 
 import config as app_config
+from network.admission import (
+    pick_first_eligible_model,
+    preflight_model_admission,
+    resolve_mpc_required_flag,
+)
 from network.discovery import RegistryClient, RegistryPool
 from web.auth import WalletAuth
 
@@ -58,6 +64,16 @@ _temp_dir = tempfile.mkdtemp(prefix="unfed_uploads_")
 _active_sessions: dict[str, dict] = {}
 _wallet_auth = WalletAuth()
 _onchain_escrow = None  # Lazily initialized from registry config
+_MAX_BILLING_INPUT_TOKENS = 200_000
+_MAX_BILLING_OUTPUT_TOKENS = 50_000
+_ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._/@:+-]{1,200}$")
+_ENDPOINT_RE = re.compile(r"^[A-Za-z0-9._-]+:\d{1,5}$")
+_ALLOWED_CLUSTER_ENDPOINTS = {
+    ep.strip()
+    for ep in os.environ.get("UNFED_ALLOWED_CLUSTER_ENDPOINTS", "").split(",")
+    if ep.strip()
+}
 
 
 def get_discovery() -> RegistryPool:
@@ -65,6 +81,72 @@ def get_discovery() -> RegistryPool:
     if _discovery is None:
         _discovery = RegistryPool([_registry_address])
     return _discovery
+
+
+def _normalize_eth_address(value: str) -> str:
+    """Validate and normalize EVM addresses."""
+    from web3 import Web3
+
+    raw = (value or "").strip()
+    if not raw or not _ETH_ADDRESS_RE.fullmatch(raw):
+        raise ValueError("Invalid wallet address format. Expected 0x + 40 hex chars.")
+    return Web3.to_checksum_address(raw)
+
+
+def _validate_model_id(model_id: str) -> str:
+    raw = (model_id or "").strip()
+    if not raw:
+        raise ValueError("model_id is required")
+    if not _MODEL_ID_RE.fullmatch(raw):
+        raise ValueError("Invalid model_id format")
+    return raw
+
+
+def _resolve_registry_endpoint(cluster_endpoint: str) -> str:
+    endpoint = (cluster_endpoint or "").strip()
+    if not endpoint:
+        return _registry_address
+    if not _ENDPOINT_RE.fullmatch(endpoint):
+        raise ValueError("Invalid cluster_endpoint format. Expected host:port.")
+    if endpoint == _registry_address or endpoint in _ALLOWED_CLUSTER_ENDPOINTS:
+        return endpoint
+    raise ValueError(
+        "cluster_endpoint is not allowed. "
+        "Use the local registry endpoint or configure UNFED_ALLOWED_CLUSTER_ENDPOINTS."
+    )
+
+
+def _lookup_models(discovery: RegistryPool) -> dict[str, dict]:
+    out = {}
+    for m in discovery.list_models():
+        preflight = preflight_model_admission(
+            discovery,
+            m.model_id,
+            require_mpc=resolve_mpc_required_flag(),
+        )
+        out[m.model_id] = {
+            "can_serve": preflight.ok,
+            "covered_shards": preflight.text.covered_shards,
+            "total_shards": preflight.text.total_shards,
+            "mpc_available": preflight.mpc_available,
+            "mpc_required": preflight.mpc_required,
+        }
+    return out
+
+
+def _validate_selected_model(discovery: RegistryPool, model_id: str) -> str:
+    selected = _validate_model_id(model_id)
+    catalog = _lookup_models(discovery)
+    if selected not in catalog:
+        available = ", ".join(sorted(catalog.keys())[:8]) or "none"
+        raise ValueError(
+            f"Model '{selected}' is not available in this registry. "
+            f"Available models: {available}"
+        )
+    preflight = preflight_model_admission(discovery, selected)
+    if not preflight.ok:
+        raise ValueError(preflight.message)
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +168,21 @@ async def list_models():
     try:
         discovery = get_discovery()
         models = discovery.list_models()
+        admission_map = _lookup_models(discovery)
         result = []
         for m in models:
+            model_info = admission_map.get(m.model_id, {})
+            can_serve = bool(model_info.get("can_serve", False))
+            covered_shards = int(model_info.get("covered_shards", 0))
             result.append({
                 "model_id": m.model_id,
                 "total_nodes": m.total_nodes,
-                "total_shards": m.total_shards,
-                "is_healthy": m.is_healthy,
+                "total_shards": int(model_info.get("total_shards", 0)),
+                "covered_shards": covered_shards,
+                "can_serve": can_serve,
+                "is_healthy": can_serve,  # backward compatibility
+                "mpc_required": bool(model_info.get("mpc_required", True)),
+                "mpc_available": bool(model_info.get("mpc_available", False)),
             })
         return {"models": result}
     except Exception as e:
@@ -478,7 +568,7 @@ def _check_client_balance(client_address: str,
         return balance > 0, balance_tokens
     except Exception as e:
         print(f"[Web] Balance check failed for {client_address}: {e}")
-        return True, 0.0  # fail-open if chain is unreachable
+        return False, 0.0
 
 
 @app.get("/api/client/balance")
@@ -486,6 +576,11 @@ async def get_client_balance(address: str = ""):
     """Get a client's escrow balance."""
     if not address:
         address = _wallet_auth.default_address
+    try:
+        address = _normalize_eth_address(address)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
     escrow = _get_escrow()
     if escrow is None:
         return {
@@ -542,6 +637,10 @@ async def faucet_drip(body: FaucetRequest):
         return JSONResponse(status_code=400, content={
             "error": "Missing 'address' field."
         })
+    try:
+        address = _normalize_eth_address(address)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
 
     now = time.time()
     cooldown = escrow.FAUCET_COOLDOWN
@@ -620,9 +719,18 @@ async def ws_chat(websocket: WebSocket):
     """
     await websocket.accept()
 
-    # Resolve client wallet from query param or fall back to demo default
+    # Resolve client wallet from query param or fall back to demo default.
     wallet_param = websocket.query_params.get("wallet", "")
-    client_address = _wallet_auth.authenticate(wallet_address=wallet_param)
+    try:
+        if wallet_param:
+            client_address = _normalize_eth_address(wallet_param)
+        else:
+            client_address = _wallet_auth.authenticate(wallet_address="")
+            client_address = _normalize_eth_address(client_address)
+    except ValueError as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1008)
+        return
 
     # Notify the client which address is active for this session
     await websocket.send_json({
@@ -695,36 +803,32 @@ async def _run_generation(
             })
             return
 
-        # If a specific cluster was selected, use its endpoint
-        registry_addr = _registry_address
-        if cluster_endpoint:
-            registry_addr = cluster_endpoint
+        registry_addr = _resolve_registry_endpoint(cluster_endpoint)
+        discovery = (get_discovery()
+                     if registry_addr == _registry_address
+                     else RegistryPool([registry_addr]))
 
-        # Determine model ID — try HF repo name first (v2 manifests use it),
-        # then fall back to local path for v1 compatibility.
-        if not model_id:
-            discovery = (RegistryPool([cluster_endpoint])
-                         if cluster_endpoint else get_discovery())
-            if model_type == "smolvlm":
-                candidates = [
-                    "HuggingFaceTB/SmolVLM-256M-Instruct",
-                    "/home/oasis/models/SmolVLM-256M-Instruct",
-                ]
-            elif model_type == "qwen2_vl":
-                candidates = [
-                    "Qwen/Qwen2-VL-2B-Instruct",
-                    "/home/oasis/models/Qwen2-VL-2B-Instruct",
-                ]
-            else:
-                candidates = [app_config.MODEL_NAME]
+        # Resolve selected model strictly against registry catalog.
+        require_vision = model_type in ("qwen2_vl", "smolvlm") and bool(image_path)
+        if model_id:
+            model_id = _validate_selected_model(discovery, model_id)
+        else:
+            model_id, first_failure = pick_first_eligible_model(
+                discovery,
+                require_vision=require_vision,
+            )
+            if not model_id:
+                if first_failure is not None:
+                    raise RuntimeError(first_failure.message)
+                raise RuntimeError("No eligible models available in registry.")
 
-            # Pick the first model_id that has registered nodes
-            model_id = candidates[0]
-            for cand in candidates:
-                nodes = discovery.discover(cand)
-                if nodes:
-                    model_id = cand
-                    break
+        preflight = preflight_model_admission(
+            discovery,
+            model_id,
+            require_vision=require_vision,
+        )
+        if not preflight.ok:
+            raise RuntimeError(preflight.message)
 
         # Create client (use cluster-specific endpoint if selected)
         client = UnfedClient(
@@ -733,8 +837,12 @@ async def _run_generation(
             model_id=model_id,
         )
 
+        # For image-based multimodal requests, enforce a deterministic default
+        # prompt before token accounting and generation.
+        if model_type in ("qwen2_vl", "smolvlm") and image_path and not prompt.strip():
+            prompt = "Describe this image."
+
         # Discover and send circuit info
-        discovery = get_discovery()
 
         text_circuit = discovery.build_circuit(model_id)
         vision_circuit = None
@@ -792,6 +900,23 @@ async def _run_generation(
                 "type": "status",
                 "message": "SmolVLM text-only mode (no image attached)"
             })
+
+        input_tokens = _count_request_input_tokens(
+            client=client,
+            model_type=model_type,
+            model_id=model_id,
+            prompt=prompt,
+            image_path=image_path,
+        )
+        if input_tokens < 0 or input_tokens > _MAX_BILLING_INPUT_TOKENS:
+            raise RuntimeError(
+                f"Invalid input token count: {input_tokens}. "
+                f"Allowed range: 0..{_MAX_BILLING_INPUT_TOKENS}."
+            )
+        logger.debug(
+            "[Billing] exact input_tokens=%s model_type=%s model_id=%s",
+            input_tokens, model_type, model_id
+        )
 
         # Send circuit info to frontend
         circuit_msg = {
@@ -865,10 +990,6 @@ async def _run_generation(
         step = 0
 
         if model_type in ("qwen2_vl", "smolvlm") and image_path:
-            # Default prompt when image sent without text
-            if not prompt.strip():
-                prompt = "Describe this image."
-
             await websocket.send_json({
                 "type": "status",
                 "message": f"Processing image through {model_type} vision pipeline..."
@@ -917,22 +1038,20 @@ async def _run_generation(
 
         # Report token usage to registry for settlement accounting
         output_tokens = step
-        # Estimate input tokens from prompt length (rough: 1 token ≈ 4 chars)
-        input_tokens = max(1, len(prompt) // 4)
+        if output_tokens < 0 or output_tokens > _MAX_BILLING_OUTPUT_TOKENS:
+            raise RuntimeError(
+                f"Invalid output token count: {output_tokens}. "
+                f"Allowed range: 0..{_MAX_BILLING_OUTPUT_TOKENS}."
+            )
         usage_cost = 0.0
         try:
-            import grpc as _grpc
-            import registry_pb2 as _rpb
-            import registry_pb2_grpc as _rgrpc
-            _ch = _grpc.insecure_channel(registry_addr)
-            _stub = _rgrpc.RegistryStub(_ch)
-            resp = _stub.ReportUsage(_rpb.ReportUsageRequest(
+            usage_cost = _report_usage(
+                registry_addr=registry_addr,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 model_id=model_id,
-            ), timeout=3)
-            usage_cost = resp.cost
-            _ch.close()
+                session_id="",
+            )
         except Exception as e:
             print(f"[Web] ReportUsage failed: {e}")
 
@@ -942,6 +1061,7 @@ async def _run_generation(
         await websocket.send_json({
             "type": "done",
             "total_tokens": step,
+            "output_tokens": output_tokens,
             "total_time": round(total_time, 2),
             "tokens_per_sec": round(tps, 1),
             "cost": round(usage_cost, 6),
@@ -955,6 +1075,47 @@ async def _run_generation(
             "type": "error",
             "message": str(e),
         })
+
+
+def _count_request_input_tokens(client, model_type: str, model_id: str,
+                                prompt: str, image_path: Optional[str]) -> int:
+    """Strict exact token counting for billing. No heuristic fallback."""
+    if model_type == "qwen2_vl" and image_path:
+        return client.count_qwen2_vl_input_tokens(
+            prompt=prompt,
+            image_path=image_path,
+            model_id=model_id,
+        )
+    if model_type == "smolvlm" and image_path:
+        return client.count_smolvlm_input_tokens(
+            prompt=prompt,
+            image_path=image_path,
+            model_id=model_id,
+        )
+    return client.count_text_input_tokens(prompt=prompt, model_id=model_id)
+
+
+def _report_usage(registry_addr: str, input_tokens: int, output_tokens: int,
+                  model_id: str, session_id: str = "") -> float:
+    """Report usage to registry and return computed cost."""
+    import grpc as _grpc
+    import registry_pb2 as _rpb
+    import registry_pb2_grpc as _rgrpc
+
+    ch = _grpc.insecure_channel(registry_addr)
+    try:
+        stub = _rgrpc.RegistryStub(ch)
+        resp = stub.ReportUsage(_rpb.ReportUsageRequest(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            model_id=model_id,
+            session_id=session_id,
+        ), timeout=3)
+        if not resp.accepted:
+            raise RuntimeError("Usage report rejected by registry")
+        return float(resp.cost)
+    finally:
+        ch.close()
 
 
 # ---------------------------------------------------------------------------

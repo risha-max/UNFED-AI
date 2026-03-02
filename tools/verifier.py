@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+from tools.path_safety import UnsafePathError, safe_join_under
 
 
 def _get_all_shards(manifest: dict) -> list[dict]:
@@ -152,7 +153,11 @@ def verify_files_exist(manifest: dict, base_dir: str, result: VerifyResult):
     all_shards = _get_all_shards(manifest)
     for shard in all_shards:
         fname = shard.get("file", "")
-        path = os.path.join(base_dir, fname)
+        try:
+            path = str(safe_join_under(base_dir, fname))
+        except UnsafePathError as exc:
+            result.check(f"file_exists({fname})", False, f"unsafe path: {exc}")
+            continue
         exists = os.path.isfile(path)
         size_ok = True
         detail = ""
@@ -178,7 +183,11 @@ def verify_hashes(manifest: dict, base_dir: str, result: VerifyResult):
     all_shards = _get_all_shards(manifest)
     for shard in all_shards:
         fname = shard.get("file", "")
-        path = os.path.join(base_dir, fname)
+        try:
+            path = str(safe_join_under(base_dir, fname))
+        except UnsafePathError as exc:
+            result.check(f"sha256({fname})", False, f"unsafe path: {exc}")
+            continue
         expected_hash = shard.get("sha256", "")
 
         if not os.path.isfile(path):
@@ -200,7 +209,11 @@ def verify_chunk_hashes(manifest: dict, base_dir: str, result: VerifyResult):
     all_shards = _get_all_shards(manifest)
     for shard in all_shards:
         fname = shard.get("file", "")
-        path = os.path.join(base_dir, fname)
+        try:
+            path = str(safe_join_under(base_dir, fname))
+        except UnsafePathError as exc:
+            result.check(f"chunks({fname})", False, f"unsafe path: {exc}")
+            continue
         expected_chunks = shard.get("chunk_hashes", [])
         chunk_size = shard.get("chunk_size", 4 * 1024 * 1024)
 
@@ -247,7 +260,11 @@ def verify_weight_keys(manifest: dict, base_dir: str, result: VerifyResult):
 
     for shard in all_shards:
         fname = shard.get("file", "")
-        path = os.path.join(base_dir, fname)
+        try:
+            path = str(safe_join_under(base_dir, fname))
+        except UnsafePathError as exc:
+            result.check(f"weights({fname})", False, f"unsafe path: {exc}")
+            continue
 
         if not os.path.isfile(path):
             continue
@@ -325,7 +342,11 @@ def verify_vectors(manifest: dict, base_dir: str, result: VerifyResult):
         result.warn("verification_vectors", "no embedding shard found — skipping")
         return
 
-    path = os.path.join(base_dir, first_shard["file"])
+    try:
+        path = str(safe_join_under(base_dir, first_shard["file"]))
+    except UnsafePathError as exc:
+        result.check("verification_vectors", False, f"unsafe path: {exc}")
+        return
     if not os.path.isfile(path):
         result.warn("verification_vectors", f"shard file not found: {path}")
         return

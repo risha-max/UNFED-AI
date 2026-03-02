@@ -203,6 +203,33 @@ class TestFaucetEndpoint:
         data = resp2.json()
         assert "retry_after_seconds" in data
 
+    def test_faucet_cooldown_normalizes_address_case(self, web_server):
+        addr = "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65"
+        resp1 = requests.post(
+            f"{web_server}/api/faucet",
+            json={"address": addr},
+            timeout=30,
+        )
+        assert resp1.status_code == 200
+
+        # Same wallet, checksum-cased form must still hit cooldown.
+        checksum_addr = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
+        resp2 = requests.post(
+            f"{web_server}/api/faucet",
+            json={"address": checksum_addr},
+            timeout=30,
+        )
+        assert resp2.status_code == 429
+
+    def test_faucet_rejects_invalid_address(self, web_server):
+        resp = requests.post(
+            f"{web_server}/api/faucet",
+            json={"address": "not-an-eth-address"},
+            timeout=10,
+        )
+        assert resp.status_code == 400
+        assert "Invalid wallet address format" in resp.json().get("error", "")
+
     def test_faucet_without_escrow_returns_error(self):
         """Hitting a server without escrow config should return 503."""
         env_file = os.path.join(PROJECT_ROOT, "deployed.env")

@@ -13,3 +13,4 @@ cryptography==46.0.5
 numpy==2.4.2
 requests==2.32.5
 pytest==9.0.2
+gguf==0.18.0

@@ -24,19 +24,21 @@ import json
 import os
 import random
 import sys
+import threading
 import time
 import uuid
 
 import grpc
 import numpy as np
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "proto"))
 import config
 import inference_pb2
 import inference_pb2_grpc
+from network.admission import preflight_model_admission, resolve_mpc_required_flag
 from network.discovery import RegistryClient, RegistryPool
 from network.resilience import create_resilient_channel, with_retry
 from network.onion import (
@@ -46,6 +48,40 @@ from network.onion import (
 from network.voting import VotingCoordinator
 from network.racing import RacingCoordinator
 
+_TOKENIZER_CACHE: dict[str, AutoTokenizer] = {}
+_PROCESSOR_CACHE: dict[str, AutoProcessor] = {}
+_QWEN2VL_IMAGE_PROCESSOR_CACHE: dict[str, object] = {}
+_MODEL_ASSET_LOCK = threading.Lock()
+
+
+def _get_tokenizer(model_id: str):
+    with _MODEL_ASSET_LOCK:
+        tok = _TOKENIZER_CACHE.get(model_id)
+        if tok is None:
+            tok = AutoTokenizer.from_pretrained(model_id)
+            _TOKENIZER_CACHE[model_id] = tok
+        return tok
+
+
+def _get_processor(model_id: str):
+    with _MODEL_ASSET_LOCK:
+        proc = _PROCESSOR_CACHE.get(model_id)
+        if proc is None:
+            proc = AutoProcessor.from_pretrained(model_id)
+            _PROCESSOR_CACHE[model_id] = proc
+        return proc
+
+
+def _get_qwen2vl_image_processor(model_id: str):
+    with _MODEL_ASSET_LOCK:
+        proc = _QWEN2VL_IMAGE_PROCESSOR_CACHE.get(model_id)
+        if proc is None:
+            from transformers import Qwen2VLImageProcessor
+            proc = Qwen2VLImageProcessor.from_pretrained(model_id)
+            _QWEN2VL_IMAGE_PROCESSOR_CACHE[model_id] = proc
+        return proc
+
+
 class UnfedClient:
     """Client for the UNFED AI distributed inference pipeline."""
 
@@ -54,7 +90,7 @@ class UnfedClient:
                  use_racing: bool = False, model_id: str = None,
                  tls_ca: str = None):
         self.model_id = model_id or config.MODEL_NAME
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+        self.tokenizer = _get_tokenizer(self.model_id)
 
         self._tls_credentials = None
         if tls_ca:
@@ -83,6 +119,78 @@ class UnfedClient:
         # Prefix caching: track previous session for KV cache reuse
         self._prev_session_id: str = ""
         self._prev_token_ids: list[int] = []
+        self._require_mpc = resolve_mpc_required_flag()
+
+    def count_text_input_tokens(self, prompt: str, model_id: str = None) -> int:
+        """Return exact tokenizer count for text-only requests."""
+        mid = model_id or self.model_id
+        tokenizer = _get_tokenizer(mid)
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids[0].tolist()
+        return len(input_ids)
+
+    def count_qwen2_vl_input_tokens(self, prompt: str, image_path: str,
+                                    model_id: str = None) -> int:
+        """Return exact input token count for Qwen2-VL requests."""
+        from transformers import AutoConfig
+        from PIL import Image
+
+        vl_model_id = model_id or self.model_id
+        image_proc = _get_qwen2vl_image_processor(vl_model_id)
+        tokenizer = _get_tokenizer(vl_model_id)
+
+        image = Image.open(image_path).convert("RGB")
+        img_result = image_proc(images=[image], return_tensors="pt")
+        image_grid_thw = img_result["image_grid_thw"]
+
+        vl_config = AutoConfig.from_pretrained(vl_model_id)
+        vision_start_id = vl_config.vision_start_token_id
+        vision_end_id = vl_config.vision_end_token_id
+        image_token_id = vl_config.image_token_id
+        spatial_merge = vl_config.vision_config.spatial_merge_size
+
+        t = image_grid_thw[0, 0].item()
+        h = image_grid_thw[0, 1].item()
+        w = image_grid_thw[0, 2].item()
+        num_merged = t * (h // spatial_merge) * (w // spatial_merge)
+
+        prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+        im_start = tokenizer.encode("<|im_start|>", add_special_tokens=False)
+        im_end = tokenizer.encode("<|im_end|>", add_special_tokens=False)
+        user_tok = tokenizer.encode("user\n", add_special_tokens=False)
+        newline = tokenizer.encode("\n", add_special_tokens=False)
+        asst_tok = tokenizer.encode("assistant\n", add_special_tokens=False)
+        input_ids = (
+            im_start
+            + user_tok
+            + [vision_start_id]
+            + [image_token_id] * num_merged
+            + [vision_end_id]
+            + newline
+            + prompt_tokens
+            + im_end
+            + newline
+            + im_start
+            + asst_tok
+        )
+        return len(input_ids)
+
+    def count_smolvlm_input_tokens(self, prompt: str, image_path: str,
+                                   model_id: str = None) -> int:
+        """Return exact input token count for SmolVLM requests."""
+        from PIL import Image
+
+        vl_model_id = model_id or self.model_id
+        processor = _get_processor(vl_model_id)
+
+        image = Image.open(image_path).convert("RGB")
+        msgs = [{"role": "user", "content": [
+            {"type": "image"},
+            {"type": "text", "text": prompt},
+        ]}]
+        text = processor.apply_chat_template(
+            msgs, add_generation_prompt=True, tokenize=False)
+        result = processor(text=[text], images=[image], return_tensors="pt")
+        return int(result["input_ids"].shape[-1])
 
     def _compute_prefix(self, new_token_ids: list[int]) -> tuple[str, int]:
         """Compare new token_ids with the previous session's tokens.
@@ -191,6 +299,15 @@ class UnfedClient:
             yield from self._generate_racing(prompt, max_new_tokens, verbose)
             return
 
+        preflight = preflight_model_admission(
+            self.discovery,
+            self.model_id,
+            require_vision=False,
+            require_mpc=self._require_mpc,
+        )
+        if not preflight.ok:
+            raise RuntimeError(preflight.message)
+
         session_id = str(uuid.uuid4())
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids[0].tolist()
 
@@ -212,6 +329,11 @@ class UnfedClient:
 
         addresses, public_key_bytes = result
         num_shards = len(addresses)
+
+        if self._require_mpc and not mpc_nodes:
+            raise RuntimeError(
+                f"Model '{self.model_id}' is missing MPC shard-0 entry while UNFED_REQUIRE_MPC=1."
+            )
 
         if mpc_nodes:
             # Replace shard-0 entry with an MPC node
@@ -420,6 +542,16 @@ class UnfedClient:
         """
         import numpy as np
 
+        preflight = preflight_model_admission(
+            self.discovery,
+            self.model_id,
+            require_vision=False,
+            require_mpc=self._require_mpc,
+        )
+        if not preflight.ok:
+            print(f"[Error] {preflight.message}")
+            return
+
         session_id = str(uuid.uuid4())
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids[0].tolist()
 
@@ -442,6 +574,12 @@ class UnfedClient:
             num_shards = max(shard_addresses.keys()) + 1
             using_mpc = True
         else:
+            if self._require_mpc:
+                print(
+                    f"[Error] Model '{self.model_id}' is missing MPC shard-0 entry while "
+                    "UNFED_REQUIRE_MPC=1."
+                )
+                return
             # No MPC nodes — fall back to regular racing
             shard_map = self.discovery.build_racing_circuit(
                 self.model_id, replicas=config.RACING_REPLICAS)
@@ -740,6 +878,14 @@ class UnfedClient:
         from network.mpc_shard0 import create_additive_shares
 
         vl_model_id = model_id or self.model_id
+        preflight = preflight_model_admission(
+            self.discovery,
+            vl_model_id,
+            require_vision=True,
+            require_mpc=self._require_mpc,
+        )
+        if not preflight.ok:
+            raise RuntimeError(preflight.message)
         session_id = str(uuid.uuid4())
 
         # === Phase 1: Vision ===
@@ -748,8 +894,9 @@ class UnfedClient:
             vision_start = time.time()
 
         # Preprocess image using Qwen2VLImageProcessor (avoid AutoProcessor video bug)
-        from transformers import Qwen2VLImageProcessor, AutoConfig
-        image_proc = Qwen2VLImageProcessor.from_pretrained(vl_model_id)
+        from transformers import AutoConfig
+        image_proc = _get_qwen2vl_image_processor(vl_model_id)
+        vl_tokenizer = _get_tokenizer(vl_model_id)
 
         from PIL import Image
         image = Image.open(image_path).convert("RGB")
@@ -774,12 +921,12 @@ class UnfedClient:
 
         # Build the chat-style token sequence:
         # <|im_start|>user\n<|vision_start|><|image_pad|>...<|vision_end|>\n{prompt}<|im_end|>\n<|im_start|>assistant\n
-        prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
-        im_start = self.tokenizer.encode("<|im_start|>", add_special_tokens=False)
-        im_end = self.tokenizer.encode("<|im_end|>", add_special_tokens=False)
-        user_tok = self.tokenizer.encode("user\n", add_special_tokens=False)
-        newline = self.tokenizer.encode("\n", add_special_tokens=False)
-        asst_tok = self.tokenizer.encode("assistant\n", add_special_tokens=False)
+        prompt_tokens = vl_tokenizer.encode(prompt, add_special_tokens=False)
+        im_start = vl_tokenizer.encode("<|im_start|>", add_special_tokens=False)
+        im_end = vl_tokenizer.encode("<|im_end|>", add_special_tokens=False)
+        user_tok = vl_tokenizer.encode("user\n", add_special_tokens=False)
+        newline = vl_tokenizer.encode("\n", add_special_tokens=False)
+        asst_tok = vl_tokenizer.encode("assistant\n", add_special_tokens=False)
 
         input_ids = (im_start + user_tok +
                      [vision_start_id] + [image_token_id] * num_merged + [vision_end_id] +
@@ -918,7 +1065,7 @@ class UnfedClient:
             if response.has_token:
                 token_id = response.token_id
                 generated_tokens.append(token_id)
-                token_text = self.tokenizer.decode([token_id])
+                token_text = vl_tokenizer.decode([token_id])
 
                 if verbose:
                     print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r}")
@@ -967,6 +1114,14 @@ class UnfedClient:
             Generated text tokens as they arrive.
         """
         vl_model_id = model_id or self.model_id
+        preflight = preflight_model_admission(
+            self.discovery,
+            vl_model_id,
+            require_vision=True,
+            require_mpc=self._require_mpc,
+        )
+        if not preflight.ok:
+            raise RuntimeError(preflight.message)
         session_id = str(uuid.uuid4())
 
         # === Phase 1: Vision ===
@@ -974,10 +1129,11 @@ class UnfedClient:
             print(f"[SmolVLM Vision] Processing image: {image_path}")
             vision_start = time.time()
 
-        from transformers import AutoProcessor, AutoConfig
+        from transformers import AutoConfig
         from PIL import Image
 
-        processor = AutoProcessor.from_pretrained(vl_model_id)
+        processor = _get_processor(vl_model_id)
+        vl_tokenizer = _get_tokenizer(vl_model_id)
         vl_config = AutoConfig.from_pretrained(vl_model_id)
         image_token_id = vl_config.image_token_id
 
@@ -1150,7 +1306,7 @@ class UnfedClient:
             if response.has_token:
                 token_id = response.token_id
                 generated_tokens.append(token_id)
-                token_text = self.tokenizer.decode([token_id])
+                token_text = vl_tokenizer.decode([token_id])
 
                 if verbose:
                     print(f"  [{step_time:.3f}s] Token {step}: "

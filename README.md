@@ -37,6 +37,49 @@ python -m client.client --prompt "Hello, world"
 python -m web.server --port 8080
 ```
 
+## Using GGUF / Ollama Models
+
+UNFED helper scripts now support GGUF inspection and conversion. This is useful
+when you downloaded a model with Ollama and want to validate compatibility
+before testnet rollout.
+
+Install/update dependencies:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Inspect a GGUF file:
+
+```bash
+python -m tools.cli inspect /path/to/model.gguf
+```
+
+Convert GGUF to a local safetensors file:
+
+```bash
+python -m tools.cli convert /path/to/model.gguf -o ./model.safetensors
+```
+
+Split directly from GGUF (supported subset):
+
+```bash
+python -m tools.cli split /path/to/model.gguf -o ./shards --text-shards 4
+```
+
+Current limitations:
+
+- Split from GGUF is text-only and expects transformer-style tensor names (`model.layers.<idx>.*`)
+- Quantized GGUF tensors (for example Q4/Q5/Q8 packed tensors) are rejected
+- For unsupported GGUF key layouts, use original Hugging Face weights for splitting
+
+Troubleshooting:
+
+- `Unsupported GGUF tensor dtype`: your file is quantized; use non-quantized export or HF weights
+- `supported transformer layer key names`: GGUF uses llama.cpp naming; split from HF source instead
+- `GGUF support requires the 'gguf' package`: run `pip install gguf`
+
 ## Hosting on the Internet
 
 To expose your node to other participants over the internet:
@@ -201,6 +244,30 @@ API: `POST /api/faucet` with body `{"address": "0x..."}`. Returns
 `{"success": true, "amount": 100, "tx_hash": "0x...", "balance": 200.0}` on
 success, or an error with the appropriate HTTP status.
 
+Address validation is strict: invalid/non-EVM addresses are rejected with
+HTTP `400`. Faucet cooldown is keyed on normalized checksum addresses, so case
+changes do not bypass rate limits.
+
+### Strict token billing
+
+Billing is tokenizer-based and model-specific (no character-length heuristics):
+
+- Text requests: input tokens are counted with the selected model tokenizer.
+- Vision-language requests: input tokens are counted from the same model
+  processor/tokenizer path used to build multimodal inputs (including image
+  placeholder tokens).
+- Output tokens are counted from streamed generation events.
+
+Cost is reported as:
+
+`(input_tokens * price_per_input_token) + (output_tokens * price_per_output_token)`
+
+Strict mode behavior:
+
+- If model tokenizer/processor cannot be loaded, the request fails (no fallback
+  estimate and no usage report).
+- Usage reports with invalid token counts are rejected by the registry.
+
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -210,9 +277,29 @@ success, or an error with the appropriate HTTP status.
 | `UNFED_WIRE_DTYPE` | Wire format for activations | `float16` |
 | `UNFED_COMPRESS_THRESHOLD` | Compression threshold (bytes) | `16384` |
 | `UNFED_PREFILL_MIN` | Min tokens for pipelined prefill | `64` |
+| `UNFED_REQUIRE_MPC` | Require MPC shard-0 for admission | `1` |
 | `CHAIN_RPC_URL` | Ethereum RPC endpoint | — |
 | `OPERATOR_PRIVATE_KEY` | Operator wallet key (deploy/settlement) | — |
 | `OPERATOR_ADDRESS` | Operator wallet address | — |
+
+`UNFED_REQUIRE_MPC=1` is the default fail-closed policy across web, client,
+and pipeline entrypoints. Set `UNFED_REQUIRE_MPC=0` only for local debugging.
+
+## Manual MPC Local Setup Script
+
+Use the orchestration script to launch chain/funding/registry/daemon/nodes/web
+in separate `gnome-terminal` windows:
+
+```bash
+export OPERATOR_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+export OPERATOR_ADDRESS=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+./scripts/manual_setup_mpc_testnet.sh
+```
+
+Useful flags:
+
+- `--dry-run`: print commands without starting processes
+- `--yes-reuse-ports`: continue even if expected ports are already occupied
 
 ## Running as a Node Operator
 
@@ -250,6 +337,30 @@ python -m web.server --host 0.0.0.0 --port 8080 --registry "localhost:50050"
 Open `http://<registry-ip>:8080` — tabs for Chat, Network topology, and Chain
 explorer. Clients visiting the URL can send inference requests directly from
 the browser, get test tokens via the faucet, and monitor node activity.
+
+Model selection is strict and registry-driven:
+
+- The dashboard loads model options from `GET /api/models` only (no frontend hardcoded list).
+- A request is accepted only for a model that passes admission preflight:
+  - full text shard coverage
+  - MPC shard-0 entry available (default policy)
+  - full vision shard coverage for multimodal requests
+- If preflight fails, the request is rejected with a model-scoped error.
+
+Security restrictions:
+
+- Websocket `wallet` and faucet `address` inputs must be valid EVM addresses.
+- `cluster_endpoint` overrides are blocked by default; only the co-located registry
+  (or entries from `UNFED_ALLOWED_CLUSTER_ENDPOINTS`) are accepted.
+
+Troubleshooting:
+
+- **No models discovered**: ensure compute nodes are registered with the intended
+  `model_id` and shard coverage is complete.
+- **Model rejected by policy (MPC missing)**: register an MPC shard-0 node, or
+  set `UNFED_REQUIRE_MPC=0` for local debugging only.
+- **Model rejected by policy (coverage incomplete)**: verify all required shards
+  are registered for that `model_id`.
 
 ## Known Limitations
 

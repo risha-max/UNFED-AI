@@ -15,6 +15,7 @@ Usage:
 import argparse
 import json
 import logging
+import re
 import signal
 import sys
 import os
@@ -34,6 +35,7 @@ import registry_pb2_grpc
 import inference_pb2
 import inference_pb2_grpc
 
+from network.admission import resolve_mpc_required_flag
 from economics.share_chain import ShareChain, ComputeShare
 from economics.payments import StakeManager, PaymentContract, SettlementProcessor
 from economics.model_pools import PoolRegistry, PoolManifest
@@ -42,6 +44,21 @@ from economics.cluster_config import ClusterConfig, merge_with_defaults
 from economics.distributed_chain import (
     DistributedShareChain, block_to_proto, proto_to_block,
 )
+
+MAX_REPORTED_INPUT_TOKENS = 200_000
+MAX_REPORTED_OUTPUT_TOKENS = 50_000
+
+_ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_SIMPLE_LOGS_ENABLED = True
+
+
+def _simple_log(message: str):
+    if _SIMPLE_LOGS_ENABLED:
+        print(message)
+
+
+def _is_eth_address(value: str) -> bool:
+    return isinstance(value, str) and bool(_ETH_ADDRESS_RE.fullmatch(value))
 
 
 class NodeRecord:
@@ -231,6 +248,14 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     if self._onchain_escrow and s.node_shares:
                         try:
                             nodes = list(s.node_shares.keys())
+                            invalid_nodes = [n for n in nodes if not _is_eth_address(n)]
+                            if invalid_nodes:
+                                print(
+                                    "[Registry] Skipping on-chain settlement post: "
+                                    f"non-EVM node IDs in settlement ({len(invalid_nodes)} invalid). "
+                                    "This usually means replayed legacy share-chain data."
+                                )
+                                continue
                             # Convert weighted shares to token amounts
                             # (use 1e18 scale for ERC-20 wei)
                             amounts = [
@@ -781,15 +806,17 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         with self._lock:
             nodes = list(self._nodes.values())
 
-        # Group compute nodes by model_id
+        mpc_required = resolve_mpc_required_flag()
+
+        # Group text-serving nodes (compute + mpc) by model_id
         model_nodes: dict[str, list[NodeRecord]] = {}
         for n in nodes:
-            if n.node_type == "compute":
+            if n.node_type in ("compute", "mpc"):
                 model_nodes.setdefault(n.model_id, []).append(n)
 
         models = []
         for model_id, mnodes in model_nodes.items():
-            # Group by shard to compute coverage
+            # Group by shard to compute text coverage
             shard_set: set[int] = set()
             for n in mnodes:
                 shard_set.add(n.shard_index)
@@ -797,13 +824,19 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             max_shard = max(n.shard_index for n in mnodes)
             total_shards = max_shard + 1
             covered = len(shard_set)
+            mpc_available = any(
+                n.node_type == "mpc" and n.shard_index == 0 for n in mnodes
+            )
+            can_serve = (covered == total_shards) and (
+                (not mpc_required) or mpc_available
+            )
 
             models.append(registry_pb2.ModelInfo(
                 model_id=model_id,
                 total_nodes=len(mnodes),
                 total_shards=total_shards,
                 covered_shards=covered,
-                can_serve=(covered == total_shards),
+                can_serve=can_serve,
             ))
 
         return registry_pb2.ListModelsResponse(models=models)
@@ -1188,11 +1221,34 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
         The PaymentContract accumulates these for the next settlement.
         """
+        if request.input_tokens < 0 or request.output_tokens < 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("Token counts must be non-negative")
+            return registry_pb2.ReportUsageResponse(cost=0.0, accepted=False)
+
+        if request.input_tokens > MAX_REPORTED_INPUT_TOKENS:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(
+                f"input_tokens exceeds limit ({MAX_REPORTED_INPUT_TOKENS})")
+            return registry_pb2.ReportUsageResponse(cost=0.0, accepted=False)
+
+        if request.output_tokens > MAX_REPORTED_OUTPUT_TOKENS:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(
+                f"output_tokens exceeds limit ({MAX_REPORTED_OUTPUT_TOKENS})")
+            return registry_pb2.ReportUsageResponse(cost=0.0, accepted=False)
+
         cost = (request.input_tokens * self._payment_contract.price_per_input_token
                 + request.output_tokens * self._payment_contract.price_per_output_token)
 
         self._payment_contract.report_usage(
             request.input_tokens, request.output_tokens)
+        _simple_log(
+            "[Registry] usage accepted "
+            f"model={request.model_id or 'default'} "
+            f"in={request.input_tokens} out={request.output_tokens} "
+            f"cost={cost:.6f}"
+        )
 
         return registry_pb2.ReportUsageResponse(
             cost=cost,
@@ -1307,6 +1363,10 @@ def serve(port: int, cluster_config_path: str | None = None,
     server.start()
 
     print(f"[Registry] Running on port {port}")
+    print(
+        "[Registry] Admission policy: "
+        f"UNFED_REQUIRE_MPC={'1' if resolve_mpc_required_flag() else '0'}"
+    )
     print(f"[Registry] Cluster: {cluster_cfg.name} "
           f"(id={cluster_cfg.cluster_id[:8]}...)")
     print(f"[Registry] Endpoint: {cluster_cfg.public_endpoint}")
@@ -1342,7 +1402,13 @@ if __name__ == "__main__":
                         help="Path to TLS certificate PEM file")
     parser.add_argument("--tls-key", type=str, default=None,
                         help="Path to TLS private key PEM file")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Disable simple usage/event logs")
     args = parser.parse_args()
+    if args.quiet:
+        import builtins
+        builtins.print = lambda *a, **k: None
+        _SIMPLE_LOGS_ENABLED = False
     serve(args.port, cluster_config_path=args.cluster_config,
           no_chain=args.no_chain, tls_cert=args.tls_cert,
           tls_key=args.tls_key)

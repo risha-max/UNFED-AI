@@ -73,10 +73,9 @@ const Chat = {
             this.imagePreviewImg.src = e.target.result;
             this.imagePreview.style.display = 'inline-block';
 
-            // Auto-select a vision-capable model (prefer smolvlm)
+            // Auto-select a discovered vision-capable model.
             const modelSel = document.getElementById('modelSelect');
-            const visionOpt = modelSel.querySelector('option[value="smolvlm"]:not([disabled])')
-                           || modelSel.querySelector('option[value="qwen2_vl"]:not([disabled])');
+            const visionOpt = modelSel.querySelector('option[data-vision="true"]:not([disabled])');
             if (visionOpt) modelSel.value = visionOpt.value;
         };
         reader.readAsDataURL(file);
@@ -105,7 +104,16 @@ const Chat = {
         const userMsg = this.addMessage('user', prompt, this.pendingImage?.dataUrl);
 
         // Gather settings
-        const modelType = document.getElementById('modelSelect').value;
+        const selectedModel = App.getSelectedModel();
+        if (!selectedModel || !selectedModel.model_id) {
+            this.addSystemMessage('No model selected. Choose an available model first.');
+            return;
+        }
+        if (!selectedModel.can_serve) {
+            this.addSystemMessage('Selected model is currently unavailable (incomplete shard coverage).');
+            return;
+        }
+        const modelType = selectedModel.model_type;
         const maxTokens = parseInt(document.getElementById('maxTokens').value) || 100;
         const useVoting = document.getElementById('useVoting').checked;
 
@@ -133,6 +141,7 @@ const Chat = {
         // Send via WebSocket
         const payload = {
             prompt,
+            model_id: selectedModel.model_id,
             model_type: modelType,
             max_tokens: maxTokens,
             use_voting: useVoting,
