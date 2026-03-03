@@ -54,6 +54,7 @@ import inference_pb2
 import inference_pb2_grpc
 
 from network.resilience import create_resilient_channel
+from network.infra_routing import select_least_loaded_daemon
 from network.mpc_beaver import (
     BeaverTriple, BeaverTripleShares,
     serialize_triple_shares, deserialize_triple_shares,
@@ -862,7 +863,7 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             daemons = [n for n in resp.nodes if n.node_type == "daemon"]
             channel.close()
             if daemons:
-                daemon = self._pick_least_loaded_daemon(daemons)
+                daemon, _ = select_least_loaded_daemon(daemons, self._daemon_utilization_probe)
                 self._daemon_stub = inference_pb2_grpc.InferenceNodeStub(
                     grpc.insecure_channel(
                         daemon.address, options=config.GRPC_OPTIONS))
@@ -909,27 +910,16 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 raise RuntimeError("Daemon became unreachable during MPC share submission.")
             print(f"[MPC-A] Failed to submit shares to daemon")
 
-    def _pick_least_loaded_daemon(self, daemons: list):
-        best = None
-        best_key = None
-        for daemon in daemons:
-            util = 1.0
-            try:
-                stub = inference_pb2_grpc.InferenceNodeStub(
-                    grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
-                )
-                fee = stub.GetFeeEstimate(
-                    inference_pb2.FeeEstimateRequest(estimated_tokens=1),
-                    timeout=2,
-                )
-                util = float(getattr(fee, "utilization", 1.0))
-            except Exception:
-                util = 1.0
-            key = (util, daemon.address or "")
-            if best is None or key < best_key:
-                best = daemon
-                best_key = key
-        return best if best is not None else daemons[0]
+    @staticmethod
+    def _daemon_utilization_probe(daemon) -> float:
+        stub = inference_pb2_grpc.InferenceNodeStub(
+            grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
+        )
+        fee = stub.GetFeeEstimate(
+            inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+            timeout=2,
+        )
+        return float(getattr(fee, "utilization", 1.0))
 
     def _build_signed_share(self, node_id: str, session_id: str, act_hash: str):
         from economics.share_chain import ComputeShare

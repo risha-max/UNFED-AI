@@ -44,6 +44,7 @@ from network.admission import (
     resolve_mpc_required_flag,
 )
 from network.discovery import RegistryClient, RegistryPool
+from network.infra_routing import select_least_loaded_daemon
 from web.auth import WalletAuth
 
 # ---------------------------------------------------------------------------
@@ -397,8 +398,8 @@ def _get_chain():
     return _get_chain._chain
 
 
-def _discover_daemon():
-    """Find a daemon node via the registry."""
+def _discover_daemon_with_utilization():
+    """Find least-loaded daemon and return (daemon, utilization map)."""
     try:
         import grpc
         import inference_pb2
@@ -407,31 +408,32 @@ def _discover_daemon():
         all_nodes = discovery.discover("")
         daemons = [n for n in all_nodes if n.node_type == "daemon"]
         if daemons:
-            best = None
-            best_key = None
-            for daemon in daemons:
-                util = 1.0
+            def _probe(daemon):
+                ch = grpc.insecure_channel(
+                    daemon.address, options=app_config.GRPC_OPTIONS
+                )
                 try:
-                    ch = grpc.insecure_channel(
-                        daemon.address, options=app_config.GRPC_OPTIONS
-                    )
                     stub = inference_pb2_grpc.InferenceNodeStub(ch)
                     fee = stub.GetFeeEstimate(
                         inference_pb2.FeeEstimateRequest(estimated_tokens=1),
                         timeout=2,
                     )
-                    util = float(getattr(fee, "utilization", 1.0))
+                    return float(getattr(fee, "utilization", 1.0))
+                finally:
                     ch.close()
-                except Exception:
-                    util = 1.0
-                key = (util, daemon.address or "")
-                if best is None or key < best_key:
-                    best = daemon
-                    best_key = key
-            return best if best is not None else daemons[0]
+
+            selected, utilization = select_least_loaded_daemon(daemons, _probe)
+            if selected is None:
+                return daemons[0], utilization
+            return selected, utilization
     except Exception as e:
         logger.debug("Daemon discovery failed: %s", e)
-    return None
+    return None, {}
+
+
+def _discover_daemon():
+    daemon, _ = _discover_daemon_with_utilization()
+    return daemon
 
 
 def _sync_chain():
@@ -567,7 +569,7 @@ async def chain_fees():
     import inference_pb2
     import inference_pb2_grpc
     try:
-        daemon = _discover_daemon()
+        daemon, candidates = _discover_daemon_with_utilization()
         if not daemon:
             return {
                 "base_fee": 0.001,
@@ -575,6 +577,8 @@ async def chain_fees():
                 "estimated_cost_100": 0.1,
                 "suggested_tip": 0.0,
                 "daemon_available": False,
+                "selected_daemon": "",
+                "daemon_candidates": candidates,
                 "fee_history": [],
             }
 
@@ -596,6 +600,8 @@ async def chain_fees():
             "estimated_cost_100": resp.estimated_cost,
             "suggested_tip": resp.suggested_tip,
             "daemon_available": True,
+            "selected_daemon": daemon.address,
+            "daemon_candidates": candidates,
             "daemon_required": (
                 os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
                 not in ("0", "false", "no", "off")
@@ -608,6 +614,8 @@ async def chain_fees():
             "estimated_cost_100": 0.1,
             "suggested_tip": 0.0,
             "daemon_available": False,
+            "selected_daemon": "",
+            "daemon_candidates": {},
             "error": str(e),
         }
 

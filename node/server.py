@@ -51,6 +51,7 @@ from network.onion import peel_onion, encrypt_response
 from network.randomness import compute_activation_hash, select_next_node, SessionCircuit
 from network.verification import TicketCollector
 from network.zk_verification import create_commitment
+from network.infra_routing import select_least_loaded_daemon
 from network.share_auth import (
     PAYLOAD_HASH_VERSION,
     SharePayload,
@@ -351,7 +352,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             channel.close()
             if not daemons:
                 return False
-            daemon = self._pick_least_loaded_daemon(daemons)
+            daemon, _ = select_least_loaded_daemon(daemons, self._daemon_utilization_probe)
             self._daemon_address = daemon.address
             self._daemon_stub = inference_pb2_grpc.InferenceNodeStub(
                 grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
@@ -401,29 +402,16 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             with self._share_buffer_lock:
                 self._share_buffer.append(share)
 
-    def _pick_least_loaded_daemon(self, daemons: list):
-        """Pick daemon with lowest reported utilization (fallback: lexical address)."""
-        best = None
-        best_score = None
-        for daemon in daemons:
-            score = 1.0
-            try:
-                stub = inference_pb2_grpc.InferenceNodeStub(
-                    grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
-                )
-                fee = stub.GetFeeEstimate(
-                    inference_pb2.FeeEstimateRequest(estimated_tokens=1),
-                    timeout=2,
-                )
-                score = float(getattr(fee, "utilization", 1.0))
-            except Exception:
-                score = 1.0
-            tie = daemon.address or ""
-            cmp_key = (score, tie)
-            if best is None or cmp_key < best_score:
-                best = daemon
-                best_score = cmp_key
-        return best if best is not None else daemons[0]
+    @staticmethod
+    def _daemon_utilization_probe(daemon) -> float:
+        stub = inference_pb2_grpc.InferenceNodeStub(
+            grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
+        )
+        fee = stub.GetFeeEstimate(
+            inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+            timeout=2,
+        )
+        return float(getattr(fee, "utilization", 1.0))
 
     def _build_signed_share(
         self,

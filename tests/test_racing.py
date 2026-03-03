@@ -534,7 +534,7 @@ def test_mpc_racing_circuit_no_mpc_nodes():
 
 
 def test_mpc_dual_share_recording():
-    """Test that MPC servicer records shares for both A and B nodes via daemon."""
+    """Test MPC servicer records signed share via daemon."""
     print("\n=== Test: MPC Dual Share Recording ===")
 
     import torch
@@ -547,9 +547,13 @@ def test_mpc_dual_share_recording():
     mpc_node = MagicMock(spec=MPCNode)
     mpc_node.role = "A"
 
+    from network.share_auth import generate_signing_keypair
+
     servicer = MPCNodeServicer(mpc_node, 50060)
     servicer._node_id = "node-A-12345678"
     servicer._peer_node_id = "peer-of-node-A-1"
+    priv, _ = generate_signing_keypair()
+    servicer._registration_share_signing_private_key = priv
 
     # Mock the daemon stub (MPC nodes now submit shares to daemon)
     mock_daemon = MagicMock()
@@ -564,29 +568,20 @@ def test_mpc_dual_share_recording():
     assert mock_daemon.SubmitShares.call_count == 1, \
         f"Expected 1 SubmitShares call, got {mock_daemon.SubmitShares.call_count}"
 
-    # Check the submitted shares
+    # Check the submitted share payload
     submit_call = mock_daemon.SubmitShares.call_args[0][0]
-    assert len(submit_call.shares) == 2, \
-        f"Expected 2 shares in submission, got {len(submit_call.shares)}"
+    assert len(submit_call.shares) == 1, \
+        f"Expected 1 share in submission, got {len(submit_call.shares)}"
 
-    share_a = submit_call.shares[0]
-    share_b = submit_call.shares[1]
+    share = submit_call.shares[0]
+    assert share.node_id == "node-A-12345678", f"Share node_id: {share.node_id}"
+    assert share.shard_index == 0
+    assert share.session_id == "session-test-123"
+    assert share.share_weight == 1.0, f"Share weight: {share.share_weight}"
+    assert share.signature, "Signed MPC share must include a signature"
 
-    assert share_a.node_id == "node-A-12345678", f"Share A node_id: {share_a.node_id}"
-    assert share_b.node_id == "peer-of-node-A-1", f"Share B node_id: {share_b.node_id}"
-    assert share_a.shard_index == 0
-    assert share_b.shard_index == 0
-    assert share_a.session_id == "session-test-123"
-    assert share_b.session_id == "session-test-123"
-    assert share_a.activation_hash == share_b.activation_hash, \
-        "Both shares should have the same activation hash (same output)"
-    # Verify share weights are 1.0 (full MPC compute work)
-    assert share_a.share_weight == 1.0, f"Share A weight: {share_a.share_weight}"
-    assert share_b.share_weight == 1.0, f"Share B weight: {share_b.share_weight}"
-
-    print(f"  Share A: node={share_a.node_id[:12]}..., weight={share_a.share_weight}")
-    print(f"  Share B: node={share_b.node_id[:12]}..., weight={share_b.share_weight}")
-    print("  Both nodes credited equally with weight 1.0 — PASSED")
+    print(f"  Share: node={share.node_id[:12]}..., weight={share.share_weight}")
+    print("  Signed share submission via daemon — PASSED")
 
 
 def test_config_racing_constants():

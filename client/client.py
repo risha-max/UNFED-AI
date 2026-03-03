@@ -40,6 +40,7 @@ import inference_pb2
 import inference_pb2_grpc
 from network.admission import preflight_model_admission, resolve_mpc_required_flag
 from network.discovery import RegistryClient, RegistryPool
+from network.infra_routing import select_least_loaded_daemon
 from network.resilience import create_resilient_channel, with_retry
 from network.onion import (
     build_onion, public_key_from_bytes,
@@ -249,23 +250,7 @@ class UnfedClient:
             all_nodes = self.discovery.discover("")
             daemons = [n for n in all_nodes if n.node_type == "daemon"]
             if daemons:
-                daemon = None
-                best_key = None
-                for candidate in daemons:
-                    util = 1.0
-                    try:
-                        probe = self._get_stub(candidate.address)
-                        fee = probe.GetFeeEstimate(
-                            inference_pb2.FeeEstimateRequest(estimated_tokens=1),
-                            timeout=2,
-                        )
-                        util = float(getattr(fee, "utilization", 1.0))
-                    except Exception:
-                        util = 1.0
-                    key = (util, candidate.address or "")
-                    if daemon is None or key < best_key:
-                        daemon = candidate
-                        best_key = key
+                daemon, _ = select_least_loaded_daemon(daemons, self._daemon_utilization_probe)
                 if daemon is None:
                     daemon = daemons[0]
                 stub = self._get_stub(daemon.address)
@@ -289,6 +274,14 @@ class UnfedClient:
             "estimated_cost": 0.001 * estimated_tokens,
             "suggested_tip": 0.0,
         }
+
+    def _daemon_utilization_probe(self, candidate) -> float:
+        probe = self._get_stub(candidate.address)
+        fee = probe.GetFeeEstimate(
+            inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+            timeout=2,
+        )
+        return float(getattr(fee, "utilization", 1.0))
 
     def generate(self, prompt: str, max_new_tokens: int = 100,
                  verbose: bool = False, use_onion: bool = True,
