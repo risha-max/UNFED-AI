@@ -84,6 +84,9 @@ service Registry {
 
   // Get current verifier health summary for fail-closed gates.
   rpc GetVerifierHealth(GetVerifierHealthRequest) returns (GetVerifierHealthResponse);
+
+  // Get daemon/verifier routing and payout telemetry for observability.
+  rpc GetInfraTelemetry(GetInfraTelemetryRequest) returns (GetInfraTelemetryResponse);
 }
 
 // --- Verification ---
@@ -436,6 +439,21 @@ message GetVerifierHealthResponse {
   int32 healthy_verifier_count = 1;
   int32 required_verifier_count = 2;
   bool healthy = 3;
+}
+
+message GetInfraTelemetryRequest {}
+
+message GetInfraTelemetryResponse {
+  int32 healthy_daemon_count = 1;
+  int32 required_daemon_count = 2;
+  int32 healthy_verifier_count = 3;
+  int32 required_verifier_count = 4;
+  string selected_daemon_recipient = 5;
+  string selected_verifier_recipient = 6;
+  string daemon_work_window_json = 7;      // {recipient_or_node_id: work_units}
+  string verifier_work_window_json = 8;    // {verifier_id: ticket_units}
+  string daemon_payout_share_json = 9;     // {recipient: [0..1]}
+  string verifier_payout_share_json = 10;  // {recipient: [0..1]}
 }
 
 message VerifyCapacityRequest {

@@ -211,6 +211,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._verifier_ticket_window: dict[str, float] = defaultdict(float)
         self._verifier_bonus_window: dict[str, float] = defaultdict(float)
         self._daemon_height_cursor: dict[str, int] = {}
+        self._last_daemon_payout_share: dict[str, float] = {}
+        self._last_verifier_payout_share: dict[str, float] = {}
 
         # Model manifests (model_id -> manifest JSON string)
         self._manifests: dict[str, str] = {}
@@ -621,7 +623,22 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             if total_units > 0:
                 verifier_map[payout_addr] = verifier_map.get(payout_addr, 0.0) + total_units
 
+        with self._infra_work_lock:
+            self._last_daemon_payout_share = self._normalize_map(daemon_map)
+            self._last_verifier_payout_share = self._normalize_map(verifier_map)
         return daemon_map, verifier_map
+
+    @staticmethod
+    def _normalize_map(weight_map: dict[str, float]) -> dict[str, float]:
+        """Convert weights to [0..1] payout proportions."""
+        total = sum(v for v in weight_map.values() if float(v) > 0)
+        if total <= 0:
+            return {}
+        return {
+            key: float(value) / total
+            for key, value in weight_map.items()
+            if float(value) > 0
+        }
 
     def _effective_verifier_config_json(self) -> str:
         policy = {
@@ -1153,6 +1170,38 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             healthy_verifier_count=healthy_count,
             required_verifier_count=required_count,
             healthy=healthy_count >= required_count,
+        )
+
+    def GetInfraTelemetry(self, request, context):
+        """Return routing/work/payout telemetry for daemon and verifier infra."""
+        healthy_daemon_count = self._healthy_daemon_count()
+        healthy_verifier_count = self._healthy_verifier_count()
+        required_daemon_count = int(self._cluster_config.daemon_required_count)
+        required_verifier_count = int(self._cluster_config.verifier_required_count)
+        with self._infra_work_lock:
+            daemon_work_window = dict(self._daemon_work_window)
+            verifier_work_window = {
+                verifier_id: (
+                    float(self._verifier_ticket_window.get(verifier_id, 0.0))
+                    + float(self._verifier_bonus_window.get(verifier_id, 0.0))
+                    * float(getattr(self._cluster_config, "verifier_fraud_bonus_weight", 3.0))
+                )
+                for verifier_id in set(self._verifier_ticket_window.keys())
+                | set(self._verifier_bonus_window.keys())
+            }
+            daemon_payout_share = dict(self._last_daemon_payout_share)
+            verifier_payout_share = dict(self._last_verifier_payout_share)
+        return registry_pb2.GetInfraTelemetryResponse(
+            healthy_daemon_count=healthy_daemon_count,
+            required_daemon_count=required_daemon_count,
+            healthy_verifier_count=healthy_verifier_count,
+            required_verifier_count=required_verifier_count,
+            selected_daemon_recipient=self._select_daemon_recipient(),
+            selected_verifier_recipient=self._select_verifier_recipient(),
+            daemon_work_window_json=json.dumps(daemon_work_window),
+            verifier_work_window_json=json.dumps(verifier_work_window),
+            daemon_payout_share_json=json.dumps(daemon_payout_share),
+            verifier_payout_share_json=json.dumps(verifier_payout_share),
         )
 
     def Unregister(self, request, context):

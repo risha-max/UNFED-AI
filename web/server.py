@@ -293,6 +293,39 @@ async def get_health(model_id: str = ""):
         get_verifier_health = getattr(discovery, "get_verifier_health", None)
         if callable(get_verifier_health):
             verifier = get_verifier_health()
+        infra = None
+        get_infra_telemetry = getattr(discovery, "get_infra_telemetry", None)
+        if callable(get_infra_telemetry):
+            infra = get_infra_telemetry()
+        daemon_work_window = {}
+        verifier_work_window = {}
+        daemon_payout_share = {}
+        verifier_payout_share = {}
+        if infra is not None:
+            try:
+                daemon_work_window = json.loads(
+                    getattr(infra, "daemon_work_window_json", "{}") or "{}"
+                )
+            except Exception:
+                daemon_work_window = {}
+            try:
+                verifier_work_window = json.loads(
+                    getattr(infra, "verifier_work_window_json", "{}") or "{}"
+                )
+            except Exception:
+                verifier_work_window = {}
+            try:
+                daemon_payout_share = json.loads(
+                    getattr(infra, "daemon_payout_share_json", "{}") or "{}"
+                )
+            except Exception:
+                daemon_payout_share = {}
+            try:
+                verifier_payout_share = json.loads(
+                    getattr(infra, "verifier_payout_share_json", "{}") or "{}"
+                )
+            except Exception:
+                verifier_payout_share = {}
         if health:
             return {
                 "model_id": health.model_id,
@@ -313,6 +346,14 @@ async def get_health(model_id: str = ""):
                     not in ("0", "false", "no", "off")
                 ),
                 "daemon_count": daemon_count,
+                "healthy_daemon_count": (
+                    int(getattr(infra, "healthy_daemon_count", daemon_count) or daemon_count)
+                    if infra is not None else daemon_count
+                ),
+                "required_daemon_count": (
+                    int(getattr(infra, "required_daemon_count", 1) or 1)
+                    if infra is not None else 1
+                ),
                 "verifier_required": (
                     os.environ.get("UNFED_REQUIRE_VERIFIER", "1").strip().lower()
                     not in ("0", "false", "no", "off")
@@ -325,6 +366,16 @@ async def get_health(model_id: str = ""):
                     int(getattr(verifier, "required_verifier_count", 1) or 1)
                     if verifier is not None else 1
                 ),
+                "selected_daemon_recipient": (
+                    getattr(infra, "selected_daemon_recipient", "") if infra is not None else ""
+                ),
+                "selected_verifier_recipient": (
+                    getattr(infra, "selected_verifier_recipient", "") if infra is not None else ""
+                ),
+                "daemon_work_window": daemon_work_window,
+                "verifier_work_window": verifier_work_window,
+                "daemon_payout_share": daemon_payout_share,
+                "verifier_payout_share": verifier_payout_share,
             }
         return {"error": "No health data available"}
     except Exception as e:

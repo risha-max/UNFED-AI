@@ -158,6 +158,11 @@ class RegistryStub(object):
                 request_serializer=registry__pb2.GetVerifierHealthRequest.SerializeToString,
                 response_deserializer=registry__pb2.GetVerifierHealthResponse.FromString,
                 _registered_method=True)
+        self.GetInfraTelemetry = channel.unary_unary(
+                '/unfed.Registry/GetInfraTelemetry',
+                request_serializer=registry__pb2.GetInfraTelemetryRequest.SerializeToString,
+                response_deserializer=registry__pb2.GetInfraTelemetryResponse.FromString,
+                _registered_method=True)
 
 
 class RegistryServicer(object):
@@ -341,6 +346,13 @@ class RegistryServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetInfraTelemetry(self, request, context):
+        """Get daemon/verifier routing and payout telemetry for observability.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RegistryServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -463,6 +475,11 @@ def add_RegistryServicer_to_server(servicer, server):
                     servicer.GetVerifierHealth,
                     request_deserializer=registry__pb2.GetVerifierHealthRequest.FromString,
                     response_serializer=registry__pb2.GetVerifierHealthResponse.SerializeToString,
+            ),
+            'GetInfraTelemetry': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetInfraTelemetry,
+                    request_deserializer=registry__pb2.GetInfraTelemetryRequest.FromString,
+                    response_serializer=registry__pb2.GetInfraTelemetryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1117,6 +1134,33 @@ class Registry(object):
             '/unfed.Registry/GetVerifierHealth',
             registry__pb2.GetVerifierHealthRequest.SerializeToString,
             registry__pb2.GetVerifierHealthResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetInfraTelemetry(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/GetInfraTelemetry',
+            registry__pb2.GetInfraTelemetryRequest.SerializeToString,
+            registry__pb2.GetInfraTelemetryResponse.FromString,
             options,
             channel_credentials,
             insecure,

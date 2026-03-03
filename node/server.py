@@ -308,6 +308,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         # Daemon stub for submitting shares (replaces embedded chain)
         self._daemon_stub = None
         self._daemon_address: str = ""
+        self._daemon_registry_addr: str = config.REGISTRY_ADDRESS
         self._share_buffer: list[ComputeShare] = []
         self._share_buffer_lock = threading.Lock()
         self._require_daemon = (
@@ -326,8 +327,19 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         """
         self._node_id_for_shares = node_id
         registry_addr = registry_address or config.REGISTRY_ADDRESS
+        self._daemon_registry_addr = registry_addr
 
-        # Discover daemon node from registry
+        if not self._refresh_daemon_from_registry(registry_addr):
+            print("[Node] No daemon found")
+            # Start background thread to retry daemon discovery
+            t = threading.Thread(target=self._daemon_discovery_loop,
+                                 args=(registry_addr,), daemon=True)
+            t.start()
+        elif self._daemon_address:
+            print(f"[Node] Connected to chain daemon at {self._daemon_address}")
+
+    def _refresh_daemon_from_registry(self, registry_addr: str) -> bool:
+        """Discover the least-loaded daemon and update local stub."""
         try:
             channel = grpc.insecure_channel(registry_addr, options=config.GRPC_OPTIONS)
             stub = registry_pb2_grpc.RegistryStub(channel)
@@ -337,53 +349,34 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             )
             daemons = [n for n in resp.nodes if n.node_type == "daemon"]
             channel.close()
-
-            if daemons:
-                daemon = self._pick_least_loaded_daemon(daemons)
-                self._daemon_address = daemon.address
-                self._daemon_stub = inference_pb2_grpc.InferenceNodeStub(
-                    grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
-                )
-                print(f"[Node] Connected to chain daemon at {daemon.address}")
-            else:
-                print("[Node] No daemon found")
-                # Start background thread to retry daemon discovery
-                t = threading.Thread(target=self._daemon_discovery_loop,
-                                     args=(registry_addr,), daemon=True)
-                t.start()
+            if not daemons:
+                return False
+            daemon = self._pick_least_loaded_daemon(daemons)
+            self._daemon_address = daemon.address
+            self._daemon_stub = inference_pb2_grpc.InferenceNodeStub(
+                grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
+            )
+            return True
         except grpc.RpcError:
             print("[Node] Registry unreachable while discovering daemon")
+            return False
 
     def _daemon_discovery_loop(self, registry_addr: str):
         """Background loop to discover daemon if not found on startup."""
         while self._daemon_stub is None:
             time.sleep(10)
-            try:
-                channel = grpc.insecure_channel(registry_addr, options=config.GRPC_OPTIONS)
-                stub = registry_pb2_grpc.RegistryStub(channel)
-                resp = stub.Discover(
-                    registry_pb2.DiscoverRequest(model_id=""),
-                    timeout=10,
-                )
-                daemons = [n for n in resp.nodes if n.node_type == "daemon"]
-                channel.close()
-                if daemons:
-                    daemon = self._pick_least_loaded_daemon(daemons)
-                    self._daemon_address = daemon.address
-                    self._daemon_stub = inference_pb2_grpc.InferenceNodeStub(
-                        grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
-                    )
-                    print(f"[Node] Connected to chain daemon at {daemon.address}")
-                    # Flush buffered shares
-                    self._flush_share_buffer()
-            except grpc.RpcError:
-                pass
+            if self._refresh_daemon_from_registry(registry_addr):
+                print(f"[Node] Connected to chain daemon at {self._daemon_address}")
+                # Flush buffered shares
+                self._flush_share_buffer()
 
     def _submit_share_to_daemon(self, share: ComputeShare):
         """Submit a compute share to the chain daemon.
 
         If the daemon is unreachable, buffer locally and retry later.
         """
+        if self._daemon_stub is None:
+            self._refresh_daemon_from_registry(self._daemon_registry_addr)
         if self._daemon_stub is None:
             if self._require_daemon:
                 raise RuntimeError("Daemon is required but unavailable for share submission.")
@@ -401,6 +394,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             )
         except grpc.RpcError:
             self._daemon_stub = None
+            self._refresh_daemon_from_registry(self._daemon_registry_addr)
             if self._require_daemon:
                 raise RuntimeError("Daemon became unreachable during share submission.")
             # Daemon unreachable — buffer locally

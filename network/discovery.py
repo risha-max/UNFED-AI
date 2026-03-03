@@ -143,6 +143,13 @@ class RegistryClient:
             print(f"[Discovery] Failed to get verifier health: {e.details()}")
             return None
 
+    def get_infra_telemetry(self):
+        try:
+            return self._stub.GetInfraTelemetry(registry_pb2.GetInfraTelemetryRequest())
+        except grpc.RpcError as e:
+            print(f"[Discovery] Failed to get infra telemetry: {e.details()}")
+            return None
+
     def discover_compute(self, model_id: str = "") -> list:
         """Discover only compute nodes (excludes vision and MPC nodes)."""
         all_nodes = self.discover(model_id)
@@ -492,6 +499,12 @@ class RegistryPool:
         return self._try_each(
             lambda c: c.get_verifier_health(),
             "get_verifier_health",
+        )
+
+    def get_infra_telemetry(self):
+        return self._try_each(
+            lambda c: c.get_infra_telemetry(),
+            "get_infra_telemetry",
         )
 
     def find_healthy_registry(self) -> str | None:

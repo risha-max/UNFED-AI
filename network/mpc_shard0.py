@@ -823,6 +823,7 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._peer_address: str = ""
         self._peer_node_id: str = ""
         self._daemon_stub = None
+        self._daemon_registry_addr: str = config.REGISTRY_ADDRESS
         self._private_key = None
         self._peer_stub = None  # MPCPeerStub for calling Node B
         self._registration_share_signing_private_key = None
@@ -843,11 +844,16 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
     def _init_daemon_stub(self, registry_address: str):
         """Discover and connect to the chain daemon."""
+        self._daemon_registry_addr = registry_address or config.REGISTRY_ADDRESS
+        self._refresh_daemon_stub()
+
+    def _refresh_daemon_stub(self):
+        """Discover and connect to the least-loaded daemon."""
         try:
             import registry_pb2
             import registry_pb2_grpc
             channel = grpc.insecure_channel(
-                registry_address, options=config.GRPC_OPTIONS)
+                self._daemon_registry_addr, options=config.GRPC_OPTIONS)
             stub = registry_pb2_grpc.RegistryStub(channel)
             resp = stub.Discover(
                 registry_pb2.DiscoverRequest(model_id=""),
@@ -869,6 +875,8 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
     def _record_dual_shares(self, session_id: str, output: torch.Tensor):
         """Submit compute shares for both MPC nodes to the daemon."""
+        if not self._daemon_stub:
+            self._refresh_daemon_stub()
         if not self._daemon_stub or not self._node_id:
             if self._require_daemon:
                 raise RuntimeError("Daemon is required but unavailable for MPC share submission.")
@@ -896,6 +904,7 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                   f"{session_id[:8]}...")
         except Exception:
             self._daemon_stub = None
+            self._refresh_daemon_stub()
             if self._require_daemon:
                 raise RuntimeError("Daemon became unreachable during MPC share submission.")
             print(f"[MPC-A] Failed to submit shares to daemon")
