@@ -132,10 +132,17 @@ message FraudProofMessage {
   int32 actual_token = 7;
   double timestamp = 8;
   string verifier_id = 9; // Verifier identity that submitted this proof
+  string claim_id = 10;   // Optional client-generated claim UUID
+  string idempotency_key = 11; // Optional idempotency key for dedupe/rate-limit safety
+  string evidence_session_id = 12; // Session/ticket linkage evidence
+  string evidence_node_id = 13; // Claimed submitting node evidence
 }
 
 message FraudProofResponse {
   bool accepted = 1;
+  string claim_id = 2;
+  string claim_status = 3; // pending|confirmed|rejected
+  string message = 4;
 }
 
 message GetFraudProofsRequest {}
@@ -454,6 +461,8 @@ message GetInfraTelemetryResponse {
   string verifier_work_window_json = 8;    // {verifier_id: ticket_units}
   string daemon_payout_share_json = 9;     // {recipient: [0..1]}
   string verifier_payout_share_json = 10;  // {recipient: [0..1]}
+  string verifier_claim_status_json = 11;  // [{claim_id,status,reason,...}]
+  string verifier_penalty_events_json = 12; // [{verifier_id,kind,amount,...}]
 }
 
 message VerifyCapacityRequest {

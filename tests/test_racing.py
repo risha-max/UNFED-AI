@@ -584,6 +584,38 @@ def test_mpc_dual_share_recording():
     print("  Signed share submission via daemon — PASSED")
 
 
+def test_mpc_share_submit_retries_once_after_daemon_failover():
+    """MPC share path retries immediately after daemon refresh."""
+    print("\n=== Test: MPC Failover Retry ===")
+
+    import torch
+    from unittest.mock import MagicMock
+    from network.mpc_shard0 import MPCNodeServicer, MPCNode
+    from network.share_auth import generate_signing_keypair
+
+    mpc_node = MagicMock(spec=MPCNode)
+    mpc_node.role = "A"
+    servicer = MPCNodeServicer(mpc_node, 50060)
+    servicer._node_id = "node-A-12345678"
+    priv, _ = generate_signing_keypair()
+    servicer._registration_share_signing_private_key = priv
+
+    first_daemon = MagicMock()
+    first_daemon.SubmitShares.side_effect = RuntimeError("daemon down")
+    second_daemon = MagicMock()
+    second_daemon.SubmitShares.return_value = MagicMock(accepted=1)
+    servicer._daemon_stub = first_daemon
+
+    def _refresh_to_second():
+        servicer._daemon_stub = second_daemon
+
+    servicer._refresh_daemon_stub = _refresh_to_second
+    output_tensor = torch.randn(1, 5, 896)
+    servicer._record_dual_shares("session-failover-1", output_tensor)
+    assert second_daemon.SubmitShares.call_count == 1
+    print("  Retry succeeded on refreshed daemon — PASSED")
+
+
 def test_config_racing_constants():
     """Test that racing configuration constants are defined."""
     print("\n=== Test: Config Racing Constants ===")

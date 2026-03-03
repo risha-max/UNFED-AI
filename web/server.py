@@ -302,6 +302,8 @@ async def get_health(model_id: str = ""):
         verifier_work_window = {}
         daemon_payout_share = {}
         verifier_payout_share = {}
+        verifier_claim_status = []
+        verifier_penalty_events = []
         if infra is not None:
             try:
                 daemon_work_window = json.loads(
@@ -327,6 +329,18 @@ async def get_health(model_id: str = ""):
                 )
             except Exception:
                 verifier_payout_share = {}
+            try:
+                verifier_claim_status = json.loads(
+                    getattr(infra, "verifier_claim_status_json", "[]") or "[]"
+                )
+            except Exception:
+                verifier_claim_status = []
+            try:
+                verifier_penalty_events = json.loads(
+                    getattr(infra, "verifier_penalty_events_json", "[]") or "[]"
+                )
+            except Exception:
+                verifier_penalty_events = []
         if health:
             return {
                 "model_id": health.model_id,
@@ -377,6 +391,8 @@ async def get_health(model_id: str = ""):
                 "verifier_work_window": verifier_work_window,
                 "daemon_payout_share": daemon_payout_share,
                 "verifier_payout_share": verifier_payout_share,
+                "verifier_claim_status": verifier_claim_status,
+                "verifier_penalty_events": verifier_penalty_events,
             }
         return {"error": "No health data available"}
     except Exception as e:

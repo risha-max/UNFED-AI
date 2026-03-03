@@ -108,6 +108,10 @@ class ClusterConfig:
     daemon_fee_bps: int = 200
     verifier_fee_bps: int = 100
     verifier_fraud_bonus_weight: float = 3.0
+    verifier_bonus_requires_confirmation: bool = True
+    verifier_false_claim_slash_bps: int = 500
+    verifier_claim_rate_limit_per_window: int = 64
+    verifier_bonus_cooldown_windows: int = 1
 
     # --- Metadata ---
     created_at: float = 0.0
@@ -172,6 +176,12 @@ class ClusterConfig:
             errors.append("daemon_fee_bps + verifier_fee_bps must be < 10000")
         if float(self.verifier_fraud_bonus_weight) < 0.0:
             errors.append("verifier_fraud_bonus_weight must be >= 0.0")
+        if not 0 <= int(self.verifier_false_claim_slash_bps) <= 10000:
+            errors.append("verifier_false_claim_slash_bps must be in [0, 10000]")
+        if int(self.verifier_claim_rate_limit_per_window) <= 0:
+            errors.append("verifier_claim_rate_limit_per_window must be > 0")
+        if int(self.verifier_bonus_cooldown_windows) < 0:
+            errors.append("verifier_bonus_cooldown_windows must be >= 0")
         # Warn (not error) if on-chain fields are missing
         if not self.chain_rpc_url or not self.escrow_contract_address:
             errors.append(

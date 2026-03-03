@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import builtins
+import hashlib
 import json
 import logging
 import re
@@ -22,6 +23,7 @@ import sys
 import os
 import time
 import threading
+import uuid
 from collections import defaultdict
 
 logger = logging.getLogger("unfed.registry")
@@ -165,6 +167,43 @@ class VerifierRecord:
         self.registered_at = time.time()
 
 
+class VerifierClaimRecord:
+    """Registry-side lifecycle state for a verifier fraud claim."""
+
+    def __init__(self, claim_id: str, idempotency_key: str, verifier_id: str,
+                 ticket_id: str, shard_index: int):
+        self.claim_id = claim_id
+        self.idempotency_key = idempotency_key
+        self.verifier_id = verifier_id
+        self.ticket_id = ticket_id
+        self.shard_index = shard_index
+        self.status = "pending"  # pending | confirmed | rejected
+        self.reason = ""
+        self.fraud_node_id = ""
+        self.created_at = time.time()
+        self.updated_at = self.created_at
+        self.bonus_awarded = False
+        self.slash_amount = 0.0
+        self.cooldown_until_window = -1
+
+    def to_dict(self) -> dict:
+        return {
+            "claim_id": self.claim_id,
+            "idempotency_key": self.idempotency_key,
+            "verifier_id": self.verifier_id,
+            "ticket_id": self.ticket_id,
+            "shard_index": self.shard_index,
+            "status": self.status,
+            "reason": self.reason,
+            "fraud_node_id": self.fraud_node_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "bonus_awarded": self.bonus_awarded,
+            "slash_amount": self.slash_amount,
+            "cooldown_until_window": self.cooldown_until_window,
+        }
+
+
 class RegistryServicer(registry_pb2_grpc.RegistryServicer):
     """gRPC service implementation for the node registry."""
 
@@ -205,7 +244,14 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
         # Map ticket_id -> node_id (to identify the fraudulent node)
         self._ticket_owners: dict[str, str] = {}
+        self._ticket_index: dict[str, registry_pb2.VerificationTicketProto] = {}
         self._ticket_owners_lock = threading.Lock()
+        self._claim_lock = threading.Lock()
+        self._claims_by_id: dict[str, VerifierClaimRecord] = {}
+        self._claim_id_by_idempotency: dict[str, str] = {}
+        self._claim_rate_window: dict[tuple[str, int], int] = defaultdict(int)
+        self._verifier_bonus_cooldown_until_window: dict[str, int] = {}
+        self._verifier_penalty_events: list[dict] = []
         self._infra_work_lock = threading.Lock()
         self._daemon_work_window: dict[str, float] = defaultdict(float)
         self._verifier_ticket_window: dict[str, float] = defaultdict(float)
@@ -650,8 +696,87 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             "adaptive_enabled": bool(self._cluster_config.verifier_adaptive_enabled),
             "heartbeat_timeout_seconds": int(self._cluster_config.verifier_heartbeat_timeout_seconds),
             "required_count": int(self._cluster_config.verifier_required_count),
+            "bonus_requires_confirmation": bool(
+                getattr(self._cluster_config, "verifier_bonus_requires_confirmation", True)
+            ),
+            "false_claim_slash_bps": int(
+                getattr(self._cluster_config, "verifier_false_claim_slash_bps", 500)
+            ),
+            "claim_rate_limit_per_window": int(
+                getattr(self._cluster_config, "verifier_claim_rate_limit_per_window", 64)
+            ),
+            "bonus_cooldown_windows": int(
+                getattr(self._cluster_config, "verifier_bonus_cooldown_windows", 1)
+            ),
         }
         return json.dumps(policy)
+
+    def _current_settlement_window(self) -> int:
+        blocks = max(1, int(self._share_chain.settlement_blocks))
+        height = max(0, int(self._share_chain.get_tip_height()))
+        return height // blocks
+
+    def _claim_status_snapshot(self, limit: int = 200) -> list[dict]:
+        with self._claim_lock:
+            claims = sorted(
+                self._claims_by_id.values(),
+                key=lambda c: c.updated_at,
+                reverse=True,
+            )
+            return [c.to_dict() for c in claims[:max(1, limit)]]
+
+    def _penalty_events_snapshot(self, limit: int = 200) -> list[dict]:
+        with self._claim_lock:
+            return list(self._verifier_penalty_events[-max(1, limit):])
+
+    def _record_penalty_event(self, event: dict):
+        with self._claim_lock:
+            self._verifier_penalty_events.append(event)
+            if len(self._verifier_penalty_events) > 1000:
+                self._verifier_penalty_events = self._verifier_penalty_events[-1000:]
+
+    def _claim_in_bonus_cooldown(self, verifier_id: str, current_window: int) -> bool:
+        with self._claim_lock:
+            until = int(self._verifier_bonus_cooldown_until_window.get(verifier_id, -1))
+        return current_window <= until
+
+    def _set_claim_cooldown(self, verifier_id: str, current_window: int):
+        cooldown_windows = int(
+            max(0, getattr(self._cluster_config, "verifier_bonus_cooldown_windows", 1))
+        )
+        until = current_window + cooldown_windows - 1
+        with self._claim_lock:
+            self._verifier_bonus_cooldown_until_window[verifier_id] = max(
+                until,
+                int(self._verifier_bonus_cooldown_until_window.get(verifier_id, -1)),
+            )
+
+    def _validate_claim_evidence(self, request, verifier_id: str) -> tuple[bool, str, str]:
+        """Validate ticket-bound evidence for a fraud claim."""
+        with self._ticket_owners_lock:
+            owner = self._ticket_owners.get(request.ticket_id, "")
+            ticket = self._ticket_index.get(request.ticket_id)
+        if not ticket:
+            return False, "unknown_ticket", owner
+        if request.evidence_session_id and request.evidence_session_id != request.ticket_id:
+            return False, "session_binding_mismatch", owner
+        if request.evidence_node_id and owner and request.evidence_node_id != owner:
+            return False, "node_binding_mismatch", owner
+        expected_input_hash = hashlib.sha256(bytes(ticket.input_data)).hexdigest()
+        expected_output_hash = hashlib.sha256(bytes(ticket.expected_output_data)).hexdigest()
+        if request.input_hash and request.input_hash != expected_input_hash:
+            return False, "input_hash_mismatch", owner
+        if request.expected_output_hash and request.expected_output_hash != expected_output_hash:
+            return False, "expected_output_hash_mismatch", owner
+        if request.expected_token and ticket.has_expected_token:
+            if int(request.expected_token) != int(ticket.expected_token):
+                return False, "expected_token_mismatch", owner
+        # True fraud requires mismatch between claimed expected and verifier output.
+        if request.actual_output_hash and request.actual_output_hash == expected_output_hash:
+            return False, "no_output_mismatch", owner
+        if not request.actual_output_hash:
+            return False, "missing_actual_output_hash", owner
+        return True, "ok", owner
 
     # ------------------------------------------------------------------
     # Auto-assignment
@@ -1191,6 +1316,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             }
             daemon_payout_share = dict(self._last_daemon_payout_share)
             verifier_payout_share = dict(self._last_verifier_payout_share)
+        claim_status = self._claim_status_snapshot(limit=250)
+        penalty_events = self._penalty_events_snapshot(limit=250)
         return registry_pb2.GetInfraTelemetryResponse(
             healthy_daemon_count=healthy_daemon_count,
             required_daemon_count=required_daemon_count,
@@ -1202,6 +1329,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             verifier_work_window_json=json.dumps(verifier_work_window),
             daemon_payout_share_json=json.dumps(daemon_payout_share),
             verifier_payout_share_json=json.dumps(verifier_payout_share),
+            verifier_claim_status_json=json.dumps(claim_status),
+            verifier_penalty_events_json=json.dumps(penalty_events),
         )
 
     def Unregister(self, request, context):
@@ -1348,6 +1477,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         with self._ticket_owners_lock:
             for ticket in request.tickets:
                 self._ticket_owners[ticket.ticket_id] = request.node_id
+                self._ticket_index[ticket.ticket_id] = ticket
 
         # Record compute shares in the share-chain
         # Each ticket represents verified compute work
@@ -1382,55 +1512,140 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         return registry_pb2.GetPendingTicketsResponse(tickets=tickets)
 
     def SubmitFraudProof(self, request, context):
-        """Accept a fraud proof from a verifier and trigger slashing."""
+        """Accept a fraud proof, validate evidence, then confirm/reject claim."""
         verifier_id = (getattr(request, "verifier_id", "") or "").strip()
+        claim_id = (getattr(request, "claim_id", "") or "").strip() or str(uuid.uuid4())
+        idem = (getattr(request, "idempotency_key", "") or "").strip() or (
+            f"{verifier_id}:{request.ticket_id}:{request.shard_index}"
+        )
+        now = time.time()
+        current_window = self._current_settlement_window()
+
+        with self._claim_lock:
+            existing_id = self._claim_id_by_idempotency.get(idem)
+            if existing_id and existing_id in self._claims_by_id:
+                existing = self._claims_by_id[existing_id]
+                return registry_pb2.FraudProofResponse(
+                    accepted=(existing.status == "confirmed"),
+                    claim_id=existing.claim_id,
+                    claim_status=existing.status,
+                    message=f"idempotent_replay:{existing.reason}",
+                )
+            self._claim_id_by_idempotency[idem] = claim_id
+            claim = VerifierClaimRecord(
+                claim_id=claim_id,
+                idempotency_key=idem,
+                verifier_id=verifier_id,
+                ticket_id=request.ticket_id,
+                shard_index=request.shard_index,
+            )
+            self._claims_by_id[claim_id] = claim
+            self._claim_rate_window[(verifier_id, current_window)] += 1
+            claim_count = self._claim_rate_window[(verifier_id, current_window)]
+
+        limit = int(max(1, getattr(
+            self._cluster_config, "verifier_claim_rate_limit_per_window", 64)))
+        if claim_count > limit:
+            claim.status = "rejected"
+            claim.reason = "rate_limited"
+            claim.updated_at = now
+            self._record_penalty_event({
+                "ts": now,
+                "kind": "claim_rate_limited",
+                "verifier_id": verifier_id,
+                "claim_id": claim_id,
+                "window": current_window,
+                "limit": limit,
+            })
+            return registry_pb2.FraudProofResponse(
+                accepted=False,
+                claim_id=claim_id,
+                claim_status=claim.status,
+                message=claim.reason,
+            )
+
+        is_valid, reason, fraud_node_id = self._validate_claim_evidence(request, verifier_id)
+        claim.fraud_node_id = fraud_node_id
+        claim.reason = reason
+
         with self._fraud_lock:
             self._fraud_proofs.append(request)
-        if verifier_id:
-            with self._infra_work_lock:
-                self._verifier_bonus_window[verifier_id] += 1.0
 
-        print(f"[Registry] FRAUD PROOF received for shard {request.shard_index} "
-              f"(ticket: {request.ticket_id})")
-
-        # Find the fraudulent node from ticket ownership
-        with self._ticket_owners_lock:
-            fraud_node_id = self._ticket_owners.get(request.ticket_id)
-
-        if fraud_node_id:
-            # Try to challenge any open settlement that contains this node's work
-            settlements = self._share_chain.get_settlements()
+        if is_valid:
+            claim.status = "confirmed"
             challenged = False
-            for s in settlements:
-                if fraud_node_id in s.node_shares:
-                    result = self._payment_contract.challenge_settlement(
-                        settlement_hash=s.settlement_hash,
-                        fraud_node_id=fraud_node_id,
-                    )
-                    if result:
-                        print(f"[Registry] Settlement challenged and node "
-                              f"{fraud_node_id[:8]}... slashed!")
-                        challenged = True
-                        break
-
-            # On-chain slash (if escrow is enabled)
-            if self._onchain_escrow:
-                try:
-                    self._onchain_escrow.slash_node(fraud_node_id)
-                    print(f"[Registry] On-chain slash executed for "
-                          f"{fraud_node_id[:8]}...")
-                except Exception as e:
-                    print(f"[Registry] WARNING: On-chain slash failed "
-                          f"for {fraud_node_id[:8]}...: {e}")
-
-            if not challenged and not self._onchain_escrow:
-                print(f"[Registry] Fraud proof recorded but no open settlement "
-                      f"to challenge for node {fraud_node_id[:8]}...")
+            settlements = self._share_chain.get_settlements()
+            if fraud_node_id:
+                for s in settlements:
+                    if fraud_node_id in s.node_shares:
+                        result = self._payment_contract.challenge_settlement(
+                            settlement_hash=s.settlement_hash,
+                            fraud_node_id=fraud_node_id,
+                        )
+                        if result:
+                            challenged = True
+                            break
+                if self._onchain_escrow:
+                    try:
+                        self._onchain_escrow.slash_node(fraud_node_id)
+                    except Exception as e:
+                        print(f"[Registry] WARNING: On-chain slash failed "
+                              f"for {fraud_node_id[:8]}...: {e}")
+            claim.reason = "confirmed" if challenged or fraud_node_id else "confirmed_no_owner"
+            bonus_requires_confirmation = bool(
+                getattr(self._cluster_config, "verifier_bonus_requires_confirmation", True)
+            )
+            in_cooldown = self._claim_in_bonus_cooldown(verifier_id, current_window)
+            if verifier_id and (not in_cooldown) and bonus_requires_confirmation:
+                with self._infra_work_lock:
+                    self._verifier_bonus_window[verifier_id] += 1.0
+                claim.bonus_awarded = True
+            elif verifier_id and in_cooldown:
+                claim.reason = "confirmed_bonus_blocked_by_cooldown"
         else:
-            print(f"[Registry] Fraud proof recorded but could not identify "
-                  f"the submitting node for ticket {request.ticket_id}")
+            claim.status = "rejected"
+            slash_bps = int(max(0, getattr(
+                self._cluster_config, "verifier_false_claim_slash_bps", 500)))
+            slash_fraction = float(slash_bps) / 10000.0
+            slash_amount = 0.0
+            if slash_fraction > 0 and verifier_id:
+                payout_addr = ""
+                with self._verifier_lock:
+                    rec = self._verifiers.get(verifier_id)
+                    if rec:
+                        payout_addr = rec.payout_address or rec.address or rec.verifier_id
+                target = payout_addr or verifier_id
+                if self._onchain_escrow and _is_eth_address(target):
+                    try:
+                        self._onchain_escrow.slash_node(target)
+                    except Exception:
+                        pass
+                slash_amount = self._payment_contract.stakes.slash(
+                    target, pool_slash_fraction=slash_fraction
+                )
+            claim.slash_amount = float(slash_amount)
+            self._set_claim_cooldown(verifier_id, current_window)
+            claim.cooldown_until_window = self._verifier_bonus_cooldown_until_window.get(
+                verifier_id, -1
+            )
+            self._record_penalty_event({
+                "ts": now,
+                "kind": "false_claim_penalty",
+                "verifier_id": verifier_id,
+                "claim_id": claim_id,
+                "reason": reason,
+                "slash_amount": float(slash_amount),
+                "cooldown_until_window": claim.cooldown_until_window,
+            })
 
-        return registry_pb2.FraudProofResponse(accepted=True)
+        claim.updated_at = time.time()
+        print(f"[Registry] Claim {claim.claim_id[:8]}... {claim.status}: {claim.reason}")
+        return registry_pb2.FraudProofResponse(
+            accepted=(claim.status == "confirmed"),
+            claim_id=claim.claim_id,
+            claim_status=claim.status,
+            message=claim.reason,
+        )
 
     def GetFraudProofs(self, request, context):
         """Return all known fraud proofs."""

@@ -892,20 +892,27 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         if self._peer_node_id and not self._peer_node_id.startswith("peer-of-"):
             # TODO: emit peer-signed share once role-B signs and submits directly.
             pass
+        req = inference_pb2.SubmitSharesRequest(
+            shares=[share_to_proto(s) for s in shares],
+            submitter_id=self._node_id,
+        )
 
         try:
-            self._daemon_stub.SubmitShares(
-                inference_pb2.SubmitSharesRequest(
-                    shares=[share_to_proto(s) for s in shares],
-                    submitter_id=self._node_id,
-                ),
-                timeout=5,
-            )
+            self._daemon_stub.SubmitShares(req, timeout=5)
             print(f"[MPC-A] Submitted signed share(s) for session "
                   f"{session_id[:8]}...")
         except Exception:
             self._daemon_stub = None
             self._refresh_daemon_stub()
+            # Fast failover path: retry once immediately on refreshed daemon.
+            if self._daemon_stub is not None:
+                try:
+                    self._daemon_stub.SubmitShares(req, timeout=5)
+                    print(f"[MPC-A] Submitted signed share(s) after failover "
+                          f"for session {session_id[:8]}...")
+                    return
+                except Exception:
+                    self._daemon_stub = None
             if self._require_daemon:
                 raise RuntimeError("Daemon became unreachable during MPC share submission.")
             print(f"[MPC-A] Failed to submit shares to daemon")

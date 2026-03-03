@@ -376,6 +376,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
         If the daemon is unreachable, buffer locally and retry later.
         """
+        req = inference_pb2.SubmitSharesRequest(
+            shares=[share_to_proto(share)],
+            submitter_id=share.node_id,
+        )
         if self._daemon_stub is None:
             self._refresh_daemon_from_registry(self._daemon_registry_addr)
         if self._daemon_stub is None:
@@ -386,16 +390,17 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             return
 
         try:
-            self._daemon_stub.SubmitShares(
-                inference_pb2.SubmitSharesRequest(
-                    shares=[share_to_proto(share)],
-                    submitter_id=share.node_id,
-                ),
-                timeout=5,
-            )
+            self._daemon_stub.SubmitShares(req, timeout=5)
         except grpc.RpcError:
             self._daemon_stub = None
             self._refresh_daemon_from_registry(self._daemon_registry_addr)
+            # Fast failover path: after refreshing to a new daemon, retry once.
+            if self._daemon_stub is not None:
+                try:
+                    self._daemon_stub.SubmitShares(req, timeout=5)
+                    return
+                except grpc.RpcError:
+                    self._daemon_stub = None
             if self._require_daemon:
                 raise RuntimeError("Daemon became unreachable during share submission.")
             # Daemon unreachable — buffer locally

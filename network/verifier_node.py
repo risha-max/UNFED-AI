@@ -164,6 +164,7 @@ def run_verifier(registry_address: str = None, poll_interval: float = 5.0,
                             print(f" FRAUD!")
                             # Submit fraud proof to registry
                             try:
+                                claim_id = f"{verifier_id}:{proof.ticket_id}:{int(proof.timestamp * 1000)}"
                                 stub.SubmitFraudProof(registry_pb2.FraudProofMessage(
                                     ticket_id=proof.ticket_id,
                                     shard_index=proof.shard_index,
@@ -174,6 +175,9 @@ def run_verifier(registry_address: str = None, poll_interval: float = 5.0,
                                     actual_token=proof.actual_token or 0,
                                     timestamp=proof.timestamp,
                                     verifier_id=verifier_id,
+                                    claim_id=claim_id,
+                                    idempotency_key=claim_id,
+                                    evidence_session_id=proof.ticket_id,
                                 ))
                                 print(f"    Fraud proof submitted to registry")
                             except grpc.RpcError as e:
