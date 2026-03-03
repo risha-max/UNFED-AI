@@ -349,11 +349,35 @@ def _get_chain():
 def _discover_daemon():
     """Find a daemon node via the registry."""
     try:
+        import grpc
+        import inference_pb2
+        import inference_pb2_grpc
         discovery = get_discovery()
         all_nodes = discovery.discover("")
         daemons = [n for n in all_nodes if n.node_type == "daemon"]
         if daemons:
-            return daemons[0]
+            best = None
+            best_key = None
+            for daemon in daemons:
+                util = 1.0
+                try:
+                    ch = grpc.insecure_channel(
+                        daemon.address, options=app_config.GRPC_OPTIONS
+                    )
+                    stub = inference_pb2_grpc.InferenceNodeStub(ch)
+                    fee = stub.GetFeeEstimate(
+                        inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+                        timeout=2,
+                    )
+                    util = float(getattr(fee, "utilization", 1.0))
+                    ch.close()
+                except Exception:
+                    util = 1.0
+                key = (util, daemon.address or "")
+                if best is None or key < best_key:
+                    best = daemon
+                    best_key = key
+            return best if best is not None else daemons[0]
     except Exception as e:
         logger.debug("Daemon discovery failed: %s", e)
     return None

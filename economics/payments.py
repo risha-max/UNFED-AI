@@ -63,6 +63,8 @@ class Settlement:
     verifier_recipient: str = ""
     daemon_fee_bps: int = 0
     verifier_fee_bps: int = 0
+    daemon_work_map: dict[str, float] = field(default_factory=dict)
+    verifier_work_map: dict[str, float] = field(default_factory=dict)
 
 
 # --- Stake Manager ---
@@ -276,6 +278,8 @@ class PaymentContract:
         verifier_recipient: str | None = None,
         daemon_fee_bps: int | None = None,
         verifier_fee_bps: int | None = None,
+        daemon_work_map: dict[str, float] | None = None,
+        verifier_work_map: dict[str, float] | None = None,
     ) -> Settlement:
         """
         Post a settlement from the share-chain.
@@ -318,6 +322,8 @@ class PaymentContract:
                 self._default_verifier_fee_bps
                 if verifier_fee_bps is None else int(max(0, verifier_fee_bps))
             ),
+            daemon_work_map=dict(daemon_work_map or {}),
+            verifier_work_map=dict(verifier_work_map or {}),
         )
 
         with self._lock:
@@ -356,9 +362,26 @@ class PaymentContract:
             verifier_fee_bps = int(verifier_fee_bps * scale)
         daemon_cut = total_revenue * (daemon_fee_bps / 10000.0)
         verifier_cut = total_revenue * (verifier_fee_bps / 10000.0)
-        if not settlement.daemon_recipient:
+
+        daemon_weights = {
+            node_id: float(weight)
+            for node_id, weight in (settlement.daemon_work_map or {}).items()
+            if float(weight) > 0
+        }
+        verifier_weights = {
+            node_id: float(weight)
+            for node_id, weight in (settlement.verifier_work_map or {}).items()
+            if float(weight) > 0
+        }
+
+        if not daemon_weights and settlement.daemon_recipient:
+            daemon_weights = {settlement.daemon_recipient: 1.0}
+        if not verifier_weights and settlement.verifier_recipient:
+            verifier_weights = {settlement.verifier_recipient: 1.0}
+
+        if not daemon_weights:
             daemon_cut = 0.0
-        if not settlement.verifier_recipient:
+        if not verifier_weights:
             verifier_cut = 0.0
         node_pool = max(0.0, total_revenue - daemon_cut - verifier_cut)
 
@@ -371,14 +394,20 @@ class PaymentContract:
             if payout > 0:
                 payouts[node_id] = payouts.get(node_id, 0.0) + payout
 
-        if daemon_cut > 0 and settlement.daemon_recipient:
-            payouts[settlement.daemon_recipient] = (
-                payouts.get(settlement.daemon_recipient, 0.0) + daemon_cut
-            )
-        if verifier_cut > 0 and settlement.verifier_recipient:
-            payouts[settlement.verifier_recipient] = (
-                payouts.get(settlement.verifier_recipient, 0.0) + verifier_cut
-            )
+        if daemon_cut > 0 and daemon_weights:
+            daemon_total = sum(daemon_weights.values())
+            if daemon_total > 0:
+                for node_id, weight in daemon_weights.items():
+                    payouts[node_id] = payouts.get(node_id, 0.0) + (
+                        daemon_cut * (weight / daemon_total)
+                    )
+        if verifier_cut > 0 and verifier_weights:
+            verifier_total = sum(verifier_weights.values())
+            if verifier_total > 0:
+                for node_id, weight in verifier_weights.items():
+                    payouts[node_id] = payouts.get(node_id, 0.0) + (
+                        verifier_cut * (weight / verifier_total)
+                    )
         return payouts
 
     def settlement_payout_split(self, settlement_hash: str) -> dict[str, float]:

@@ -107,6 +107,7 @@ class ClusterConfig:
     daemon_heartbeat_timeout_seconds: int = 30
     daemon_fee_bps: int = 200
     verifier_fee_bps: int = 100
+    verifier_fraud_bonus_weight: float = 3.0
 
     # --- Metadata ---
     created_at: float = 0.0
@@ -169,6 +170,8 @@ class ClusterConfig:
             errors.append("verifier_fee_bps must be in [0, 10000]")
         if int(self.daemon_fee_bps) + int(self.verifier_fee_bps) >= 10000:
             errors.append("daemon_fee_bps + verifier_fee_bps must be < 10000")
+        if float(self.verifier_fraud_bonus_weight) < 0.0:
+            errors.append("verifier_fraud_bonus_weight must be >= 0.0")
         # Warn (not error) if on-chain fields are missing
         if not self.chain_rpc_url or not self.escrow_contract_address:
             errors.append(

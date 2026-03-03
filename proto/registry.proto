@@ -112,6 +112,7 @@ message SubmitTicketsResponse {
 
 message GetPendingTicketsRequest {
   int32 max_tickets = 1;  // Max number of tickets to return (0 = no limit)
+  string verifier_id = 2; // Optional verifier identity for work attribution
 }
 
 message GetPendingTicketsResponse {
@@ -127,6 +128,7 @@ message FraudProofMessage {
   int32 expected_token = 6;
   int32 actual_token = 7;
   double timestamp = 8;
+  string verifier_id = 9; // Verifier identity that submitted this proof
 }
 
 message FraudProofResponse {

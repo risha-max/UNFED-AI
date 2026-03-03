@@ -249,7 +249,25 @@ class UnfedClient:
             all_nodes = self.discovery.discover("")
             daemons = [n for n in all_nodes if n.node_type == "daemon"]
             if daemons:
-                daemon = daemons[0]
+                daemon = None
+                best_key = None
+                for candidate in daemons:
+                    util = 1.0
+                    try:
+                        probe = self._get_stub(candidate.address)
+                        fee = probe.GetFeeEstimate(
+                            inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+                            timeout=2,
+                        )
+                        util = float(getattr(fee, "utilization", 1.0))
+                    except Exception:
+                        util = 1.0
+                    key = (util, candidate.address or "")
+                    if daemon is None or key < best_key:
+                        daemon = candidate
+                        best_key = key
+                if daemon is None:
+                    daemon = daemons[0]
                 stub = self._get_stub(daemon.address)
                 resp = stub.GetFeeEstimate(
                     inference_pb2.FeeEstimateRequest(

@@ -22,6 +22,7 @@ import sys
 import os
 import time
 import threading
+from collections import defaultdict
 
 logger = logging.getLogger("unfed.registry")
 from concurrent import futures
@@ -205,6 +206,11 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         # Map ticket_id -> node_id (to identify the fraudulent node)
         self._ticket_owners: dict[str, str] = {}
         self._ticket_owners_lock = threading.Lock()
+        self._infra_work_lock = threading.Lock()
+        self._daemon_work_window: dict[str, float] = defaultdict(float)
+        self._verifier_ticket_window: dict[str, float] = defaultdict(float)
+        self._verifier_bonus_window: dict[str, float] = defaultdict(float)
+        self._daemon_height_cursor: dict[str, int] = {}
 
         # Model manifests (model_id -> manifest JSON string)
         self._manifests: dict[str, str] = {}
@@ -311,6 +317,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
         while True:
             time.sleep(5)
+            self._refresh_daemon_work_window()
             settlements = self._share_chain.get_settlements()
             verifier_ok = self._verifier_healthy()
             daemon_ok = self._daemon_healthy()
@@ -331,12 +338,15 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                         continue
                     daemon_recipient = self._select_daemon_recipient()
                     verifier_recipient = self._select_verifier_recipient()
+                    daemon_work_map, verifier_work_map = self._consume_infra_work_maps()
                     self._settlement_processor.process_settlement(
                         s,
                         daemon_recipient=daemon_recipient,
                         verifier_recipient=verifier_recipient,
                         daemon_fee_bps=int(self._cluster_config.daemon_fee_bps),
                         verifier_fee_bps=int(self._cluster_config.verifier_fee_bps),
+                        daemon_work_map=daemon_work_map,
+                        verifier_work_map=verifier_work_map,
                     )
 
                     # Post on-chain if escrow is enabled
@@ -533,6 +543,85 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             ]
         healthy.sort()
         return healthy[0] if healthy else ""
+
+    def _refresh_daemon_work_window(self):
+        """Accumulate daemon work units from newly produced daemon blocks."""
+        timeout = max(1, int(self._cluster_config.daemon_heartbeat_timeout_seconds))
+        now = time.time()
+        with self._lock:
+            daemons = [
+                (rec.node_id, rec.address)
+                for rec in self._nodes.values()
+                if rec.node_type == "daemon" and (now - rec.last_heartbeat) <= timeout
+            ]
+
+        for daemon_id, daemon_addr in daemons:
+            if not daemon_addr:
+                continue
+            from_height = self._daemon_height_cursor.get(daemon_id, 0) + 1
+            try:
+                channel = grpc.insecure_channel(daemon_addr, options=config.GRPC_OPTIONS)
+                stub = inference_pb2_grpc.InferenceNodeStub(channel)
+                resp = stub.GetBlocks(
+                    inference_pb2.GetBlocksRequest(from_height=from_height),
+                    timeout=3,
+                )
+                channel.close()
+            except Exception:
+                continue
+
+            added_work = 0.0
+            max_height = self._daemon_height_cursor.get(daemon_id, 0)
+            for block in resp.blocks:
+                added_work += float(len(block.shares))
+                max_height = max(max_height, int(block.index))
+            if added_work > 0:
+                with self._infra_work_lock:
+                    self._daemon_work_window[daemon_id] += added_work
+            self._daemon_height_cursor[daemon_id] = max_height
+
+    def _consume_infra_work_maps(self) -> tuple[dict[str, float], dict[str, float]]:
+        """Return and clear daemon/verifier work counters for current settlement."""
+        now = time.time()
+        daemon_timeout = max(1, int(self._cluster_config.daemon_heartbeat_timeout_seconds))
+        verifier_timeout = max(1, int(self._cluster_config.verifier_heartbeat_timeout_seconds))
+
+        with self._lock:
+            healthy_daemon_ids = {
+                rec.node_id
+                for rec in self._nodes.values()
+                if rec.node_type == "daemon" and (now - rec.last_heartbeat) <= daemon_timeout
+            }
+        with self._verifier_lock:
+            healthy_verifier_payout = {
+                vid: rec.payout_address
+                for vid, rec in self._verifiers.items()
+                if rec.payout_address and (now - rec.last_heartbeat) <= verifier_timeout
+            }
+
+        with self._infra_work_lock:
+            daemon_raw = dict(self._daemon_work_window)
+            verifier_ticket_raw = dict(self._verifier_ticket_window)
+            verifier_bonus_raw = dict(self._verifier_bonus_window)
+            self._daemon_work_window.clear()
+            self._verifier_ticket_window.clear()
+            self._verifier_bonus_window.clear()
+
+        daemon_map: dict[str, float] = {}
+        for daemon_id, units in daemon_raw.items():
+            if daemon_id in healthy_daemon_ids and float(units) > 0:
+                daemon_map[daemon_id] = float(units)
+
+        bonus_weight = float(getattr(self._cluster_config, "verifier_fraud_bonus_weight", 3.0))
+        verifier_map: dict[str, float] = {}
+        for verifier_id, payout_addr in healthy_verifier_payout.items():
+            ticket_units = float(verifier_ticket_raw.get(verifier_id, 0.0))
+            bonus_units = float(verifier_bonus_raw.get(verifier_id, 0.0))
+            total_units = ticket_units + (bonus_units * bonus_weight)
+            if total_units > 0:
+                verifier_map[payout_addr] = verifier_map.get(payout_addr, 0.0) + total_units
+
+        return daemon_map, verifier_map
 
     def _effective_verifier_config_json(self) -> str:
         policy = {
@@ -1232,17 +1321,25 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
     def GetPendingTickets(self, request, context):
         """Return and clear pending verification tickets for verifiers."""
+        verifier_id = (getattr(request, "verifier_id", "") or "").strip()
         with self._tickets_lock:
             limit = request.max_tickets if request.max_tickets > 0 else len(self._pending_tickets)
             tickets = self._pending_tickets[:limit]
             self._pending_tickets = self._pending_tickets[limit:]
+        if verifier_id and tickets:
+            with self._infra_work_lock:
+                self._verifier_ticket_window[verifier_id] += float(len(tickets))
 
         return registry_pb2.GetPendingTicketsResponse(tickets=tickets)
 
     def SubmitFraudProof(self, request, context):
         """Accept a fraud proof from a verifier and trigger slashing."""
+        verifier_id = (getattr(request, "verifier_id", "") or "").strip()
         with self._fraud_lock:
             self._fraud_proofs.append(request)
+        if verifier_id:
+            with self._infra_work_lock:
+                self._verifier_bonus_window[verifier_id] += 1.0
 
         print(f"[Registry] FRAUD PROOF received for shard {request.shard_index} "
               f"(ticket: {request.ticket_id})")

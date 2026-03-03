@@ -339,7 +339,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             channel.close()
 
             if daemons:
-                daemon = daemons[0]
+                daemon = self._pick_least_loaded_daemon(daemons)
                 self._daemon_address = daemon.address
                 self._daemon_stub = inference_pb2_grpc.InferenceNodeStub(
                     grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
@@ -368,7 +368,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 daemons = [n for n in resp.nodes if n.node_type == "daemon"]
                 channel.close()
                 if daemons:
-                    daemon = daemons[0]
+                    daemon = self._pick_least_loaded_daemon(daemons)
                     self._daemon_address = daemon.address
                     self._daemon_stub = inference_pb2_grpc.InferenceNodeStub(
                         grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
@@ -400,11 +400,36 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 timeout=5,
             )
         except grpc.RpcError:
+            self._daemon_stub = None
             if self._require_daemon:
                 raise RuntimeError("Daemon became unreachable during share submission.")
             # Daemon unreachable — buffer locally
             with self._share_buffer_lock:
                 self._share_buffer.append(share)
+
+    def _pick_least_loaded_daemon(self, daemons: list):
+        """Pick daemon with lowest reported utilization (fallback: lexical address)."""
+        best = None
+        best_score = None
+        for daemon in daemons:
+            score = 1.0
+            try:
+                stub = inference_pb2_grpc.InferenceNodeStub(
+                    grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
+                )
+                fee = stub.GetFeeEstimate(
+                    inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+                    timeout=2,
+                )
+                score = float(getattr(fee, "utilization", 1.0))
+            except Exception:
+                score = 1.0
+            tie = daemon.address or ""
+            cmp_key = (score, tie)
+            if best is None or cmp_key < best_score:
+                best = daemon
+                best_score = cmp_key
+        return best if best is not None else daemons[0]
 
     def _build_signed_share(
         self,

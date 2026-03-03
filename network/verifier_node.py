@@ -146,6 +146,7 @@ def run_verifier(registry_address: str = None, poll_interval: float = 5.0,
                 # Pull pending tickets
                 resp = stub.GetPendingTickets(registry_pb2.GetPendingTicketsRequest(
                     max_tickets=int(policy["max_tickets_per_poll"]),
+                    verifier_id=verifier_id,
                 ))
 
                 tickets = [_proto_to_ticket(t) for t in resp.tickets]
@@ -172,6 +173,7 @@ def run_verifier(registry_address: str = None, poll_interval: float = 5.0,
                                     expected_token=proof.expected_token or 0,
                                     actual_token=proof.actual_token or 0,
                                     timestamp=proof.timestamp,
+                                    verifier_id=verifier_id,
                                 ))
                                 print(f"    Fraud proof submitted to registry")
                             except grpc.RpcError as e:

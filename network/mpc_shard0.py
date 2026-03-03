@@ -856,7 +856,7 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             daemons = [n for n in resp.nodes if n.node_type == "daemon"]
             channel.close()
             if daemons:
-                daemon = daemons[0]
+                daemon = self._pick_least_loaded_daemon(daemons)
                 self._daemon_stub = inference_pb2_grpc.InferenceNodeStub(
                     grpc.insecure_channel(
                         daemon.address, options=config.GRPC_OPTIONS))
@@ -895,9 +895,32 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             print(f"[MPC-A] Submitted signed share(s) for session "
                   f"{session_id[:8]}...")
         except Exception:
+            self._daemon_stub = None
             if self._require_daemon:
                 raise RuntimeError("Daemon became unreachable during MPC share submission.")
             print(f"[MPC-A] Failed to submit shares to daemon")
+
+    def _pick_least_loaded_daemon(self, daemons: list):
+        best = None
+        best_key = None
+        for daemon in daemons:
+            util = 1.0
+            try:
+                stub = inference_pb2_grpc.InferenceNodeStub(
+                    grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
+                )
+                fee = stub.GetFeeEstimate(
+                    inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+                    timeout=2,
+                )
+                util = float(getattr(fee, "utilization", 1.0))
+            except Exception:
+                util = 1.0
+            key = (util, daemon.address or "")
+            if best is None or key < best_key:
+                best = daemon
+                best_key = key
+        return best if best is not None else daemons[0]
 
     def _build_signed_share(self, node_id: str, session_id: str, act_hash: str):
         from economics.share_chain import ComputeShare
