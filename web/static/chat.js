@@ -193,7 +193,14 @@ const Chat = {
                     // Add meta
                     const meta = document.createElement('div');
                     meta.className = 'message-meta';
-                    meta.textContent = `${msg.total_tokens} tokens | ${msg.total_time}s | ${msg.tokens_per_sec} tok/s`;
+                    const parts = [
+                        `${msg.total_tokens} tokens`,
+                        `${msg.total_time}s`,
+                        `${msg.tokens_per_sec} tok/s`,
+                    ];
+                    if (msg.cost !== undefined) parts.push(`cost ${msg.cost} UNFED`);
+                    if (msg.remaining_balance !== undefined) parts.push(`balance ${msg.remaining_balance} UNFED`);
+                    meta.textContent = parts.join(' | ');
                     this.currentAssistantEl.querySelector('.message-body').appendChild(meta);
                 }
 
@@ -205,6 +212,10 @@ const Chat = {
                 document.getElementById('statTokens').textContent = msg.total_tokens;
                 document.getElementById('statTime').textContent = msg.total_time + 's';
                 document.getElementById('statSpeed').textContent = msg.tokens_per_sec + ' tok/s';
+                const statCost = document.getElementById('statCost');
+                if (statCost) statCost.textContent = (msg.cost !== undefined) ? `${msg.cost} UNFED` : '—';
+                const statBalance = document.getElementById('statBalance');
+                if (statBalance) statBalance.textContent = (msg.remaining_balance !== undefined) ? `${msg.remaining_balance} UNFED` : '—';
 
                 App.setStatus('connected', 'Ready');
                 break;

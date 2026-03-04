@@ -200,6 +200,27 @@ async def get_nodes():
         discovery = get_discovery()
         all_nodes = discovery.discover("")
         nodes = []
+
+        def _node_function(node_type: str, has_embedding: bool, has_lm_head: bool) -> str:
+            t = (node_type or "").strip().lower()
+            if t == "mpc":
+                return "MPC shard-0 entry and share-secure compute"
+            if t == "daemon":
+                return "Collect shares, build blocks, and relay chain state"
+            if t == "verifier":
+                return "Spot-check tickets and submit fraud proofs"
+            if t == "vision":
+                return "Vision encoder and image feature extraction"
+            # Compute fallback
+            flags = []
+            if has_embedding:
+                flags.append("embedding")
+            if has_lm_head:
+                flags.append("lm_head")
+            if flags:
+                return f"Transformer shard ({', '.join(flags)})"
+            return "Transformer shard compute"
+
         for n in all_nodes:
             nodes.append({
                 "node_id": n.node_id,
@@ -213,6 +234,66 @@ async def get_nodes():
                 "node_type": n.node_type,
                 "public_key": base64.b64encode(n.public_key).decode()
                     if n.public_key else "",
+                "node_function": _node_function(
+                    n.node_type, bool(n.has_embedding), bool(n.has_lm_head)
+                ),
+            })
+
+        # Best-effort inclusion of verifier participants.
+        infra = None
+        get_infra_telemetry = getattr(discovery, "get_infra_telemetry", None)
+        if callable(get_infra_telemetry):
+            infra = get_infra_telemetry()
+        verifier_health = None
+        get_verifier_health = getattr(discovery, "get_verifier_health", None)
+        if callable(get_verifier_health):
+            verifier_health = get_verifier_health()
+
+        verifier_ids: set[str] = set()
+        if infra is not None:
+            try:
+                verifier_ids.update(json.loads(getattr(infra, "verifier_work_window_json", "{}") or "{}").keys())
+            except Exception:
+                pass
+            try:
+                verifier_ids.update(json.loads(getattr(infra, "verifier_payout_share_json", "{}") or "{}").keys())
+            except Exception:
+                pass
+            try:
+                for row in json.loads(getattr(infra, "verifier_claim_status_json", "[]") or "[]"):
+                    vid = str(row.get("verifier_id", "")).strip()
+                    if vid:
+                        verifier_ids.add(vid)
+            except Exception:
+                pass
+            try:
+                for row in json.loads(getattr(infra, "verifier_penalty_events_json", "[]") or "[]"):
+                    vid = str(row.get("verifier_id", "")).strip()
+                    if vid:
+                        verifier_ids.add(vid)
+            except Exception:
+                pass
+
+        healthy_verifier_count = int(
+            getattr(verifier_health, "healthy_verifier_count", 0) or 0
+        )
+        if not verifier_ids and healthy_verifier_count > 0:
+            # Fallback placeholder IDs when telemetry has no per-verifier keys yet.
+            verifier_ids = {f"verifier-{i+1}" for i in range(healthy_verifier_count)}
+
+        for vid in sorted(verifier_ids):
+            nodes.append({
+                "node_id": vid,
+                "address": vid if ":" in vid or vid.startswith("0x") else "registry-managed",
+                "model_id": "",
+                "shard_index": -1,
+                "layer_start": 0,
+                "layer_end": 0,
+                "has_embedding": False,
+                "has_lm_head": False,
+                "node_type": "verifier",
+                "public_key": "",
+                "node_function": _node_function("verifier", False, False),
             })
         return {"nodes": nodes}
     except Exception as e:

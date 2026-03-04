@@ -56,13 +56,16 @@ const Network = {
         }
 
         this.nodesList.innerHTML = '';
-        // Sort: guard first, then vision, then compute by shard
+        // Sort: verifier/daemon infra first, then MPC/compute/vision
         const sorted = [...nodes].sort((a, b) => {
-            const order = { guard: 0, vision: 1, compute: 2 };
-            const ta = order[a.node_type] ?? 2;
-            const tb = order[b.node_type] ?? 2;
+            const order = { verifier: 0, daemon: 1, mpc: 2, compute: 3, vision: 4, guard: 5 };
+            const ta = order[a.node_type] ?? 9;
+            const tb = order[b.node_type] ?? 9;
             if (ta !== tb) return ta - tb;
-            return a.shard_index - b.shard_index;
+            const sa = Number(a.shard_index ?? 9999);
+            const sb = Number(b.shard_index ?? 9999);
+            if (sa !== sb) return sa - sb;
+            return String(a.address || "").localeCompare(String(b.address || ""));
         });
 
         sorted.forEach(node => {
@@ -70,9 +73,10 @@ const Network = {
             card.className = `node-card type-${node.node_type}`;
 
             const typeClass = node.node_type || 'compute';
-            const layerInfo = node.node_type === 'guard'
-                ? 'Guard relay'
-                : `Layers ${node.layer_start}-${node.layer_end - 1}`;
+            const layerInfo = node.node_function
+                || (node.node_type === 'guard'
+                    ? 'Guard relay'
+                    : `Layers ${node.layer_start}-${node.layer_end - 1}`);
 
             const flags = [];
             if (node.has_embedding) flags.push('embed');
@@ -81,7 +85,11 @@ const Network = {
             card.innerHTML = `
                 <div class="node-card-header">
                     <span class="node-card-type ${typeClass}">${typeClass}</span>
-                    <span class="node-card-shard">${node.node_type !== 'guard' ? 'Shard ' + node.shard_index : ''}</span>
+                    <span class="node-card-shard">${
+                        (node.node_type === 'compute' || node.node_type === 'mpc' || node.node_type === 'vision')
+                            ? ('Shard ' + node.shard_index)
+                            : ''
+                    }</span>
                 </div>
                 <div class="node-card-addr">${node.address}</div>
                 <div class="node-card-layers">${layerInfo}${flags.length ? ' | ' + flags.join(', ') : ''}</div>

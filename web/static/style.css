@@ -713,6 +713,8 @@ html, body {
 .node-card.type-vision { border-left: 3px solid var(--purple); }
 .node-card.type-compute { border-left: 3px solid var(--accent); }
 .node-card.type-mpc { border-left: 3px solid var(--green); }
+.node-card.type-daemon { border-left: 3px solid var(--yellow); }
+.node-card.type-verifier { border-left: 3px solid #f778ba; }
 
 .node-card-header {
     display: flex;
@@ -732,6 +734,8 @@ html, body {
 .node-card-type.vision { background: var(--purple-dim); color: var(--purple); }
 .node-card-type.compute { background: var(--accent-glow); color: var(--accent); }
 .node-card-type.mpc { background: var(--green-dim); color: var(--green); }
+.node-card-type.daemon { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+.node-card-type.verifier { background: rgba(247, 120, 186, 0.15); color: #f778ba; }
 
 .node-card-shard {
     font-size: 11px;
