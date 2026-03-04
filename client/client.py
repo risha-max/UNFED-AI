@@ -83,6 +83,30 @@ def _get_qwen2vl_image_processor(model_id: str):
         return proc
 
 
+def _format_text_prompt(tokenizer, prompt: str, model_id: str) -> str:
+    """Format prompt for instruct/chat models when a chat template is available."""
+    if not prompt:
+        return prompt
+    model_l = (model_id or "").lower()
+    wants_chat = (
+        "instruct" in model_l
+        or "chat" in model_l
+        or "qwen" in model_l
+    )
+    template = getattr(tokenizer, "chat_template", None)
+    if wants_chat and template:
+        try:
+            return tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except Exception:
+            # Fall back to raw prompt if template application fails.
+            return prompt
+    return prompt
+
+
 class UnfedClient:
     """Client for the UNFED AI distributed inference pipeline."""
 
@@ -126,7 +150,8 @@ class UnfedClient:
         """Return exact tokenizer count for text-only requests."""
         mid = model_id or self.model_id
         tokenizer = _get_tokenizer(mid)
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids[0].tolist()
+        effective_prompt = _format_text_prompt(tokenizer, prompt, mid)
+        input_ids = tokenizer(effective_prompt, return_tensors="pt").input_ids[0].tolist()
         return len(input_ids)
 
     def count_qwen2_vl_input_tokens(self, prompt: str, image_path: str,
@@ -320,7 +345,8 @@ class UnfedClient:
             raise RuntimeError(preflight.message)
 
         session_id = str(uuid.uuid4())
-        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids[0].tolist()
+        effective_prompt = _format_text_prompt(self.tokenizer, prompt, self.model_id)
+        input_ids = self.tokenizer(effective_prompt, return_tensors="pt").input_ids[0].tolist()
 
         # Prefix caching: check if the new prompt shares a prefix with the previous one
         prefix_session_id, prefix_length = self._compute_prefix(input_ids)
@@ -498,7 +524,7 @@ class UnfedClient:
                     token_id = int.from_bytes(plaintext[:4], 'big', signed=True)
                     is_eos = plaintext[4:5] == b'\x01'
                     generated_tokens.append(token_id)
-                    token_text = self.tokenizer.decode([token_id])
+                    token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
 
                     if verbose:
                         print(f"  [{step_time:.3f}s] Token {step}: {token_id} "
@@ -516,7 +542,7 @@ class UnfedClient:
             if response.has_token:
                 token_id = response.token_id
                 generated_tokens.append(token_id)
-                token_text = self.tokenizer.decode([token_id])
+                token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
 
                 if verbose:
                     print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r}")
@@ -564,7 +590,8 @@ class UnfedClient:
             return
 
         session_id = str(uuid.uuid4())
-        input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids[0].tolist()
+        effective_prompt = _format_text_prompt(self.tokenizer, prompt, self.model_id)
+        input_ids = self.tokenizer(effective_prompt, return_tensors="pt").input_ids[0].tolist()
 
         # Prefix caching
         prefix_session_id, prefix_length = self._compute_prefix(input_ids)
@@ -710,7 +737,7 @@ class UnfedClient:
             if response.has_token:
                 token_id = response.token_id
                 generated_tokens.append(token_id)
-                token_text = self.tokenizer.decode([token_id])
+                token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
 
                 if verbose:
                     print(f"  [{step_time:.3f}s] Token {step}: {token_id} "
@@ -1076,7 +1103,7 @@ class UnfedClient:
             if response.has_token:
                 token_id = response.token_id
                 generated_tokens.append(token_id)
-                token_text = vl_tokenizer.decode([token_id])
+                token_text = vl_tokenizer.decode([token_id], skip_special_tokens=True)
 
                 if verbose:
                     print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r}")
@@ -1317,7 +1344,7 @@ class UnfedClient:
             if response.has_token:
                 token_id = response.token_id
                 generated_tokens.append(token_id)
-                token_text = vl_tokenizer.decode([token_id])
+                token_text = vl_tokenizer.decode([token_id], skip_special_tokens=True)
 
                 if verbose:
                     print(f"  [{step_time:.3f}s] Token {step}: "

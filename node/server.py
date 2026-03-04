@@ -238,6 +238,9 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
         # Load shard metadata from manifest
         manifest = self._load_manifest()
+        self._eos_token_id = self._resolve_eos_token_id(
+            manifest, fallback=self._eos_token_id
+        )
 
         # VL models have separate vision_shards and text_shards in manifest
         if model_type in ("qwen2_vl", "smolvlm"):
@@ -499,6 +502,21 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         """Load the model manifest."""
         with open(self._manifest_path, "r") as f:
             return json.load(f)
+
+    def _resolve_eos_token_id(self, manifest: dict, fallback: int) -> int:
+        """Resolve EOS token id from tokenizer metadata when available."""
+        model_id = str(manifest.get("model_id", "")).strip()
+        if not model_id:
+            return int(fallback)
+        try:
+            from transformers import AutoTokenizer
+
+            tok = AutoTokenizer.from_pretrained(model_id, local_files_only=True)
+            if tok.eos_token_id is not None:
+                return int(tok.eos_token_id)
+        except Exception:
+            pass
+        return int(fallback)
 
     def _get_stub(self, address: str) -> inference_pb2_grpc.InferenceNodeStub:
         """Get or create a gRPC stub for the given address (resilient channel)."""

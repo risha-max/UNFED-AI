@@ -234,11 +234,26 @@ class UnfedAttention(nn.Module):
         self.num_kv_heads = config.get("num_key_value_heads", self.num_heads)
         self.head_dim = config.get("head_dim", self.hidden_size // self.num_heads)
         self.num_kv_groups = self.num_heads // self.num_kv_heads
+        # Some model families (including Qwen variants) use attention projection
+        # biases. Keep bias parameters enabled with zero default so models without
+        # bias stay behaviorally identical while bias-aware checkpoints can load.
+        use_attn_bias = bool(config.get("attention_bias", True))
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.q_proj = nn.Linear(
+            self.hidden_size, self.num_heads * self.head_dim, bias=use_attn_bias
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size, self.num_kv_heads * self.head_dim, bias=use_attn_bias
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size, self.num_kv_heads * self.head_dim, bias=use_attn_bias
+        )
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.hidden_size, bias=use_attn_bias
+        )
+        for proj in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
+            if proj.bias is not None:
+                nn.init.zeros_(proj.bias)
 
     def forward(
         self,
@@ -335,12 +350,22 @@ class UnfedMLP(nn.Module):
         self.hidden_size = config["hidden_size"]
         self.intermediate_size = config["intermediate_size"]
         self.act_fn = get_activation(config.get("hidden_act", "silu"))
+        use_mlp_bias = bool(config.get("mlp_bias", False))
 
         # Gated MLP: gate_proj + up_proj → down_proj
         # Non-gated: just up_proj → down_proj (gate_proj unused)
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias=use_mlp_bias
+        )
+        self.up_proj = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias=use_mlp_bias
+        )
+        self.down_proj = nn.Linear(
+            self.intermediate_size, self.hidden_size, bias=use_mlp_bias
+        )
+        for proj in (self.gate_proj, self.up_proj, self.down_proj):
+            if proj.bias is not None:
+                nn.init.zeros_(proj.bias)
 
         # Whether to use gated activation (SwiGLU pattern)
         # Most modern LLMs use gated — detect from activation name
@@ -459,7 +484,8 @@ class UnfedLMHead(nn.Module):
 
     def __init__(self, hidden_size: int, vocab_size: int):
         super().__init__()
-        self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+        self.lm_head = nn.Linear(hidden_size, vocab_size, bias=True)
+        nn.init.zeros_(self.lm_head.bias)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """

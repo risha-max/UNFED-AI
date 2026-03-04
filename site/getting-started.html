@@ -60,7 +60,7 @@
         <div class="card">
           <div class="card-icon">&#129302;</div>
           <h3>A Model</h3>
-          <p>Any HuggingFace transformer model. We recommend <code>HuggingFaceTB/SmolVLM-256M-Instruct</code> for testing.</p>
+          <p>HuggingFace-compatible models with supported UNFED runtime architecture. We recommend <code>./models/Qwen2.5-Coder-0.5B-Instruct</code> for text and <code>HuggingFaceTB/SmolVLM-256M-Instruct</code> for multimodal testing.</p>
         </div>
       </div>
 
@@ -114,6 +114,24 @@ pip install web3  # for on-chain staking (optional)</code></pre>
           </div>
         </div>
       </div>
+
+      <div class="info-box" style="margin-top: 20px;">
+        <p>
+          <strong>Model compatibility:</strong> UNFED currently targets decoder-style
+          text models that map to the generic runtime blocks (Qwen/Llama/Mistral-style)
+          and vision-language models via the supported split paths (for example SmolVLM).
+          New models should pass <code>tools inspect</code> + <code>tools verify</code>
+          and a short prompt sanity test before production rollout.
+        </p>
+      </div>
+
+      <div class="info-box">
+        <p>
+          <strong>Practical status:</strong> the local testnet flow in this repo is
+          validated with <code>./models/Qwen2.5-Coder-0.5B-Instruct</code> (text) and
+          <code>HuggingFaceTB/SmolVLM-256M-Instruct</code> (vision-language).
+        </p>
+      </div>
     </div>
   </section>
 
@@ -127,19 +145,28 @@ pip install web3  # for on-chain staking (optional)</code></pre>
 
       <span class="code-label">Create a cluster config</span>
       <pre><code>{
-  "cluster_name": "my-local-cluster",
-  "operator_address": "0xOperatorAddress",
-  "default_min_stake": 100,
-  "default_slash_fraction": 0.5,
-  "default_price_per_input_token": 0.0001,
-  "default_price_per_output_token": 0.001,
-  "default_reward_scheme": "proportional"
+  "name": "My UNFED Pool",
+  "chain_rpc_url": "http://localhost:8545",
+  "escrow_contract_address": "0x&lt;from deployed.env&gt;",
+  "staking_token_address": "0x&lt;from deployed.env&gt;",
+  "operator_private_key": "0x&lt;operator private key&gt;",
+  "daemon_required_count": 1,
+  "verifier_required_count": 3
 }</code></pre>
 
       <span class="code-label">Start the registry</span>
       <pre><code>python -m network.registry_server \
   --port 50050 \
   --cluster-config cluster_config.json</code></pre>
+
+      <div class="info-box">
+        <p>
+          <strong>Policy scope:</strong> <code>cluster_config.json</code> is loaded by
+          the registry process at startup. Quorum knobs like
+          <code>daemon_required_count</code> and
+          <code>verifier_required_count</code> are registry-local policy.
+        </p>
+      </div>
 
       <div class="info-box">
         <p>

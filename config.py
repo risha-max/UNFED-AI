@@ -89,7 +89,9 @@ COMPRESS_ACTIVATIONS = True   # application-level gzip for activation tensors
 COMPRESS_THRESHOLD = int(os.environ.get("UNFED_COMPRESS_THRESHOLD", "16384"))
 
 # --- Wire format ---
-WIRE_DTYPE = os.environ.get("UNFED_WIRE_DTYPE", "float16")
+# Use float32 by default to preserve generation quality across shard hops.
+# Operators can still force float16 via UNFED_WIRE_DTYPE for bandwidth savings.
+WIRE_DTYPE = os.environ.get("UNFED_WIRE_DTYPE", "float32")
 
 # --- Pipelined prefill ---
 PREFILL_PIPELINE_MIN_TOKENS = int(os.environ.get("UNFED_PREFILL_MIN", "64"))
