@@ -5,5 +5,22 @@
   "registry": "registry.unfed.ai:50050",
   "shard_index": 0,
   "shards_dir": "./shards",
-  "device": "auto"
+  "device": "auto",
+  "require_daemon": true,
+  "wire_dtype": "float32",
+  "compress_activations": true,
+  "compress_threshold": 16384,
+  "he_compute_mode": "off",
+  "he_compute_top_k": 64,
+  "he_compute_temperature": 1.0,
+  "he_compute_top_p": 1.0,
+  "he_full_vocab_sidecar_url": "",
+  "he_full_vocab_sidecar_timeout_ms": 2000,
+  "he_full_vocab_sidecar_required": false,
+  "he_sidecar_allowed_formats": ["paillier_v1"],
+  "he_sidecar_max_payload_bytes": 2097152,
+  "he_dispute_sampling_rate": 0.05,
+  "he_dispute_report_rate_limit_per_window": 64,
+  "he_dispute_window_seconds": 60,
+  "he_dispute_rollout_stage": "shadow"
 }

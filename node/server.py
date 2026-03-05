@@ -57,7 +57,6 @@ from network.he_compute import (
     HE_COMPUTE_MODE_SERVER_SAMPLE,
     build_encrypted_hidden_state_artifact,
     build_encrypted_topk_artifact,
-    get_he_compute_mode,
 )
 from network.he_full_vocab_sidecar import (
     SidecarUnavailableError,
@@ -167,8 +166,8 @@ def tensor_to_bytes(tensor: torch.Tensor,
     raw = t.numpy().tobytes()
     shape = list(t.shape)
 
-    should_compress = compress if compress is not None else config.COMPRESS_ACTIVATIONS
-    threshold = config.COMPRESS_THRESHOLD
+    should_compress = compress if compress is not None else True
+    threshold = threshold if threshold is not None else 16384
 
     if should_compress and len(raw) > threshold:
         compressed = _gzip.compress(raw, compresslevel=1)
@@ -336,8 +335,52 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._share_buffer: list[ComputeShare] = []
         self._share_buffer_lock = threading.Lock()
         self._require_daemon = (
-            os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
-            not in ("0", "false", "no", "off")
+            node_config.require_daemon if node_config else True
+        )
+        self._wire_dtype_default = (
+            node_config.wire_dtype if node_config else "float32"
+        )
+        self._compress_activations = (
+            node_config.compress_activations if node_config else True
+        )
+        self._compress_threshold = (
+            node_config.compress_threshold if node_config else 16384
+        )
+        self._he_compute_mode_default = (
+            node_config.he_compute_mode if node_config else HE_COMPUTE_MODE_OFF
+        )
+        self._he_compute_top_k = (
+            node_config.he_compute_top_k if node_config else 64
+        )
+        self._he_compute_temperature = (
+            node_config.he_compute_temperature if node_config else 1.0
+        )
+        self._he_compute_top_p = (
+            node_config.he_compute_top_p if node_config else 1.0
+        )
+        self._he_full_vocab_sidecar_url = (
+            node_config.he_full_vocab_sidecar_url if node_config else ""
+        )
+        self._he_full_vocab_sidecar_timeout_ms = (
+            node_config.he_full_vocab_sidecar_timeout_ms if node_config else 2000
+        )
+        self._he_full_vocab_sidecar_required = (
+            node_config.he_full_vocab_sidecar_required if node_config else False
+        )
+        self._he_sidecar_allowed_formats = set(
+            node_config.he_sidecar_allowed_formats if node_config else ["paillier_v1"]
+        )
+        self._he_sidecar_max_payload_bytes = (
+            node_config.he_sidecar_max_payload_bytes if node_config else 2 * 1024 * 1024
+        )
+        self._he_dispute_sampling_rate = (
+            node_config.he_dispute_sampling_rate if node_config else 0.05
+        )
+        self._he_dispute_report_rate_limit_per_window = (
+            node_config.he_dispute_report_rate_limit_per_window if node_config else 64
+        )
+        self._he_dispute_window_seconds = (
+            node_config.he_dispute_window_seconds if node_config else 60
         )
         self._session_nonce_by_session: dict[str, str] = {}
         self._session_step_by_session: dict[str, int] = {}
@@ -574,14 +617,14 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         if not registry_addr:
             return
         now = time.time()
-        window = int(now) // max(1, config.HE_DISPUTE_WINDOW_SECONDS)
+        window = int(now) // max(1, self._he_dispute_window_seconds)
         with self._he_report_lock:
             key = (self.registration.node_id, window)
             self._he_report_counts_by_window[key] = (
                 self._he_report_counts_by_window.get(key, 0) + 1
             )
             count = self._he_report_counts_by_window[key]
-        if count > int(max(1, config.HE_DISPUTE_REPORT_RATE_LIMIT_PER_WINDOW)):
+        if count > int(max(1, self._he_dispute_report_rate_limit_per_window)):
             return
 
         report_id = f"he-rpt-{uuid.uuid4().hex[:16]}"
@@ -677,7 +720,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         emitted_token = False
         sampled_token = None
         requested_he_mode = (request.he_compute_mode or "").strip()
-        he_compute_mode = requested_he_mode or get_he_compute_mode()
+        he_compute_mode = requested_he_mode or self._he_compute_mode_default
         if he_compute_mode not in (
             HE_COMPUTE_MODE_OFF,
             HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
@@ -711,7 +754,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             hidden = None
             input_for_ticket = None
             input_is_tokens = False
-            wire_dtype = request.wire_dtype or config.WIRE_DTYPE
+            wire_dtype = request.wire_dtype or self._wire_dtype_default
             prefix_session_id = request.prefix_session_id or ""
             prefix_length = request.prefix_length or 0
             if not he_server_sidecar_passthrough:
@@ -873,7 +916,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     try:
                         logits = self.runner.lm_head(hidden)
                         last_logits = logits[0, -1].detach().cpu()
-                        top_k = int(request.he_top_k or config.HE_COMPUTE_TOP_K or 64)
+                        top_k = int(request.he_top_k or self._he_compute_top_k or 64)
                         top_k = max(1, min(top_k, int(last_logits.shape[-1])))
                         artifact = build_encrypted_topk_artifact(
                             logits_last_token=last_logits,
@@ -904,23 +947,23 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                             bytes(request.he_compute_payload)
                         ).hexdigest()
                         sidecar_result = request_full_vocab_he_artifact(
-                            sidecar_url=config.HE_FULL_VOCAB_SIDECAR_URL,
-                            timeout_ms=config.HE_FULL_VOCAB_SIDECAR_TIMEOUT_MS,
+                            sidecar_url=self._he_full_vocab_sidecar_url,
+                            timeout_ms=self._he_full_vocab_sidecar_timeout_ms,
                             session_id=session_id,
                             step=int(request.he_step),
                             key_id=request.he_key_id or "",
                             compute_format=request.he_compute_format or "",
                             compute_payload=bytes(request.he_compute_payload),
-                            top_k=int(request.he_top_k or config.HE_COMPUTE_TOP_K or 64),
+                            top_k=int(request.he_top_k or self._he_compute_top_k or 64),
                             temperature=float(
                                 request.he_temperature
                                 if request.he_temperature > 0
-                                else config.HE_COMPUTE_TEMPERATURE
+                                else self._he_compute_temperature
                             ),
                             top_p=float(
                                 request.he_top_p
                                 if request.he_top_p > 0
-                                else config.HE_COMPUTE_TOP_P
+                                else self._he_compute_top_p
                             ),
                         )
                         if sidecar_result.get("he_error"):
@@ -944,7 +987,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         )
                         sidecar_format = str(sidecar_result.get("he_compute_format", "") or "")
                         sidecar_top_k = int(sidecar_result.get("he_top_k", 0))
-                        format_allowlist = set(config.HE_SIDECAR_ALLOWED_FORMATS)
+                        format_allowlist = set(self._he_sidecar_allowed_formats)
                         violation = ""
                         if not sidecar_payload:
                             violation = "response_missing_payload"
@@ -952,9 +995,9 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                             violation = "response_format_not_allowed"
                         elif sidecar_session_id != session_id or sidecar_step != int(request.he_step) or sidecar_key_id != (request.he_key_id or ""):
                             violation = "response_binding_mismatch"
-                        elif sidecar_top_k <= 0 or sidecar_top_k > max(1, int(request.he_top_k or config.HE_COMPUTE_TOP_K or 64)):
+                        elif sidecar_top_k <= 0 or sidecar_top_k > max(1, int(request.he_top_k or self._he_compute_top_k or 64)):
                             violation = "response_schema_invalid"
-                        elif len(sidecar_payload) > int(max(1, config.HE_SIDECAR_MAX_PAYLOAD_BYTES)):
+                        elif len(sidecar_payload) > int(max(1, self._he_sidecar_max_payload_bytes)):
                             violation = "response_schema_invalid"
                         if violation:
                             self._report_he_suspicion(
@@ -970,7 +1013,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                                 evidence={
                                     "len_payload": len(sidecar_payload),
                                     "reported_top_k": sidecar_top_k,
-                                    "expected_top_k": int(request.he_top_k or config.HE_COMPUTE_TOP_K or 64),
+                                    "expected_top_k": int(request.he_top_k or self._he_compute_top_k or 64),
                                     "expected_format_allowlist": sorted(format_allowlist),
                                     "reported_session_id": sidecar_session_id,
                                     "reported_step": sidecar_step,
@@ -981,7 +1024,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                                 has_token=False,
                                 he_error=f"HE sidecar integrity check failed: {violation}",
                             )
-                        if deterministic_sample(session_id, int(request.he_step), config.HE_DISPUTE_SAMPLING_RATE):
+                        if deterministic_sample(session_id, int(request.he_step), self._he_dispute_sampling_rate):
                             self._report_he_suspicion(
                                 session_id=session_id,
                                 step=int(request.he_step),
@@ -993,7 +1036,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                                 sidecar_node_id=sidecar_node_id,
                                 sidecar_stake_identity=sidecar_stake_identity,
                                 evidence={
-                                    "sampling_rate": config.HE_DISPUTE_SAMPLING_RATE,
+                                    "sampling_rate": self._he_dispute_sampling_rate,
                                     "sampled": True,
                                 },
                             )
@@ -1007,7 +1050,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                             he_key_id=request.he_key_id or "",
                         )
                     except SidecarUnavailableError as e:
-                        if config.HE_FULL_VOCAB_SIDECAR_REQUIRED or he_server_sidecar_passthrough:
+                        if self._he_full_vocab_sidecar_required or he_server_sidecar_passthrough:
                             return inference_pb2.ForwardResponse(
                                 has_token=False,
                                 he_error=str(e),
@@ -1021,7 +1064,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         try:
                             logits = self.runner.lm_head(hidden)
                             last_logits = logits[0, -1].detach().cpu()
-                            top_k = int(request.he_top_k or config.HE_COMPUTE_TOP_K or 64)
+                            top_k = int(request.he_top_k or self._he_compute_top_k or 64)
                             top_k = max(1, min(top_k, int(last_logits.shape[-1])))
                             artifact = build_encrypted_topk_artifact(
                                 logits_last_token=last_logits,
@@ -1109,7 +1152,11 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 # Intermediate node, direct mode (used by per-shard racing):
                 # Return activation tensor to the caller instead of forwarding.
                 activation_bytes, shape, is_compressed = tensor_to_bytes(
-                    hidden.cpu(), wire_dtype=wire_dtype)
+                    hidden.cpu(),
+                    compress=self._compress_activations,
+                    wire_dtype=wire_dtype,
+                    threshold=self._compress_threshold,
+                )
 
                 resp = inference_pb2.ForwardResponse(
                     activation_data=activation_bytes,
@@ -1129,7 +1176,11 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             else:
                 # Forward to next node
                 activation_bytes, shape, is_compressed = tensor_to_bytes(
-                    hidden.cpu(), wire_dtype=wire_dtype)
+                    hidden.cpu(),
+                    compress=self._compress_activations,
+                    wire_dtype=wire_dtype,
+                    threshold=self._compress_threshold,
+                )
 
                 next_request = inference_pb2.ForwardRequest(
                     session_id=session_id,

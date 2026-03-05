@@ -77,6 +77,21 @@ def _build_light_servicer() -> InferenceNodeServicer:
     servicer._eos_token_id = 151643
     servicer._he_report_lock = threading.Lock()
     servicer._he_report_counts_by_window = {}
+    servicer._wire_dtype_default = "float32"
+    servicer._compress_activations = True
+    servicer._compress_threshold = 16384
+    servicer._he_compute_mode_default = "off"
+    servicer._he_compute_top_k = 64
+    servicer._he_compute_temperature = 1.0
+    servicer._he_compute_top_p = 1.0
+    servicer._he_full_vocab_sidecar_url = ""
+    servicer._he_full_vocab_sidecar_timeout_ms = 2000
+    servicer._he_full_vocab_sidecar_required = False
+    servicer._he_sidecar_allowed_formats = {"paillier_v1"}
+    servicer._he_sidecar_max_payload_bytes = 2 * 1024 * 1024
+    servicer._he_dispute_sampling_rate = 0.05
+    servicer._he_dispute_report_rate_limit_per_window = 64
+    servicer._he_dispute_window_seconds = 60
     servicer._report_he_suspicion = lambda **kwargs: None
     return servicer
 

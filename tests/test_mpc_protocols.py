@@ -17,6 +17,8 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from network.mpc_beaver import BeaverTriple, BeaverTripleShares
 from network.mpc_protocols import (
+    MpcDncConfig,
+    configure_mpc_dnc,
     secure_multiply,
     secure_square,
     secure_matmul,
@@ -68,6 +70,13 @@ def _split_shares(x: torch.Tensor):
     return x0, x1
 
 
+@pytest.fixture(autouse=True)
+def _reset_mpc_dnc_config():
+    configure_mpc_dnc(MpcDncConfig(mode="off"))
+    yield
+    configure_mpc_dnc(MpcDncConfig(mode="off"))
+
+
 class TestSecureMultiply:
     """Element-wise multiplication."""
 
@@ -103,6 +112,64 @@ class TestSecureMultiply:
         result = z0 + z1
         expected = x * y
         assert torch.allclose(result, expected, atol=1e-3)
+
+    def test_partitioned_matches_baseline(self):
+        x = torch.randn(2, 64)
+        y = torch.randn(2, 64)
+        x0, x1 = _split_shares(x)
+        y0, y1 = _split_shares(y)
+        triple = BeaverTriple.generate((2, 64))
+        exchanger = LocalPeerExchanger()
+
+        configure_mpc_dnc(MpcDncConfig(mode="off"))
+        b0, b1 = _run_two_party(
+            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "mul-base", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "mul-base", False),
+        )
+        baseline = b0 + b1
+
+        configure_mpc_dnc(MpcDncConfig(
+            mode="manual",
+            depth=2,
+            split_dim=-1,
+            parallel_workers=1,
+        ))
+        p0, p1 = _run_two_party(
+            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "mul-part", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "mul-part", False),
+        )
+        partitioned = p0 + p1
+        assert torch.allclose(baseline, partitioned, atol=1e-5), \
+            f"Max gap: {(baseline - partitioned).abs().max()}"
+
+    def test_auto_mode_matches_baseline(self):
+        x = torch.randn(2, 512)
+        y = torch.randn(2, 512)
+        x0, x1 = _split_shares(x)
+        y0, y1 = _split_shares(y)
+        triple = BeaverTriple.generate((2, 512))
+        exchanger = LocalPeerExchanger()
+
+        configure_mpc_dnc(MpcDncConfig(mode="off"))
+        b0, b1 = _run_two_party(
+            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "mul-auto-base", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "mul-auto-base", False),
+        )
+        baseline = b0 + b1
+
+        configure_mpc_dnc(MpcDncConfig(
+            mode="auto",
+            auto_min_elems=1,
+            auto_chunk_min_elems=1,
+            auto_max_depth=2,
+        ))
+        p0, p1 = _run_two_party(
+            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "mul-auto", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "mul-auto", False),
+        )
+        auto_res = p0 + p1
+        assert torch.allclose(baseline, auto_res, atol=1e-5), \
+            f"Max gap: {(baseline - auto_res).abs().max()}"
 
 
 class TestSecureSquare:
@@ -158,6 +225,64 @@ class TestSecureMatmul:
         result = z0 + z1
         expected = torch.matmul(a, b)
         assert torch.allclose(result, expected, atol=1e-3)
+
+    def test_matmul_partitioned_matches_baseline(self):
+        a = torch.randn(1, 4, 8, 16)
+        b = torch.randn(1, 4, 8, 16)
+        a0, a1 = _split_shares(a)
+        b0, b1 = _split_shares(b)
+        triple = BeaverTriple.generate_matmul(a.shape, b.shape, transpose_b=True)
+        exchanger = LocalPeerExchanger()
+
+        configure_mpc_dnc(MpcDncConfig(mode="off"))
+        base0, base1 = _run_two_party(
+            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm-base", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm-base", False, True),
+        )
+        base = base0 + base1
+
+        configure_mpc_dnc(MpcDncConfig(
+            mode="manual",
+            depth=2,
+            matmul_split_dim=-3,
+            parallel_workers=1,
+        ))
+        part0, part1 = _run_two_party(
+            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm-part", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm-part", False, True),
+        )
+        part = part0 + part1
+        assert torch.allclose(base, part, atol=1e-5), \
+            f"Max gap: {(base - part).abs().max()}"
+
+    def test_matmul_auto_mode_matches_baseline(self):
+        a = torch.randn(1, 8, 8, 16)
+        b = torch.randn(1, 8, 8, 16)
+        a0, a1 = _split_shares(a)
+        b0, b1 = _split_shares(b)
+        triple = BeaverTriple.generate_matmul(a.shape, b.shape, transpose_b=True)
+        exchanger = LocalPeerExchanger()
+
+        configure_mpc_dnc(MpcDncConfig(mode="off"))
+        base0, base1 = _run_two_party(
+            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm-auto-base", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm-auto-base", False, True),
+        )
+        base = base0 + base1
+
+        configure_mpc_dnc(MpcDncConfig(
+            mode="auto",
+            auto_min_elems=1,
+            auto_chunk_min_elems=1,
+            auto_max_depth=2,
+        ))
+        auto0, auto1 = _run_two_party(
+            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm-auto", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm-auto", False, True),
+        )
+        auto_res = auto0 + auto1
+        assert torch.allclose(base, auto_res, atol=1e-5), \
+            f"Max gap: {(base - auto_res).abs().max()}"
 
 
 class TestSecureRMSNorm:

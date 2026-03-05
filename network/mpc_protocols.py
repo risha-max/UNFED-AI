@@ -21,14 +21,136 @@ Supported operations:
 from __future__ import annotations
 
 import math
+import os
 import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 import torch
 
 from network.mpc_beaver import BeaverTriple, BeaverTripleShares
+
+
+@dataclass
+class MpcDncConfig:
+    mode: str = "off"  # off|manual|auto
+    depth: int = 0
+    split_dim: int = -1
+    matmul_split_dim: int = -3
+    parallel_workers: int = 1
+    auto_min_elems: int = 65_536
+    auto_chunk_min_elems: int = 16_384
+    auto_max_depth: int = 3
+    auto_max_workers: int = 4
+
+
+_MPC_DNC_CONFIG = MpcDncConfig()
+_MPC_DNC_LOCK = threading.Lock()
+
+
+def configure_mpc_dnc(config: MpcDncConfig) -> None:
+    """Set process-local DNC policy (used by both MPC parties in this process)."""
+    mode = (config.mode or "off").strip().lower()
+    if mode not in ("off", "manual", "auto"):
+        mode = "off"
+    with _MPC_DNC_LOCK:
+        _MPC_DNC_CONFIG.mode = mode
+        _MPC_DNC_CONFIG.depth = max(0, int(config.depth))
+        _MPC_DNC_CONFIG.split_dim = int(config.split_dim)
+        _MPC_DNC_CONFIG.matmul_split_dim = int(config.matmul_split_dim)
+        _MPC_DNC_CONFIG.parallel_workers = max(1, int(config.parallel_workers))
+        _MPC_DNC_CONFIG.auto_min_elems = max(1, int(config.auto_min_elems))
+        _MPC_DNC_CONFIG.auto_chunk_min_elems = max(1, int(config.auto_chunk_min_elems))
+        _MPC_DNC_CONFIG.auto_max_depth = max(0, int(config.auto_max_depth))
+        _MPC_DNC_CONFIG.auto_max_workers = max(1, int(config.auto_max_workers))
+
+
+def get_mpc_dnc_config() -> MpcDncConfig:
+    with _MPC_DNC_LOCK:
+        return MpcDncConfig(
+            mode=_MPC_DNC_CONFIG.mode,
+            depth=_MPC_DNC_CONFIG.depth,
+            split_dim=_MPC_DNC_CONFIG.split_dim,
+            matmul_split_dim=_MPC_DNC_CONFIG.matmul_split_dim,
+            parallel_workers=_MPC_DNC_CONFIG.parallel_workers,
+            auto_min_elems=_MPC_DNC_CONFIG.auto_min_elems,
+            auto_chunk_min_elems=_MPC_DNC_CONFIG.auto_chunk_min_elems,
+            auto_max_depth=_MPC_DNC_CONFIG.auto_max_depth,
+            auto_max_workers=_MPC_DNC_CONFIG.auto_max_workers,
+        )
+
+
+def _resolve_split_dim(rank: int, split_dim: int) -> int:
+    d = split_dim if split_dim >= 0 else rank + split_dim
+    if d < 0 or d >= rank:
+        raise ValueError(f"Invalid split_dim={split_dim} for rank={rank}")
+    return d
+
+
+def _dnc_mode() -> str:
+    return get_mpc_dnc_config().mode
+
+
+def _auto_depth(axis_size: int, numel: int) -> int:
+    """Deterministic shape-based depth (must match across MPC parties)."""
+    cfg = get_mpc_dnc_config()
+    min_elems = max(1, int(cfg.auto_min_elems))
+    chunk_min_elems = max(1, int(cfg.auto_chunk_min_elems))
+    max_depth = max(0, int(cfg.auto_max_depth))
+    if axis_size < 2 or numel < min_elems:
+        return 0
+    depth = min(max_depth, int(math.log2(axis_size)))
+    while depth > 0 and (numel // (2 ** depth)) < chunk_min_elems:
+        depth -= 1
+    return depth
+
+
+def _auto_workers(depth: int) -> int:
+    if depth <= 0:
+        return 1
+    cfg = get_mpc_dnc_config()
+    max_workers = max(1, int(cfg.auto_max_workers))
+    cpu = max(1, os.cpu_count() or 1)
+    return max(1, min(max_workers, cpu, 2 ** depth))
+
+
+def _select_dnc_plan(
+    *,
+    x_share: torch.Tensor,
+    is_matmul: bool,
+) -> tuple[bool, int, int, int]:
+    """
+    Return (enabled, depth, split_dim, workers).
+
+    Important:
+    - depth/split_dim must be deterministic across parties.
+    - workers may vary per machine (local scheduling only).
+    """
+    mode = _dnc_mode()
+    if mode == "off":
+        return False, 0, -1, 1
+
+    if mode == "manual":
+        cfg = get_mpc_dnc_config()
+        depth = max(0, int(cfg.depth))
+        split_dim_cfg = int(cfg.matmul_split_dim if is_matmul else cfg.split_dim)
+        split_dim = _resolve_split_dim(x_share.dim(), split_dim_cfg)
+        workers = max(1, int(cfg.parallel_workers))
+        enabled = depth > 0 and x_share.shape[split_dim] >= 2
+        return enabled, depth, split_dim, workers
+
+    # mode == "auto"
+    if is_matmul and x_share.dim() >= 3 and x_share.shape[-3] >= 2:
+        split_dim = _resolve_split_dim(x_share.dim(), -3)
+    else:
+        split_dim = _resolve_split_dim(x_share.dim(), -1)
+    depth = _auto_depth(x_share.shape[split_dim], x_share.numel())
+    workers = _auto_workers(depth)
+    enabled = depth > 0 and x_share.shape[split_dim] >= 2
+    return enabled, depth, split_dim, workers
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +234,41 @@ def secure_multiply(x_share: torch.Tensor,
          Party 1 computes: z_1 = c_1 + eps*b_1 + del*a_1
       4. z_0 + z_1 = x*y
     """
+    use_dnc, depth, split_dim, workers = _select_dnc_plan(
+        x_share=x_share,
+        is_matmul=False,
+    )
+    if use_dnc:
+        return _secure_multiply_partitioned(
+            x_share=x_share,
+            y_share=y_share,
+            triple=triple,
+            exchanger=exchanger,
+            session_id=session_id,
+            op_id=op_id,
+            is_party_0=is_party_0,
+            depth=depth,
+            split_dim=split_dim,
+            workers=workers,
+        )
+    return _secure_multiply_core(
+        x_share=x_share,
+        y_share=y_share,
+        triple=triple,
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=op_id,
+        is_party_0=is_party_0,
+    )
+
+
+def _secure_multiply_core(x_share: torch.Tensor,
+                          y_share: torch.Tensor,
+                          triple: BeaverTripleShares,
+                          exchanger: PeerExchanger,
+                          session_id: str,
+                          op_id: str,
+                          is_party_0: bool) -> torch.Tensor:
     my_epsilon = x_share - triple.a
     my_delta = y_share - triple.b
 
@@ -126,6 +283,60 @@ def secure_multiply(x_share: torch.Tensor,
         z = z + epsilon * delta
 
     return z
+
+
+def _build_multiply_leaves(
+    x_share: torch.Tensor,
+    y_share: torch.Tensor,
+    triple: BeaverTripleShares,
+    depth: int,
+    split_dim: int,
+    op_prefix: str,
+) -> list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares]]:
+    leaves: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares]] = []
+    work: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, int]] = [
+        (op_prefix, x_share, y_share, triple, depth)
+    ]
+    while work:
+        prefix, x_chunk, y_chunk, t_chunk, rem = work.pop(0)
+        if rem <= 0 or x_chunk.shape[split_dim] < 2:
+            leaves.append((prefix, x_chunk, y_chunk, t_chunk))
+            continue
+        x_l, x_r = torch.tensor_split(x_chunk, 2, dim=split_dim)
+        y_l, y_r = torch.tensor_split(y_chunk, 2, dim=split_dim)
+        a_l, a_r = torch.tensor_split(t_chunk.a, 2, dim=split_dim)
+        b_l, b_r = torch.tensor_split(t_chunk.b, 2, dim=split_dim)
+        c_l, c_r = torch.tensor_split(t_chunk.c, 2, dim=split_dim)
+        work.append((f"{prefix}.L", x_l, y_l, BeaverTripleShares(a_l, b_l, c_l), rem - 1))
+        work.append((f"{prefix}.R", x_r, y_r, BeaverTripleShares(a_r, b_r, c_r), rem - 1))
+    return leaves
+
+
+def _secure_multiply_partitioned(x_share: torch.Tensor,
+                                 y_share: torch.Tensor,
+                                 triple: BeaverTripleShares,
+                                 exchanger: PeerExchanger,
+                                 session_id: str,
+                                 op_id: str,
+                                 is_party_0: bool,
+                                 depth: int,
+                                 split_dim: int,
+                                 workers: int) -> torch.Tensor:
+    leaves = _build_multiply_leaves(x_share, y_share, triple, depth, split_dim, op_id)
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            parts = list(executor.map(
+                lambda leaf: _secure_multiply_core(
+                    leaf[1], leaf[2], leaf[3], exchanger, session_id, leaf[0], is_party_0
+                ),
+                leaves,
+            ))
+    else:
+        parts = [
+            _secure_multiply_core(x_l, y_l, t_l, exchanger, session_id, leaf_op, is_party_0)
+            for leaf_op, x_l, y_l, t_l in leaves
+        ]
+    return torch.cat(parts, dim=split_dim)
 
 
 def secure_square(x_share: torch.Tensor,
@@ -164,6 +375,57 @@ def secure_matmul(x_share: torch.Tensor,
       3. Party 0: c_0 + eps @ b_0^T + a_0 @ delta^T + eps @ delta^T
          Party 1: c_1 + eps @ b_1^T + a_1 @ delta^T
     """
+    use_dnc, depth, split_dim, workers = _select_dnc_plan(
+        x_share=x_share,
+        is_matmul=True,
+    )
+    can_partition = (
+        use_dnc
+        and depth > 0
+        and x_share.shape[split_dim] >= 2
+        and y_share.dim() == x_share.dim()
+        and triple.a.dim() == x_share.dim()
+        and triple.b.dim() == x_share.dim()
+        and triple.c.dim() == x_share.dim()
+        and y_share.shape[split_dim] == x_share.shape[split_dim]
+        and triple.a.shape[split_dim] == x_share.shape[split_dim]
+        and triple.b.shape[split_dim] == x_share.shape[split_dim]
+        and triple.c.shape[split_dim] == x_share.shape[split_dim]
+    )
+    if can_partition:
+        return _secure_matmul_partitioned(
+            x_share=x_share,
+            y_share=y_share,
+            triple=triple,
+            exchanger=exchanger,
+            session_id=session_id,
+            op_id=op_id,
+            is_party_0=is_party_0,
+            transpose_b=transpose_b,
+            depth=depth,
+            split_dim=split_dim,
+            workers=workers,
+        )
+    return _secure_matmul_core(
+        x_share=x_share,
+        y_share=y_share,
+        triple=triple,
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=op_id,
+        is_party_0=is_party_0,
+        transpose_b=transpose_b,
+    )
+
+
+def _secure_matmul_core(x_share: torch.Tensor,
+                        y_share: torch.Tensor,
+                        triple: BeaverTripleShares,
+                        exchanger: PeerExchanger,
+                        session_id: str,
+                        op_id: str,
+                        is_party_0: bool,
+                        transpose_b: bool) -> torch.Tensor:
     my_epsilon = x_share - triple.a
     my_delta = y_share - triple.b
 
@@ -187,6 +449,64 @@ def secure_matmul(x_share: torch.Tensor,
             z = z + torch.matmul(epsilon, delta)
 
     return z
+
+
+def _build_matmul_leaves(
+    x_share: torch.Tensor,
+    y_share: torch.Tensor,
+    triple: BeaverTripleShares,
+    depth: int,
+    split_dim: int,
+    op_prefix: str,
+) -> list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares]]:
+    leaves: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares]] = []
+    work: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, int]] = [
+        (op_prefix, x_share, y_share, triple, depth)
+    ]
+    while work:
+        prefix, x_chunk, y_chunk, t_chunk, rem = work.pop(0)
+        if rem <= 0 or x_chunk.shape[split_dim] < 2:
+            leaves.append((prefix, x_chunk, y_chunk, t_chunk))
+            continue
+        x_l, x_r = torch.tensor_split(x_chunk, 2, dim=split_dim)
+        y_l, y_r = torch.tensor_split(y_chunk, 2, dim=split_dim)
+        a_l, a_r = torch.tensor_split(t_chunk.a, 2, dim=split_dim)
+        b_l, b_r = torch.tensor_split(t_chunk.b, 2, dim=split_dim)
+        c_l, c_r = torch.tensor_split(t_chunk.c, 2, dim=split_dim)
+        work.append((f"{prefix}.L", x_l, y_l, BeaverTripleShares(a_l, b_l, c_l), rem - 1))
+        work.append((f"{prefix}.R", x_r, y_r, BeaverTripleShares(a_r, b_r, c_r), rem - 1))
+    return leaves
+
+
+def _secure_matmul_partitioned(x_share: torch.Tensor,
+                               y_share: torch.Tensor,
+                               triple: BeaverTripleShares,
+                               exchanger: PeerExchanger,
+                               session_id: str,
+                               op_id: str,
+                               is_party_0: bool,
+                               transpose_b: bool,
+                               depth: int,
+                               split_dim: int,
+                               workers: int) -> torch.Tensor:
+    leaves = _build_matmul_leaves(x_share, y_share, triple, depth, split_dim, op_id)
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            parts = list(executor.map(
+                lambda leaf: _secure_matmul_core(
+                    leaf[1], leaf[2], leaf[3], exchanger, session_id,
+                    leaf[0], is_party_0, transpose_b
+                ),
+                leaves,
+            ))
+    else:
+        parts = [
+            _secure_matmul_core(
+                x_l, y_l, t_l, exchanger, session_id, leaf_op, is_party_0, transpose_b
+            )
+            for leaf_op, x_l, y_l, t_l in leaves
+        ]
+    return torch.cat(parts, dim=split_dim)
 
 
 # ---------------------------------------------------------------------------

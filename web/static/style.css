@@ -715,6 +715,7 @@ html, body {
 .node-card.type-mpc { border-left: 3px solid var(--green); }
 .node-card.type-daemon { border-left: 3px solid var(--yellow); }
 .node-card.type-verifier { border-left: 3px solid #f778ba; }
+.node-card.type-he_sidecar { border-left: 3px solid #58a6ff; }
 
 .node-card-header {
     display: flex;
@@ -736,6 +737,7 @@ html, body {
 .node-card-type.mpc { background: var(--green-dim); color: var(--green); }
 .node-card-type.daemon { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
 .node-card-type.verifier { background: rgba(247, 120, 186, 0.15); color: #f778ba; }
+.node-card-type.he_sidecar { background: rgba(88, 166, 255, 0.18); color: #58a6ff; }
 
 .node-card-shard {
     font-size: 11px;

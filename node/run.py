@@ -114,6 +114,36 @@ Examples:
                         help="Timeout for P2P shard download in seconds")
     parser.add_argument("--shard-chunk-size", type=int, default=None,
                         help="Shard transfer chunk size in bytes")
+    parser.add_argument("--require-daemon", type=str, default=None,
+                        choices=["true", "false", "1", "0"],
+                        help="Require daemon availability for share submission")
+    parser.add_argument("--wire-dtype", type=str, default=None,
+                        choices=["float32", "float16"],
+                        help="Activation wire dtype")
+    parser.add_argument("--compress-activations", type=str, default=None,
+                        choices=["true", "false", "1", "0"],
+                        help="Enable activation compression")
+    parser.add_argument("--compress-threshold", type=int, default=None,
+                        help="Compression threshold in bytes")
+    parser.add_argument("--he-compute-mode", type=str, default=None,
+                        choices=["off", "decode_client_sample", "server_sample"],
+                        help="HE compute mode")
+    parser.add_argument("--he-compute-top-k", type=int, default=None,
+                        help="Default HE top-k")
+    parser.add_argument("--he-compute-temperature", type=float, default=None,
+                        help="Default HE temperature")
+    parser.add_argument("--he-compute-top-p", type=float, default=None,
+                        help="Default HE top-p")
+    parser.add_argument("--he-sidecar-url", type=str, default=None,
+                        dest="he_full_vocab_sidecar_url",
+                        help="HE sidecar URL")
+    parser.add_argument("--he-sidecar-timeout-ms", type=int, default=None,
+                        dest="he_full_vocab_sidecar_timeout_ms",
+                        help="HE sidecar timeout in ms")
+    parser.add_argument("--he-sidecar-required", type=str, default=None,
+                        choices=["true", "false", "1", "0"],
+                        dest="he_full_vocab_sidecar_required",
+                        help="Fail closed if sidecar unavailable")
 
     # --- MPC-only ---
     parser.add_argument("--mpc-role", type=str, default=None,
@@ -122,6 +152,25 @@ Examples:
     parser.add_argument("--peer", type=str, default=None,
                         dest="peer_address",
                         help="Address of the other MPC node (required for MPC)")
+    parser.add_argument("--mpc-dnc-mode", type=str, default=None,
+                        choices=["off", "manual", "auto"],
+                        help="MPC DNC mode (off/manual/auto)")
+    parser.add_argument("--mpc-dnc-depth", type=int, default=None,
+                        help="MPC DNC depth for manual mode")
+    parser.add_argument("--mpc-dnc-split-dim", type=int, default=None,
+                        help="MPC DNC split dim for element-wise ops")
+    parser.add_argument("--mpc-dnc-matmul-split-dim", type=int, default=None,
+                        help="MPC DNC split dim for matmul ops")
+    parser.add_argument("--mpc-dnc-parallel-workers", type=int, default=None,
+                        help="MPC DNC parallel workers for manual mode")
+    parser.add_argument("--mpc-dnc-auto-min-elems", type=int, default=None,
+                        help="MPC DNC auto: minimum tensor elements")
+    parser.add_argument("--mpc-dnc-auto-chunk-min-elems", type=int, default=None,
+                        help="MPC DNC auto: minimum chunk elements")
+    parser.add_argument("--mpc-dnc-auto-max-depth", type=int, default=None,
+                        help="MPC DNC auto: maximum depth")
+    parser.add_argument("--mpc-dnc-auto-max-workers", type=int, default=None,
+                        help="MPC DNC auto: max workers")
 
     # --- Daemon-only ---
     parser.add_argument("--db", type=str, default=None,
@@ -184,9 +233,29 @@ def cli_to_overrides(args: argparse.Namespace) -> dict:
         "ticket_submit_interval_seconds": "ticket_submit_interval_seconds",
         "shard_transfer_timeout": "shard_transfer_timeout",
         "shard_chunk_size": "shard_chunk_size",
+        "require_daemon": "require_daemon",
+        "wire_dtype": "wire_dtype",
+        "compress_activations": "compress_activations",
+        "compress_threshold": "compress_threshold",
+        "he_compute_mode": "he_compute_mode",
+        "he_compute_top_k": "he_compute_top_k",
+        "he_compute_temperature": "he_compute_temperature",
+        "he_compute_top_p": "he_compute_top_p",
+        "he_full_vocab_sidecar_url": "he_full_vocab_sidecar_url",
+        "he_full_vocab_sidecar_timeout_ms": "he_full_vocab_sidecar_timeout_ms",
+        "he_full_vocab_sidecar_required": "he_full_vocab_sidecar_required",
         # MPC
         "mpc_role": "mpc_role",
         "peer_address": "peer_address",
+        "mpc_dnc_mode": "mpc_dnc_mode",
+        "mpc_dnc_depth": "mpc_dnc_depth",
+        "mpc_dnc_split_dim": "mpc_dnc_split_dim",
+        "mpc_dnc_matmul_split_dim": "mpc_dnc_matmul_split_dim",
+        "mpc_dnc_parallel_workers": "mpc_dnc_parallel_workers",
+        "mpc_dnc_auto_min_elems": "mpc_dnc_auto_min_elems",
+        "mpc_dnc_auto_chunk_min_elems": "mpc_dnc_auto_chunk_min_elems",
+        "mpc_dnc_auto_max_depth": "mpc_dnc_auto_max_depth",
+        "mpc_dnc_auto_max_workers": "mpc_dnc_auto_max_workers",
         # Daemon
         "db_path": "db_path",
         "block_interval_seconds": "block_interval_seconds",
@@ -203,6 +272,9 @@ def cli_to_overrides(args: argparse.Namespace) -> dict:
     for cli_key, config_key in mapping.items():
         val = args_dict.get(cli_key)
         if val is not None:
+            if cli_key in ("require_daemon", "compress_activations", "he_full_vocab_sidecar_required"):
+                if isinstance(val, str):
+                    val = val.strip().lower() in ("1", "true", "yes", "on")
             overrides[config_key] = val
 
     return overrides
@@ -238,6 +310,16 @@ def main():
             host=cfg.host,
             advertise=cfg.advertise,
             registry_address=cfg.registry,
+            require_daemon=cfg.require_daemon,
+            mpc_dnc_mode=cfg.mpc_dnc_mode,
+            mpc_dnc_depth=cfg.mpc_dnc_depth,
+            mpc_dnc_split_dim=cfg.mpc_dnc_split_dim,
+            mpc_dnc_matmul_split_dim=cfg.mpc_dnc_matmul_split_dim,
+            mpc_dnc_parallel_workers=cfg.mpc_dnc_parallel_workers,
+            mpc_dnc_auto_min_elems=cfg.mpc_dnc_auto_min_elems,
+            mpc_dnc_auto_chunk_min_elems=cfg.mpc_dnc_auto_chunk_min_elems,
+            mpc_dnc_auto_max_depth=cfg.mpc_dnc_auto_max_depth,
+            mpc_dnc_auto_max_workers=cfg.mpc_dnc_auto_max_workers,
         )
 
     elif isinstance(cfg, ComputeConfig):

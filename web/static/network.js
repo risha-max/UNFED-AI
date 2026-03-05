@@ -56,9 +56,17 @@ const Network = {
         }
 
         this.nodesList.innerHTML = '';
-        // Sort: verifier/daemon infra first, then MPC/compute/vision
+        // Sort infra first, then execution nodes.
         const sorted = [...nodes].sort((a, b) => {
-            const order = { verifier: 0, daemon: 1, mpc: 2, compute: 3, vision: 4, guard: 5 };
+            const order = {
+                verifier: 0,
+                daemon: 1,
+                he_sidecar: 2,
+                mpc: 3,
+                compute: 4,
+                vision: 5,
+                guard: 6,
+            };
             const ta = order[a.node_type] ?? 9;
             const tb = order[b.node_type] ?? 9;
             if (ta !== tb) return ta - tb;
@@ -73,9 +81,12 @@ const Network = {
             card.className = `node-card type-${node.node_type}`;
 
             const typeClass = node.node_type || 'compute';
+            const typeLabel = typeClass === 'he_sidecar' ? 'he-sidecar' : typeClass;
             const layerInfo = node.node_function
                 || (node.node_type === 'guard'
                     ? 'Guard relay'
+                    : node.node_type === 'he_sidecar'
+                        ? 'HE encrypted compute sidecar'
                     : `Layers ${node.layer_start}-${node.layer_end - 1}`);
 
             const flags = [];
@@ -85,7 +96,7 @@ const Network = {
 
             card.innerHTML = `
                 <div class="node-card-header">
-                    <span class="node-card-type ${typeClass}">${typeClass}</span>
+                    <span class="node-card-type ${typeClass}">${typeLabel}</span>
                     <span class="node-card-shard">${
                         (node.node_type === 'compute' || node.node_type === 'mpc' || node.node_type === 'vision')
                             ? ('Shard ' + node.shard_index)

@@ -60,7 +60,9 @@ from network.mpc_beaver import (
     serialize_triple_shares, deserialize_triple_shares,
 )
 from network.mpc_protocols import (
+    MpcDncConfig,
     PeerExchanger, TripleAllocator,
+    configure_mpc_dnc,
     secure_rmsnorm, secure_softmax, secure_silu, secure_gate_up,
     secure_matmul, allocate_layer0_triples,
 )
@@ -817,7 +819,7 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
     the 2PC protocol with Node B, and forwards results to the next shard.
     """
 
-    def __init__(self, mpc_node: MPCNode, port: int):
+    def __init__(self, mpc_node: MPCNode, port: int, require_daemon: bool = True):
         self.mpc = mpc_node
         self.port = port
         self._node_id: str = ""
@@ -832,10 +834,7 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._session_step_by_session: dict[str, int] = {}
         self._active_inferences = 0
         self._inference_lock = threading.Lock()
-        self._require_daemon = (
-            os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
-            not in ("0", "false", "no", "off")
-        )
+        self._require_daemon = bool(require_daemon)
 
     def _connect_peer(self):
         """Connect to Node B's MPCPeer service."""
@@ -1223,8 +1222,36 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
 def serve(role: str, port: int, peer_address: str, host: str = "[::]",
           advertise: str = None, registry_address: str = None,
-          shards_dir: str = None, eth_address: str = None):
+          shards_dir: str = None, eth_address: str = None,
+          require_daemon: bool = True,
+          mpc_dnc_mode: str = "off",
+          mpc_dnc_depth: int = 0,
+          mpc_dnc_split_dim: int = -1,
+          mpc_dnc_matmul_split_dim: int = -3,
+          mpc_dnc_parallel_workers: int = 1,
+          mpc_dnc_auto_min_elems: int = 65536,
+          mpc_dnc_auto_chunk_min_elems: int = 16384,
+          mpc_dnc_auto_max_depth: int = 3,
+          mpc_dnc_auto_max_workers: int = 4):
     """Start an MPC node server."""
+    configure_mpc_dnc(
+        MpcDncConfig(
+            mode=mpc_dnc_mode,
+            depth=mpc_dnc_depth,
+            split_dim=mpc_dnc_split_dim,
+            matmul_split_dim=mpc_dnc_matmul_split_dim,
+            parallel_workers=mpc_dnc_parallel_workers,
+            auto_min_elems=mpc_dnc_auto_min_elems,
+            auto_chunk_min_elems=mpc_dnc_auto_chunk_min_elems,
+            auto_max_depth=mpc_dnc_auto_max_depth,
+            auto_max_workers=mpc_dnc_auto_max_workers,
+        )
+    )
+    print(
+        f"[MPC-{role}] DNC config: mode={mpc_dnc_mode} depth={mpc_dnc_depth} "
+        f"split_dim={mpc_dnc_split_dim} matmul_split_dim={mpc_dnc_matmul_split_dim} "
+        f"workers={mpc_dnc_parallel_workers}"
+    )
     mpc_node = MPCNode(role, peer_address, shards_dir=shards_dir)
     public_address = advertise or f"localhost:{port}"
 
@@ -1234,7 +1261,7 @@ def serve(role: str, port: int, peer_address: str, host: str = "[::]",
     )
 
     if role == "A":
-        servicer = MPCNodeServicer(mpc_node, port)
+        servicer = MPCNodeServicer(mpc_node, port, require_daemon=require_daemon)
         servicer._peer_address = peer_address
         inference_pb2_grpc.add_InferenceNodeServicer_to_server(
             servicer, server)
@@ -1318,6 +1345,39 @@ if __name__ == "__main__":
     parser.add_argument("--eth-address", type=str, default=None,
                         help="Ethereum address for on-chain staking "
                              "(used as node_id)")
+    parser.add_argument("--require-daemon", type=str, default="true",
+                        choices=["true", "false", "1", "0"],
+                        help="Require daemon availability for share submission")
+    parser.add_argument("--mpc-dnc-mode", type=str, default="off",
+                        choices=["off", "manual", "auto"],
+                        help="MPC divide-and-conquer mode")
+    parser.add_argument("--mpc-dnc-depth", type=int, default=0,
+                        help="DNC recursion depth in manual mode")
+    parser.add_argument("--mpc-dnc-split-dim", type=int, default=-1,
+                        help="DNC split dimension for element-wise ops in manual mode")
+    parser.add_argument("--mpc-dnc-matmul-split-dim", type=int, default=-3,
+                        help="DNC split dimension for matmul ops in manual mode")
+    parser.add_argument("--mpc-dnc-parallel-workers", type=int, default=1,
+                        help="DNC leaf parallel workers in manual mode")
+    parser.add_argument("--mpc-dnc-auto-min-elems", type=int, default=65536,
+                        help="Auto mode: minimum elements before enabling DNC")
+    parser.add_argument("--mpc-dnc-auto-chunk-min-elems", type=int, default=16384,
+                        help="Auto mode: minimum chunk elements after splitting")
+    parser.add_argument("--mpc-dnc-auto-max-depth", type=int, default=3,
+                        help="Auto mode: max split depth")
+    parser.add_argument("--mpc-dnc-auto-max-workers", type=int, default=4,
+                        help="Auto mode: max local worker threads")
     args = parser.parse_args()
+    require_daemon = str(args.require_daemon).strip().lower() in ("true", "1", "yes", "on")
     serve(args.role, args.port, args.peer, args.host, args.advertise,
-          args.registry, args.shards_dir, eth_address=args.eth_address)
+          args.registry, args.shards_dir, eth_address=args.eth_address,
+          require_daemon=require_daemon,
+          mpc_dnc_mode=args.mpc_dnc_mode,
+          mpc_dnc_depth=args.mpc_dnc_depth,
+          mpc_dnc_split_dim=args.mpc_dnc_split_dim,
+          mpc_dnc_matmul_split_dim=args.mpc_dnc_matmul_split_dim,
+          mpc_dnc_parallel_workers=args.mpc_dnc_parallel_workers,
+          mpc_dnc_auto_min_elems=args.mpc_dnc_auto_min_elems,
+          mpc_dnc_auto_chunk_min_elems=args.mpc_dnc_auto_chunk_min_elems,
+          mpc_dnc_auto_max_depth=args.mpc_dnc_auto_max_depth,
+          mpc_dnc_auto_max_workers=args.mpc_dnc_auto_max_workers)

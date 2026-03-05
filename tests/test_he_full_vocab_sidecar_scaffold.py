@@ -8,7 +8,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "proto"))
 
-import config
 import inference_pb2
 import node.server as node_server_mod
 from network.he_compute import (
@@ -72,12 +71,26 @@ def _build_light_servicer() -> InferenceNodeServicer:
     servicer._seen_sessions = set()
     servicer.registration = None
     servicer._eos_token_id = 151643
+    servicer._wire_dtype_default = "float32"
+    servicer._compress_activations = True
+    servicer._compress_threshold = 16384
+    servicer._he_compute_mode_default = "off"
+    servicer._he_compute_top_k = 64
+    servicer._he_compute_temperature = 1.0
+    servicer._he_compute_top_p = 1.0
+    servicer._he_full_vocab_sidecar_url = ""
+    servicer._he_full_vocab_sidecar_timeout_ms = 2000
+    servicer._he_full_vocab_sidecar_required = False
+    servicer._he_sidecar_allowed_formats = {"paillier_v1"}
+    servicer._he_sidecar_max_payload_bytes = 2 * 1024 * 1024
+    servicer._he_dispute_sampling_rate = 0.05
+    servicer._he_dispute_report_rate_limit_per_window = 64
+    servicer._he_dispute_window_seconds = 60
+    servicer._report_he_suspicion = lambda **kwargs: None
     return servicer
 
 
 def test_server_sample_mode_falls_back_to_client_sample_artifact():
-    old_required = config.HE_FULL_VOCAB_SIDECAR_REQUIRED
-    config.HE_FULL_VOCAB_SIDECAR_REQUIRED = False
     orig = node_server_mod.request_full_vocab_he_artifact
 
     def _fail_sidecar(**kwargs):
@@ -87,6 +100,7 @@ def test_server_sample_mode_falls_back_to_client_sample_artifact():
     try:
         priv, pub = generate_client_compute_keypair()
         servicer = _build_light_servicer()
+        servicer._he_full_vocab_sidecar_required = False
         req = inference_pb2.ForwardRequest(
             session_id="sess-sidecar-fallback",
             activation_data=torch.zeros(1, 1, 4, dtype=torch.float32).numpy().tobytes(),
@@ -113,12 +127,9 @@ def test_server_sample_mode_falls_back_to_client_sample_artifact():
         assert len(scores) == 3
     finally:
         node_server_mod.request_full_vocab_he_artifact = orig
-        config.HE_FULL_VOCAB_SIDECAR_REQUIRED = old_required
 
 
 def test_server_sample_mode_strict_fails_when_sidecar_required():
-    old_required = config.HE_FULL_VOCAB_SIDECAR_REQUIRED
-    config.HE_FULL_VOCAB_SIDECAR_REQUIRED = True
     orig = node_server_mod.request_full_vocab_he_artifact
 
     def _fail_sidecar(**kwargs):
@@ -128,6 +139,7 @@ def test_server_sample_mode_strict_fails_when_sidecar_required():
     try:
         _, pub = generate_client_compute_keypair()
         servicer = _build_light_servicer()
+        servicer._he_full_vocab_sidecar_required = True
         req = inference_pb2.ForwardRequest(
             session_id="sess-sidecar-strict",
             activation_data=torch.zeros(1, 1, 4, dtype=torch.float32).numpy().tobytes(),
@@ -145,12 +157,9 @@ def test_server_sample_mode_strict_fails_when_sidecar_required():
         assert "sidecar required and down" in resp.he_error
     finally:
         node_server_mod.request_full_vocab_he_artifact = orig
-        config.HE_FULL_VOCAB_SIDECAR_REQUIRED = old_required
 
 
 def test_server_sample_mode_reports_inline_integrity_violation():
-    old_allowed = config.HE_SIDECAR_ALLOWED_FORMATS
-    config.HE_SIDECAR_ALLOWED_FORMATS = ("paillier_v1",)
     orig = node_server_mod.request_full_vocab_he_artifact
 
     def _bad_sidecar(**kwargs):
@@ -171,6 +180,7 @@ def test_server_sample_mode_reports_inline_integrity_violation():
     try:
         _, pub = generate_client_compute_keypair()
         servicer = _build_light_servicer()
+        servicer._he_sidecar_allowed_formats = {"paillier_v1"}
         servicer._report_he_suspicion = lambda **kwargs: reports.append(kwargs)
         req = inference_pb2.ForwardRequest(
             session_id="sess-sidecar-inline-check",
@@ -191,4 +201,3 @@ def test_server_sample_mode_reports_inline_integrity_violation():
         assert reports[0]["reason_code"] == "response_format_not_allowed"
     finally:
         node_server_mod.request_full_vocab_he_artifact = orig
-        config.HE_SIDECAR_ALLOWED_FORMATS = old_allowed

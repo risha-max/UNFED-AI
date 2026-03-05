@@ -1,0 +1,22 @@
+{
+  "role": "mpc",
+  "mpc_role": "A",
+  "peer_address": "127.0.0.1:50063",
+  "port": 50061,
+  "advertise": "localhost:50061",
+  "registry": "127.0.0.1:50050",
+  "shards_dir": "shards",
+  "model_name": "./models/Qwen2.5-Coder-0.5B-Instruct",
+  "model_type": "qwen2",
+  "require_daemon": true,
+
+  "mpc_dnc_mode": "auto",
+  "mpc_dnc_depth": 2,
+  "mpc_dnc_split_dim": -1,
+  "mpc_dnc_matmul_split_dim": -3,
+  "mpc_dnc_parallel_workers": 2,
+  "mpc_dnc_auto_min_elems": 65536,
+  "mpc_dnc_auto_chunk_min_elems": 16384,
+  "mpc_dnc_auto_max_depth": 3,
+  "mpc_dnc_auto_max_workers": 4
+}

@@ -248,6 +248,8 @@ async def get_nodes():
             t = (node_type or "").strip().lower()
             if t == "mpc":
                 return "MPC shard-0 entry and share-secure compute"
+            if t == "he_sidecar":
+                return "HE compute sidecar (encrypted decode/sampling service)"
             if t == "daemon":
                 return "Collect shares, build blocks, and relay chain state"
             if t == "verifier":

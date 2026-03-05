@@ -145,6 +145,27 @@ class ComputeConfig(BaseNodeConfig):
     max_upload_rate_mbps: float = 0.0            # 0 = unlimited
     max_concurrent_transfers: int = 0            # 0 = unlimited
     inference_priority: bool = True              # pause transfers during inference
+    require_daemon: bool = True                  # fail requests if daemon unavailable
+
+    # --- Wire/compression ---
+    wire_dtype: str = "float32"                  # "float32" or "float16"
+    compress_activations: bool = True
+    compress_threshold: int = 16384
+
+    # --- HE compute / sidecar / dispute policy ---
+    he_compute_mode: str = "off"                 # off|decode_client_sample|server_sample
+    he_compute_top_k: int = 64
+    he_compute_temperature: float = 1.0
+    he_compute_top_p: float = 1.0
+    he_full_vocab_sidecar_url: str = ""
+    he_full_vocab_sidecar_timeout_ms: int = 2000
+    he_full_vocab_sidecar_required: bool = False
+    he_sidecar_allowed_formats: list[str] = field(default_factory=lambda: ["paillier_v1"])
+    he_sidecar_max_payload_bytes: int = 2 * 1024 * 1024
+    he_dispute_sampling_rate: float = 0.05
+    he_dispute_report_rate_limit_per_window: int = 64
+    he_dispute_window_seconds: int = 60
+    he_dispute_rollout_stage: str = "shadow"     # shadow|soft|enforced
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +189,17 @@ class MPCConfig(ComputeConfig):
 
     # --- Overridden defaults ---
     shard_index: Optional[int] = 0               # MPC always runs shard 0
+
+    # --- MPC divide-and-conquer tuning (per-node, no env vars needed) ---
+    mpc_dnc_mode: str = "off"                    # off|manual|auto
+    mpc_dnc_depth: int = 0
+    mpc_dnc_split_dim: int = -1
+    mpc_dnc_matmul_split_dim: int = -3
+    mpc_dnc_parallel_workers: int = 1
+    mpc_dnc_auto_min_elems: int = 65536
+    mpc_dnc_auto_chunk_min_elems: int = 16384
+    mpc_dnc_auto_max_depth: int = 3
+    mpc_dnc_auto_max_workers: int = 4
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +357,21 @@ def _validate(cfg: NodeConfig):
         if cfg.shard_index != 0:
             raise ValueError(
                 f"MPC nodes must run shard 0, got shard_index={cfg.shard_index}")
+        if cfg.mpc_dnc_mode not in ("off", "manual", "auto"):
+            raise ValueError(
+                f"mpc_dnc_mode must be off|manual|auto, got '{cfg.mpc_dnc_mode}'")
+        if cfg.mpc_dnc_depth < 0:
+            raise ValueError("mpc_dnc_depth must be >= 0")
+        if cfg.mpc_dnc_parallel_workers < 1:
+            raise ValueError("mpc_dnc_parallel_workers must be >= 1")
+        if cfg.mpc_dnc_auto_min_elems < 1:
+            raise ValueError("mpc_dnc_auto_min_elems must be >= 1")
+        if cfg.mpc_dnc_auto_chunk_min_elems < 1:
+            raise ValueError("mpc_dnc_auto_chunk_min_elems must be >= 1")
+        if cfg.mpc_dnc_auto_max_depth < 0:
+            raise ValueError("mpc_dnc_auto_max_depth must be >= 0")
+        if cfg.mpc_dnc_auto_max_workers < 1:
+            raise ValueError("mpc_dnc_auto_max_workers must be >= 1")
 
     elif isinstance(cfg, ComputeConfig):
         if cfg.shard_index is None:
@@ -339,6 +386,37 @@ def _validate(cfg: NodeConfig):
             raise ValueError(
                 f"kv_quantize must be 'none' or 'int8', "
                 f"got '{cfg.kv_quantize}'")
+        if cfg.wire_dtype not in ("float32", "float16"):
+            raise ValueError(
+                f"wire_dtype must be 'float32' or 'float16', got '{cfg.wire_dtype}'")
+        if cfg.compress_threshold < 1:
+            raise ValueError("compress_threshold must be >= 1")
+        if cfg.he_compute_mode not in ("off", "decode_client_sample", "server_sample"):
+            raise ValueError(
+                "he_compute_mode must be off|decode_client_sample|server_sample"
+            )
+        if cfg.he_compute_top_k < 1:
+            raise ValueError("he_compute_top_k must be >= 1")
+        if cfg.he_compute_temperature <= 0:
+            raise ValueError("he_compute_temperature must be > 0")
+        if cfg.he_compute_top_p <= 0:
+            raise ValueError("he_compute_top_p must be > 0")
+        if cfg.he_full_vocab_sidecar_timeout_ms < 1:
+            raise ValueError("he_full_vocab_sidecar_timeout_ms must be >= 1")
+        if (not isinstance(cfg.he_sidecar_allowed_formats, list)
+                or not cfg.he_sidecar_allowed_formats
+                or any(not isinstance(x, str) or not x for x in cfg.he_sidecar_allowed_formats)):
+            raise ValueError("he_sidecar_allowed_formats must not be empty")
+        if cfg.he_sidecar_max_payload_bytes < 1:
+            raise ValueError("he_sidecar_max_payload_bytes must be >= 1")
+        if not 0.0 <= cfg.he_dispute_sampling_rate <= 1.0:
+            raise ValueError("he_dispute_sampling_rate must be in [0.0, 1.0]")
+        if cfg.he_dispute_report_rate_limit_per_window < 1:
+            raise ValueError("he_dispute_report_rate_limit_per_window must be >= 1")
+        if cfg.he_dispute_window_seconds < 1:
+            raise ValueError("he_dispute_window_seconds must be >= 1")
+        if cfg.he_dispute_rollout_stage not in ("shadow", "soft", "enforced"):
+            raise ValueError("he_dispute_rollout_stage must be shadow|soft|enforced")
 
     if isinstance(cfg, VerifierConfig):
         if not 0.0 <= cfg.verification_sampling_rate <= 1.0:
@@ -396,6 +474,18 @@ def print_config_summary(cfg: NodeConfig, config_path: Optional[str]):
         print(f"  Model:           {cfg.model_name}")
         print(f"  Model type:      {cfg.model_type}")
         print(f"  Shards dir:      {cfg.shards_dir}")
+        print(div)
+        print(f"  MPC DNC mode:    {cfg.mpc_dnc_mode}")
+        if cfg.mpc_dnc_mode == "manual":
+            print(f"  DNC depth:       {cfg.mpc_dnc_depth}")
+            print(f"  DNC split dim:   {cfg.mpc_dnc_split_dim}")
+            print(f"  DNC mm split:    {cfg.mpc_dnc_matmul_split_dim}")
+            print(f"  DNC workers:     {cfg.mpc_dnc_parallel_workers}")
+        elif cfg.mpc_dnc_mode == "auto":
+            print(f"  Auto min elems:  {cfg.mpc_dnc_auto_min_elems}")
+            print(f"  Auto chunk min:  {cfg.mpc_dnc_auto_chunk_min_elems}")
+            print(f"  Auto max depth:  {cfg.mpc_dnc_auto_max_depth}")
+            print(f"  Auto max worker: {cfg.mpc_dnc_auto_max_workers}")
 
     # --- Compute-specific ---
     elif isinstance(cfg, ComputeConfig):
@@ -446,6 +536,25 @@ def print_config_summary(cfg: NodeConfig, config_path: Optional[str]):
         print(f"  Upload rate:     {rate_str}")
         print(f"  Max transfers:   {conc_str}")
         print(f"  Infer priority:  {'yes' if cfg.inference_priority else 'no'}")
+        print(f"  Require daemon:  {'yes' if cfg.require_daemon else 'no'}")
+        print(div)
+        print(f"  Wire dtype:      {cfg.wire_dtype}")
+        print(f"  Compress acts:   {'yes' if cfg.compress_activations else 'no'}")
+        print(f"  Compress thresh: {cfg.compress_threshold} bytes")
+        print(div)
+        print(f"  HE mode:         {cfg.he_compute_mode}")
+        print(f"  HE top-k:        {cfg.he_compute_top_k}")
+        print(f"  HE temperature:  {cfg.he_compute_temperature}")
+        print(f"  HE top-p:        {cfg.he_compute_top_p}")
+        print(f"  Sidecar URL:     {cfg.he_full_vocab_sidecar_url or '(none)'}")
+        print(f"  Sidecar timeout: {cfg.he_full_vocab_sidecar_timeout_ms}ms")
+        print(f"  Sidecar strict:  {'yes' if cfg.he_full_vocab_sidecar_required else 'no'}")
+        print(f"  Sidecar formats: {', '.join(cfg.he_sidecar_allowed_formats)}")
+        print(f"  Sidecar max B:   {cfg.he_sidecar_max_payload_bytes}")
+        print(f"  HE sample rate:  {cfg.he_dispute_sampling_rate}")
+        print(f"  HE rpt limit:    {cfg.he_dispute_report_rate_limit_per_window}/window")
+        print(f"  HE rpt window:   {cfg.he_dispute_window_seconds}s")
+        print(f"  HE rollout:      {cfg.he_dispute_rollout_stage}")
 
     # --- Verifier-specific ---
     if isinstance(cfg, VerifierConfig):
