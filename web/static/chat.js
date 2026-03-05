@@ -13,7 +13,13 @@ const Chat = {
 
     pendingImage: null,       // { file, path, dataUrl }
     currentAssistantEl: null, // Currently streaming message element
+    currentAssistantText: "",
     welcomeShown: true,
+    history: [],
+    maxContextTurns: 8,
+    maxContextChars: 12000,
+    maxStoredTurns: 60,
+    historyStorageKey: "unfed_chat_history_v1",
 
     init() {
         this.messagesEl = document.getElementById('chatMessages');
@@ -23,6 +29,7 @@ const Chat = {
         this.imagePreview = document.getElementById('imagePreview');
         this.imagePreviewImg = document.getElementById('imagePreviewImg');
         this.imageRemoveBtn = document.getElementById('imageRemoveBtn');
+        this.loadHistory();
 
         // Send on Enter (Shift+Enter for newline)
         this.inputEl.addEventListener('keydown', (e) => {
@@ -114,8 +121,12 @@ const Chat = {
             return;
         }
         const modelType = selectedModel.model_type;
-        const maxTokens = parseInt(document.getElementById('maxTokens').value) || 100;
         const useVoting = document.getElementById('useVoting').checked;
+        const maxTokensEl = document.getElementById('maxTokens');
+        const parsedMaxTokens = Number.parseInt(maxTokensEl?.value ?? '', 10);
+        const maxTokens = Number.isFinite(parsedMaxTokens) && parsedMaxTokens > 0
+            ? parsedMaxTokens
+            : 100;
 
         // Upload image if present
         let imagePath = null;
@@ -137,22 +148,36 @@ const Chat = {
 
         // Create assistant message placeholder
         this.currentAssistantEl = this.addMessage('assistant', '', null, true);
+        this.currentAssistantText = "";
 
         // Send via WebSocket
+        const composedPrompt = this.buildPromptWithContext(prompt);
         const payload = {
-            prompt,
+            prompt: composedPrompt,
             model_id: selectedModel.model_id,
             model_type: modelType,
-            max_tokens: maxTokens,
             use_voting: useVoting,
+            max_tokens: maxTokens,
+            he_output: Boolean(App.state.heOutputEnabled),
         };
         if (imagePath) payload.image_path = imagePath;
         const sent = App.sendChatMessage(payload);
         if (!sent) {
-            this.addSystemMessage('Not connected to server');
+            if (App.state.devAuthBypass) {
+                this.addSystemMessage('Not connected. Enter wallet address in Settings, then try again.');
+            } else {
+                this.addSystemMessage('Not connected to server');
+            }
             App.state.generating = false;
+            this.currentAssistantText = "";
+            return;
         }
 
+        if (prompt) {
+            this.recordTurn("user", prompt);
+        } else if (imagePath) {
+            this.recordTurn("user", "[Image uploaded]");
+        }
         this.sendBtn.disabled = true;
     },
 
@@ -179,6 +204,7 @@ const Chat = {
                     const cursor = textEl.querySelector('.cursor');
                     if (cursor) cursor.remove();
                     textEl.textContent += msg.text;
+                    this.currentAssistantText += msg.text;
                     textEl.appendChild(this.makeCursor());
                     this.scrollToBottom();
                 }
@@ -207,6 +233,10 @@ const Chat = {
                 this.currentAssistantEl = null;
                 App.state.generating = false;
                 this.sendBtn.disabled = false;
+                if (this.currentAssistantText.trim()) {
+                    this.recordTurn("assistant", this.currentAssistantText);
+                }
+                this.currentAssistantText = "";
 
                 // Update stats
                 document.getElementById('statTokens').textContent = msg.total_tokens;
@@ -230,8 +260,84 @@ const Chat = {
                 this.currentAssistantEl = null;
                 App.state.generating = false;
                 this.sendBtn.disabled = false;
+                this.currentAssistantText = "";
                 App.setStatus('error', 'Error');
                 break;
+        }
+    },
+
+    buildPromptWithContext(currentPrompt) {
+        if (!currentPrompt) return currentPrompt;
+        const recent = this.history.slice(-this.maxContextTurns);
+        if (!recent.length) return currentPrompt;
+
+        const lines = [];
+        let budgetUsed = 0;
+        for (let i = recent.length - 1; i >= 0; i -= 1) {
+            const turn = recent[i];
+            if (!turn || !turn.role || !turn.content) continue;
+            const label = turn.role === "assistant" ? "Assistant" : "User";
+            const content = String(turn.content).trim().replace(/\s+/g, " ");
+            if (!content) continue;
+            const line = `${label}: ${content}`;
+            if (budgetUsed + line.length > this.maxContextChars && lines.length) {
+                break;
+            }
+            lines.unshift(line);
+            budgetUsed += line.length + 1;
+        }
+
+        return [
+            "Continue this conversation using the provided context.",
+            "Conversation context:",
+            ...lines,
+            `User: ${currentPrompt}`,
+            "Assistant:",
+        ].join("\n");
+    },
+
+    recordTurn(role, content) {
+        const normalizedRole = role === "assistant" ? "assistant" : "user";
+        const normalizedContent = String(content || "").trim();
+        if (!normalizedContent) return;
+        this.history.push({
+            role: normalizedRole,
+            content: normalizedContent,
+            ts: Date.now(),
+        });
+        if (this.history.length > this.maxStoredTurns) {
+            this.history = this.history.slice(-this.maxStoredTurns);
+        }
+        this.saveHistory();
+    },
+
+    loadHistory() {
+        try {
+            const raw = localStorage.getItem(this.historyStorageKey);
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) return;
+            this.history = parsed
+                .filter((x) => x && (x.role === "user" || x.role === "assistant"))
+                .map((x) => ({
+                    role: x.role,
+                    content: String(x.content || "").trim(),
+                    ts: Number(x.ts || 0),
+                }))
+                .filter((x) => x.content);
+            if (this.history.length > this.maxStoredTurns) {
+                this.history = this.history.slice(-this.maxStoredTurns);
+            }
+        } catch (e) {
+            this.history = [];
+        }
+    },
+
+    saveHistory() {
+        try {
+            localStorage.setItem(this.historyStorageKey, JSON.stringify(this.history));
+        } catch (e) {
+            // Best effort only; chat should continue without persistence.
         }
     },
 

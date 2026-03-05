@@ -331,8 +331,12 @@ class OnChainEscrow:
     # Faucet (testnet only)
     # ------------------------------------------------------------------
 
-    FAUCET_DRIP_AMOUNT = 100   # tokens per drip
-    FAUCET_COOLDOWN = 3600     # seconds between drips per address
+    FAUCET_DRIP_AMOUNT = float(
+        os.environ.get("UNFED_FAUCET_DRIP_AMOUNT", "100")
+    )  # tokens per drip
+    FAUCET_COOLDOWN = int(
+        os.environ.get("UNFED_FAUCET_COOLDOWN", "3600")
+    )  # seconds between drips per address
 
     def faucet_drip(self, client_address: str,
                     amount_tokens: float = 0) -> str:

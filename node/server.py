@@ -47,7 +47,8 @@ import registry_pb2_grpc
 
 from network.discovery import NodeRegistration
 from network.resilience import create_resilient_channel, with_retry
-from network.onion import peel_onion, encrypt_response
+from network.onion import peel_onion, encrypt_response, private_key_to_bytes
+from network.he_output import encrypt_token_artifact
 from network.randomness import compute_activation_hash, select_next_node, SessionCircuit
 from network.verification import TicketCollector
 from network.zk_verification import create_commitment
@@ -415,7 +416,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         stub = inference_pb2_grpc.InferenceNodeStub(
             grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
         )
-        fee = stub.GetFeeEstimate(
+        fee = stub.GetLoad(
             inference_pb2.FeeEstimateRequest(estimated_tokens=1),
             timeout=2,
         )
@@ -733,6 +734,42 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 # Last node: return the sampled token
                 is_eos = sampled_token == self._eos_token_id
 
+                if request.he_output_enabled:
+                    if not request.he_client_pubkey:
+                        context.set_details("HE output enabled but client key is missing.")
+                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                        return inference_pb2.ForwardResponse()
+                    try:
+                        sender_private_bytes = None
+                        if self.registration and self.registration.private_key:
+                            sender_private_bytes = private_key_to_bytes(
+                                self.registration.private_key
+                            )
+                        artifact = encrypt_token_artifact(
+                            client_public_key=bytes(request.he_client_pubkey),
+                            sender_private_key=sender_private_bytes,
+                            session_id=session_id,
+                            step=int(request.he_step),
+                            key_id=request.he_key_id or "",
+                            token_id=int(sampled_token),
+                            is_eos=bool(is_eos),
+                        )
+                        return inference_pb2.ForwardResponse(
+                            has_token=False,
+                            he_ciphertext=artifact["ciphertext"],
+                            he_nonce=artifact["nonce"],
+                            he_algo=str(artifact["algo"]),
+                            he_session_id=str(artifact["session_id"]),
+                            he_step=int(artifact["step"]),
+                            he_key_id=str(artifact["key_id"]),
+                            he_sender_pubkey=artifact["sender_public_key"],
+                        )
+                    except Exception as e:
+                        return inference_pb2.ForwardResponse(
+                            has_token=False,
+                            he_error=f"HE output artifact encryption failed: {e}",
+                        )
+
                 resp = inference_pb2.ForwardResponse(
                     token_id=sampled_token,
                     has_token=True,
@@ -821,6 +858,12 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     remaining = list(request.remaining_circuit)
                     remaining.pop(0)
                     next_request.remaining_circuit.extend(remaining)
+
+                if request.he_output_enabled:
+                    next_request.he_output_enabled = True
+                    next_request.he_client_pubkey = request.he_client_pubkey
+                    next_request.he_key_id = request.he_key_id
+                    next_request.he_step = request.he_step
 
                 # Pass remaining response keys to the next node
                 if remaining_response_keys:
@@ -927,6 +970,20 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
     def GetBlocks(self, request, context):
         """Compute nodes no longer hold the chain — redirect to daemon."""
         return inference_pb2.GetBlocksResponse(blocks=[], chain_height=0)
+
+    def GetLoad(self, request, context):
+        """Expose local load telemetry for smart routing decisions."""
+        estimated_tokens = max(1, int(request.estimated_tokens or 1))
+        with self._inference_lock:
+            active = self._active_inferences
+        utilization = float(active)
+        base_fee = 0.001
+        return inference_pb2.FeeEstimateResponse(
+            base_fee=base_fee,
+            utilization=utilization,
+            estimated_cost=base_fee * estimated_tokens,
+            suggested_tip=0.0,
+        )
 
     def GetShard(self, request, context):
         """Stream a shard file to a requesting node.
@@ -1321,6 +1378,8 @@ class VisionNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
               f"{manifest.get('format_version', '?')})")
 
         self._stubs: dict[str, inference_pb2_grpc.InferenceNodeStub] = {}
+        self._active_inferences = 0
+        self._inference_lock = threading.Lock()
 
     def _get_stub(self, address: str) -> inference_pb2_grpc.InferenceNodeStub:
         if address not in self._stubs:
@@ -1335,10 +1394,29 @@ class VisionNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
           - SmolVLM: simpler path (pixel_values + patch_attention_mask only)
           - Qwen2-VL: complex path (position_embeddings, cu_seqlens, grid_thw)
         """
-        if self.model_type == "smolvlm":
-            return self._forward_smolvlm(request, context)
-        else:
+        with self._inference_lock:
+            self._active_inferences += 1
+        try:
+            if self.model_type == "smolvlm":
+                return self._forward_smolvlm(request, context)
             return self._forward_qwen2vl(request, context)
+        finally:
+            with self._inference_lock:
+                self._active_inferences -= 1
+
+    def GetLoad(self, request, context):
+        """Expose local load telemetry for smart routing decisions."""
+        estimated_tokens = max(1, int(request.estimated_tokens or 1))
+        with self._inference_lock:
+            active = self._active_inferences
+        utilization = float(active)
+        base_fee = 0.001
+        return inference_pb2.FeeEstimateResponse(
+            base_fee=base_fee,
+            utilization=utilization,
+            estimated_cost=base_fee * estimated_tokens,
+            suggested_tip=0.0,
+        )
 
     def _forward_smolvlm(self, request, context):
         """SmolVLM vision forward — simpler pipeline.

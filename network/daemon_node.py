@@ -317,9 +317,9 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
             current_height=self.chain.get_tip_height(),
         )
 
-    # --- GetFeeEstimate (fee oracle) ---
+    # --- GetLoad (telemetry + fee oracle data) ---
 
-    def GetFeeEstimate(self, request, context):
+    def GetLoad(self, request, context):
         """Return the current fee estimate from the oracle."""
         if self.fee_oracle is None:
             return inference_pb2.FeeEstimateResponse(

@@ -12,6 +12,10 @@ const App = {
         generating: false,      // Whether generation is in progress
         models: [],             // Resolved model catalog
         selectedModelId: "",    // Active model_id
+        authSessionToken: "",   // Wallet auth session token for chat
+        activeWallet: "",       // Wallet resolved by backend session
+        devAuthBypass: false,   // Local dev bypass mode from backend
+        heOutputEnabled: false, // HE output artifact mode capability
     },
 
     // Event bus for cross-tab communication
@@ -28,7 +32,7 @@ const App = {
 
     // ---- Tab routing ----
     initTabs() {
-        const buttons = document.querySelectorAll('.tab-btn');
+        const buttons = document.querySelectorAll('.topbar-tabs .tab-btn');
         const contents = document.querySelectorAll('.tab-content');
 
         buttons.forEach(btn => {
@@ -55,12 +59,22 @@ const App = {
     initWallet() {
         const el = document.getElementById('walletAddress');
         if (!el) return;
+        const authBtn = document.getElementById('walletAuthBtn');
 
         // Restore from localStorage
         const saved = localStorage.getItem('unfed_wallet');
         if (saved) el.value = saved;
+        const savedSession = localStorage.getItem('unfed_wallet_session');
+        if (savedSession && !this.state.devAuthBypass) {
+            this.state.authSessionToken = savedSession;
+            this.setWalletHint('Session restored. Reconnecting...');
+        } else if (this.state.devAuthBypass) {
+            this.setWalletHint('Dev mode: wallet field is trusted for local testing.');
+        } else {
+            this.setWalletHint('Sign in with a wallet signature before chat.');
+        }
 
-        // Persist on change and reconnect WebSocket so the new address takes effect
+        // Persist on change and force re-auth for this wallet.
         el.addEventListener('change', () => {
             const addr = el.value.trim();
             if (addr) {
@@ -68,11 +82,122 @@ const App = {
             } else {
                 localStorage.removeItem('unfed_wallet');
             }
-            // Reconnect with the new wallet
+            if (!this.state.devAuthBypass) {
+                this.clearWalletSession('Wallet changed. Please sign in again.');
+            }
             if (this.state.chatWs) {
                 this.state.chatWs.close();
+            } else if (this.state.devAuthBypass && addr) {
+                this.connectChat();
             }
         });
+
+        if (authBtn) {
+            authBtn.addEventListener('click', () => this.authenticateWallet());
+        }
+    },
+
+    applyAuthModeUi() {
+        const authBtn = document.getElementById('walletAuthBtn');
+        if (this.state.devAuthBypass) {
+            if (authBtn) authBtn.style.display = 'none';
+            this.clearWalletSession();
+            this.setWalletHint('Dev mode: wallet field is trusted for local testing.');
+            return;
+        }
+        if (authBtn) authBtn.style.display = '';
+        const savedSession = localStorage.getItem('unfed_wallet_session');
+        if (savedSession) {
+            this.state.authSessionToken = savedSession;
+            this.setWalletHint('Session restored. Reconnecting...');
+        } else {
+            this.setWalletHint('Sign in with a wallet signature before chat.');
+        }
+    },
+
+    async loadAuthMode() {
+        const mode = await this.fetchJson('/api/client/auth/mode');
+        this.state.devAuthBypass = Boolean(mode && mode.dev_auth_bypass);
+        this.applyAuthModeUi();
+    },
+
+    async loadSecurityModes() {
+        const mode = await this.fetchJson('/api/security/modes');
+        this.state.heOutputEnabled = Boolean(mode && mode.he_output_enabled);
+    },
+
+    setWalletHint(message, isError = false) {
+        const hint = document.getElementById('walletHint');
+        if (!hint) return;
+        hint.textContent = message;
+        hint.style.color = isError ? '#ef4444' : '';
+    },
+
+    clearWalletSession(message = '') {
+        this.state.authSessionToken = '';
+        this.state.activeWallet = '';
+        localStorage.removeItem('unfed_wallet_session');
+        if (message) this.setWalletHint(message, true);
+    },
+
+    async authenticateWallet() {
+        const authBtn = document.getElementById('walletAuthBtn');
+        if (!window.ethereum) {
+            this.setWalletHint('No wallet provider found. Install MetaMask (or compatible).', true);
+            return;
+        }
+
+        if (authBtn) authBtn.disabled = true;
+        this.setWalletHint('Requesting wallet signature...');
+        try {
+            const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+            const signerAddress = (accounts && accounts[0]) ? String(accounts[0]) : '';
+            if (!signerAddress) throw new Error('No wallet account available');
+
+            const entered = this.getWalletAddress();
+            if (entered && entered.toLowerCase() !== signerAddress.toLowerCase()) {
+                throw new Error('Entered wallet does not match connected signer account');
+            }
+
+            const walletEl = document.getElementById('walletAddress');
+            if (walletEl) walletEl.value = signerAddress;
+            localStorage.setItem('unfed_wallet', signerAddress);
+
+            const challengeResp = await this.postJson('/api/client/auth', {});
+            if (!challengeResp || !challengeResp.challenge) {
+                throw new Error('Failed to fetch auth challenge');
+            }
+
+            const signature = await window.ethereum.request({
+                method: 'personal_sign',
+                params: [challengeResp.challenge, signerAddress],
+            });
+
+            const verifyResp = await this.postJson('/api/client/auth/verify', {
+                challenge: challengeResp.challenge,
+                signature,
+                address: signerAddress,
+            });
+            if (!verifyResp || !verifyResp.success || !verifyResp.session_token) {
+                throw new Error(verifyResp?.error || 'Wallet verification failed');
+            }
+
+            this.state.authSessionToken = verifyResp.session_token;
+            this.state.activeWallet = verifyResp.address || signerAddress;
+            localStorage.setItem('unfed_wallet_session', verifyResp.session_token);
+            this.setWalletHint(`Signed in as ${this.state.activeWallet.slice(0, 6)}...${this.state.activeWallet.slice(-4)}`);
+
+            if (this.state.chatWs) {
+                this.state.chatWs.close();
+            } else {
+                this.connectChat();
+            }
+        } catch (err) {
+            const msg = err?.message || String(err);
+            this.clearWalletSession(`Wallet sign-in failed: ${msg}`);
+        } finally {
+            if (authBtn) authBtn.disabled = false;
+        }
     },
 
     // ---- Model mode / selector ----
@@ -215,11 +340,28 @@ const App = {
     // ---- WebSocket: Chat ----
     connectChat() {
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wallet = this.getWalletAddress();
-        const qs = wallet ? `?wallet=${encodeURIComponent(wallet)}` : '';
+        let qs = '';
+        const sessionToken = this.state.authSessionToken || localStorage.getItem('unfed_wallet_session') || '';
+        if (this.state.devAuthBypass) {
+            const wallet = this.getWalletAddress();
+            if (!wallet) {
+                this.setStatus('error', 'Enter wallet address');
+                return;
+            }
+            qs = `?wallet=${encodeURIComponent(wallet)}`;
+        } else {
+            if (!sessionToken) {
+                this.setStatus('error', 'Wallet sign-in required');
+                return;
+            }
+            qs = `?session=${encodeURIComponent(sessionToken)}`;
+        }
         const ws = new WebSocket(`${protocol}//${location.host}/ws/chat${qs}`);
 
         ws.onopen = () => {
+            if (!this.state.devAuthBypass) {
+                this.state.authSessionToken = sessionToken;
+            }
             this.state.chatWs = ws;
             this.setStatus('connected', 'Connected');
         };
@@ -237,17 +379,34 @@ const App = {
                     }
                     return;
                 }
+                if (msg.type === 'error' && String(msg.message || '').toLowerCase().includes('wallet authentication required')) {
+                    this.clearWalletSession('Wallet session expired. Please sign in again.');
+                    this.setStatus('error', 'Wallet sign-in required');
+                    return;
+                }
                 this.emit('chatMessage', msg);
             } catch (e) {
                 console.error('Chat WS parse error:', e);
             }
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
             this.state.chatWs = null;
+            const unauthorized = event && event.code === 1008;
+            if (unauthorized) {
+                if (!this.state.devAuthBypass) {
+                    this.clearWalletSession('Wallet session expired. Please sign in again.');
+                    this.setStatus('error', 'Wallet sign-in required');
+                } else {
+                    this.setStatus('error', 'Wallet rejected');
+                }
+                return;
+            }
             this.setStatus('error', 'Disconnected');
-            // Reconnect after 3s
-            setTimeout(() => this.connectChat(), 3000);
+            if (this.state.authSessionToken) {
+                // Reconnect after 3s while session remains valid.
+                setTimeout(() => this.connectChat(), 3000);
+            }
         };
 
         ws.onerror = (err) => {
@@ -319,6 +478,20 @@ const App = {
             return await res.json();
         } catch (e) {
             console.error('Upload error:', e);
+            return null;
+        }
+    },
+
+    async postJson(url, body) {
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body || {}),
+            });
+            return await res.json();
+        } catch (e) {
+            console.error('POST error:', url, e);
             return null;
         }
     },
@@ -396,7 +569,7 @@ const App = {
         this.initWallet();
         this.initFaucet();
         this.initModelMode();
-        this.connectChat();
+        Promise.all([this.loadAuthMode(), this.loadSecurityModes()]).finally(() => this.connectChat());
         this.connectChain();
         this.refreshModelOptions();
 

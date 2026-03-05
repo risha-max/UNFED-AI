@@ -830,6 +830,8 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._registration_share_signing_private_key = None
         self._session_nonce_by_session: dict[str, str] = {}
         self._session_step_by_session: dict[str, int] = {}
+        self._active_inferences = 0
+        self._inference_lock = threading.Lock()
         self._require_daemon = (
             os.environ.get("UNFED_REQUIRE_DAEMON", "1").strip().lower()
             not in ("0", "false", "no", "off")
@@ -922,7 +924,7 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         stub = inference_pb2_grpc.InferenceNodeStub(
             grpc.insecure_channel(daemon.address, options=config.GRPC_OPTIONS)
         )
-        fee = stub.GetFeeEstimate(
+        fee = stub.GetLoad(
             inference_pb2.FeeEstimateRequest(estimated_tokens=1),
             timeout=2,
         )
@@ -977,6 +979,8 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         """Handle a forward pass through the MPC layer (Node A only)."""
         session_id = request.session_id
 
+        with self._inference_lock:
+            self._active_inferences += 1
         try:
             if self.mpc.role != "A":
                 context.set_details("Only Node A accepts Forward requests")
@@ -1142,6 +1146,11 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 if request.response_keys:
                     next_request.response_keys.extend(
                         list(request.response_keys)[1:])
+                if request.he_output_enabled:
+                    next_request.he_output_enabled = True
+                    next_request.he_client_pubkey = request.he_client_pubkey
+                    next_request.he_key_id = request.he_key_id
+                    next_request.he_step = request.he_step
 
                 channel = create_resilient_channel(
                     next_address, config.GRPC_OPTIONS)
@@ -1180,6 +1189,23 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             context.set_details(str(e))
             context.set_code(grpc.StatusCode.INTERNAL)
             return inference_pb2.ForwardResponse()
+        finally:
+            with self._inference_lock:
+                self._active_inferences -= 1
+
+    def GetLoad(self, request, context):
+        """Expose local load telemetry for smart routing decisions."""
+        estimated_tokens = max(1, int(request.estimated_tokens or 1))
+        with self._inference_lock:
+            active = self._active_inferences
+        utilization = float(active)
+        base_fee = 0.001
+        return inference_pb2.FeeEstimateResponse(
+            base_fee=base_fee,
+            utilization=utilization,
+            estimated_cost=base_fee * estimated_tokens,
+            suggested_tip=0.0,
+        )
 
 
 # ---------------------------------------------------------------------------

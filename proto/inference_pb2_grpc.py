@@ -71,8 +71,8 @@ class InferenceNodeStub(object):
                 request_serializer=inference__pb2.SubscribeBlocksRequest.SerializeToString,
                 response_deserializer=inference__pb2.BlockMessage.FromString,
                 _registered_method=True)
-        self.GetFeeEstimate = channel.unary_unary(
-                '/unfed.InferenceNode/GetFeeEstimate',
+        self.GetLoad = channel.unary_unary(
+                '/unfed.InferenceNode/GetLoad',
                 request_serializer=inference__pb2.FeeEstimateRequest.SerializeToString,
                 response_deserializer=inference__pb2.FeeEstimateResponse.FromString,
                 _registered_method=True)
@@ -142,8 +142,8 @@ class InferenceNodeServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetFeeEstimate(self, request, context):
-        """Get the current fee estimate from the daemon's fee oracle.
+    def GetLoad(self, request, context):
+        """Get current node load/telemetry (used by smart routing and UI).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -194,8 +194,8 @@ def add_InferenceNodeServicer_to_server(servicer, server):
                     request_deserializer=inference__pb2.SubscribeBlocksRequest.FromString,
                     response_serializer=inference__pb2.BlockMessage.SerializeToString,
             ),
-            'GetFeeEstimate': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetFeeEstimate,
+            'GetLoad': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLoad,
                     request_deserializer=inference__pb2.FeeEstimateRequest.FromString,
                     response_serializer=inference__pb2.FeeEstimateResponse.SerializeToString,
             ),
@@ -406,7 +406,7 @@ class InferenceNode(object):
             _registered_method=True)
 
     @staticmethod
-    def GetFeeEstimate(request,
+    def GetLoad(request,
             target,
             options=(),
             channel_credentials=None,
@@ -419,7 +419,7 @@ class InferenceNode(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/unfed.InferenceNode/GetFeeEstimate',
+            '/unfed.InferenceNode/GetLoad',
             inference__pb2.FeeEstimateRequest.SerializeToString,
             inference__pb2.FeeEstimateResponse.FromString,
             options,

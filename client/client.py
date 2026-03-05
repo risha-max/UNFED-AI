@@ -46,6 +46,7 @@ from network.onion import (
     build_onion, public_key_from_bytes,
     generate_response_keys, decrypt_response_layers,
 )
+from network.he_output import generate_client_keypair, decrypt_token_artifact
 from network.voting import VotingCoordinator
 from network.racing import RacingCoordinator
 
@@ -113,6 +114,7 @@ class UnfedClient:
     def __init__(self, registry_address: str = None,
                  use_voting: bool = False, use_return_encryption: bool = False,
                  use_racing: bool = False, model_id: str = None,
+                 use_he_output: bool = False,
                  tls_ca: str = None):
         self.model_id = model_id or config.MODEL_NAME
         self.tokenizer = _get_tokenizer(self.model_id)
@@ -134,6 +136,7 @@ class UnfedClient:
         self.use_voting = use_voting
         self.use_return_encryption = use_return_encryption
         self.use_racing = use_racing
+        self.use_he_output = bool(use_he_output)
 
         # Voting coordinator
         self._voter = VotingCoordinator() if use_voting else None
@@ -145,6 +148,10 @@ class UnfedClient:
         self._prev_session_id: str = ""
         self._prev_token_ids: list[int] = []
         self._require_mpc = resolve_mpc_required_flag()
+
+    def _start_he_output_session(self) -> tuple[bytes, bytes, str]:
+        private_key, public_key = generate_client_keypair()
+        return private_key, public_key, uuid.uuid4().hex
 
     def count_text_input_tokens(self, prompt: str, model_id: str = None) -> int:
         """Return exact tokenizer count for text-only requests."""
@@ -279,7 +286,7 @@ class UnfedClient:
                 if daemon is None:
                     daemon = daemons[0]
                 stub = self._get_stub(daemon.address)
-                resp = stub.GetFeeEstimate(
+                resp = stub.GetLoad(
                     inference_pb2.FeeEstimateRequest(
                         estimated_tokens=estimated_tokens),
                     timeout=5,
@@ -302,7 +309,7 @@ class UnfedClient:
 
     def _daemon_utilization_probe(self, candidate) -> float:
         probe = self._get_stub(candidate.address)
-        fee = probe.GetFeeEstimate(
+        fee = probe.GetLoad(
             inference_pb2.FeeEstimateRequest(estimated_tokens=1),
             timeout=2,
         )
@@ -334,6 +341,8 @@ class UnfedClient:
             self._tip = tip
             yield from self._generate_racing(prompt, max_new_tokens, verbose)
             return
+        if self.use_he_output and self.use_return_encryption:
+            raise RuntimeError("HE output mode is incompatible with return-path encryption.")
 
         preflight = preflight_model_admission(
             self.discovery,
@@ -438,6 +447,11 @@ class UnfedClient:
         entry_stub = self._get_stub(entry_address)
         generated_tokens = list(input_ids)
         total_start = time.time()
+        he_private_key = b""
+        he_public_key = b""
+        he_key_id = ""
+        if self.use_he_output:
+            he_private_key, he_public_key, he_key_id = self._start_he_output_session()
 
         for step in range(max_new_tokens):
             step_start = time.time()
@@ -463,6 +477,11 @@ class UnfedClient:
                     tip=tip,
                     wire_dtype=_wire_dtype,
                 )
+            if self.use_he_output:
+                request.he_output_enabled = True
+                request.he_client_pubkey = he_public_key
+                request.he_key_id = he_key_id
+                request.he_step = step
 
             # Attach routing
             if routing_mode == "random":
@@ -514,6 +533,36 @@ class UnfedClient:
                 break
 
             step_time = time.time() - step_start
+
+            if self.use_he_output:
+                if response.he_error:
+                    raise RuntimeError(response.he_error)
+                if not response.he_ciphertext:
+                    raise RuntimeError("HE output mode enabled but server returned no HE artifact.")
+                if response.he_session_id and response.he_session_id != session_id:
+                    raise RuntimeError("HE artifact session mismatch.")
+                if int(response.he_step) != step:
+                    raise RuntimeError("HE artifact step mismatch.")
+                response_key_id = response.he_key_id or he_key_id
+                if response_key_id != he_key_id:
+                    raise RuntimeError("HE artifact key mismatch.")
+                token_id, is_eos = decrypt_token_artifact(
+                    client_private_key=he_private_key,
+                    sender_public_key=bytes(response.he_sender_pubkey),
+                    session_id=session_id,
+                    step=step,
+                    key_id=he_key_id,
+                    nonce=bytes(response.he_nonce),
+                    ciphertext=bytes(response.he_ciphertext),
+                )
+                generated_tokens.append(token_id)
+                token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
+                if verbose:
+                    print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} (he)")
+                yield token_text
+                if is_eos:
+                    break
+                continue
 
             # Decrypt return-path encryption if active
             if self.use_return_encryption and response.encrypted_response and response_key_list:
@@ -1498,6 +1547,8 @@ def main():
                         help="Enable redundant voting (double-check 1 random shard)")
     parser.add_argument("--use-return-encryption", action="store_true",
                         help="Enable return-path encryption")
+    parser.add_argument("--use-he-output", action="store_true",
+                        help="Enable HE-style output artifact mode")
     parser.add_argument("--racing", action="store_true",
                         help="Use per-shard racing for fault tolerance "
                              "(client-driven hop-by-hop with N replicas)")
@@ -1533,6 +1584,7 @@ def main():
         registry_address=args.registry,
         use_voting=args.use_voting,
         use_return_encryption=args.use_return_encryption,
+        use_he_output=args.use_he_output,
         tls_ca=args.tls_ca,
         use_racing=args.racing,
         model_id=model_id,

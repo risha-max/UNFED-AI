@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import config
 import registry_pb2
 import registry_pb2_grpc
+import inference_pb2
+import inference_pb2_grpc
 from network.share_auth import (
     generate_signing_keypair,
     key_file_paths,
@@ -37,6 +39,7 @@ class RegistryClient:
         self.registry_address = registry_address or config.REGISTRY_ADDRESS
         self._channel = grpc.insecure_channel(self.registry_address)
         self._stub = registry_pb2_grpc.RegistryStub(self._channel)
+        self._util_cache: dict[str, tuple[float, float]] = {}
 
     def register(self, node_id: str, address: str, model_id: str,
                  shard_index: int, layer_start: int, layer_end: int,
@@ -191,11 +194,11 @@ class RegistryClient:
                 print(f"[Discovery] Missing vision shard {i} — cannot build circuit")
                 return None
 
-        # Pick one random node per shard
+        # Pick one node per shard using least-utilized-first strategy.
         addresses = []
         public_keys = []
         for i in range(max_shard + 1):
-            chosen = random.choice(shard_map[i])
+            chosen = self._pick_best_node(shard_map[i])
             addresses.append(chosen.address)
             public_keys.append(bytes(chosen.public_key))
 
@@ -231,15 +234,61 @@ class RegistryClient:
                 print(f"[Discovery] Missing shard {i} — cannot build circuit")
                 return None
 
-        # Pick one random node per shard (this is where circuit randomization happens)
+        # Pick one node per shard using least-utilized-first strategy.
         addresses = []
         public_keys = []
         for i in range(max_shard + 1):
-            chosen = random.choice(shard_map[i])
+            chosen = self._pick_best_node(shard_map[i])
             addresses.append(chosen.address)
             public_keys.append(bytes(chosen.public_key))
 
         return addresses, public_keys
+
+    def _pick_best_node(self, candidates: list):
+        """Pick a node by lowest utilization with exploration."""
+        if not candidates:
+            raise ValueError("no candidates")
+        if len(candidates) == 1:
+            return candidates[0]
+
+        scored = []
+        for node in candidates:
+            util = self._probe_utilization(node.address)
+            scored.append((util, node))
+        scored.sort(key=lambda x: x[0])
+
+        # Prefer lower-utilization nodes, but keep small exploration for spread.
+        # Important: with only 2 candidates, pure top-2 random would ignore util.
+        top_k = min(3, len(scored))
+        top = scored[:top_k]
+        best_util = top[0][0]
+        weights = []
+        for util, _ in top:
+            delta = max(0.0, util - best_util)
+            # Lower util => larger weight. Keep a minimum for exploration.
+            weights.append(0.08 + (1.0 / (1.0 + (delta * 12.0))))
+        nodes = [node for _, node in top]
+        return random.choices(nodes, weights=weights, k=1)[0]
+
+    def _probe_utilization(self, address: str) -> float:
+        """Read node utilization from fee endpoint with short cache."""
+        now = time.time()
+        cached = self._util_cache.get(address)
+        if cached and (now - cached[0]) <= 2.0:
+            return cached[1]
+        try:
+            channel = grpc.insecure_channel(address, options=config.GRPC_OPTIONS)
+            stub = inference_pb2_grpc.InferenceNodeStub(channel)
+            fee = stub.GetLoad(
+                inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+                timeout=1.0,
+            )
+            channel.close()
+            util = float(getattr(fee, "utilization", 1.0))
+        except Exception:
+            util = 1.0
+        self._util_cache[address] = (now, util)
+        return util
 
     def build_racing_circuit(self, model_id: str,
                              replicas: int = 2) -> dict[int, list[tuple[str, bytes]]] | None:

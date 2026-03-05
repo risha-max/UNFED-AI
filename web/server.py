@@ -13,6 +13,7 @@ Usage:
 
 import asyncio
 import base64
+from functools import lru_cache
 import json
 import logging
 import os
@@ -31,6 +32,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, F
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from transformers import AutoConfig
 
 # Project root setup
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -70,6 +72,18 @@ _MAX_BILLING_OUTPUT_TOKENS = 50_000
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._/@:+-]{1,200}$")
 _ENDPOINT_RE = re.compile(r"^[A-Za-z0-9._-]+:\d{1,5}$")
+_DEV_AUTH_BYPASS = (
+    os.environ.get("UNFED_DEV_AUTH_BYPASS", "0").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+_HE_OUTPUT_ENABLED = (
+    os.environ.get("UNFED_HE_OUTPUT_ENABLED", "0").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+_HE_OUTPUT_STRICT = (
+    os.environ.get("UNFED_HE_OUTPUT_STRICT", "1").strip().lower()
+    not in ("0", "false", "no", "off")
+)
 _ALLOWED_CLUSTER_ENDPOINTS = {
     ep.strip()
     for ep in os.environ.get("UNFED_ALLOWED_CLUSTER_ENDPOINTS", "").split(",")
@@ -148,6 +162,35 @@ def _validate_selected_model(discovery: RegistryPool, model_id: str) -> str:
     if not preflight.ok:
         raise ValueError(preflight.message)
     return selected
+
+
+@lru_cache(maxsize=64)
+def _model_context_window(model_id: str) -> int:
+    """Best-effort context window lookup for a selected model."""
+    try:
+        cfg = AutoConfig.from_pretrained(model_id)
+        max_pos = int(getattr(cfg, "max_position_embeddings", 0) or 0)
+        if max_pos > 0:
+            return max_pos
+    except Exception:
+        pass
+    return int(getattr(app_config, "MAX_NEW_TOKENS", 100))
+
+
+def _resolve_max_new_tokens(
+    model_id: str,
+    input_tokens: int,
+    requested_max_tokens: Optional[int],
+) -> int:
+    """Resolve output budget with safe defaults bounded by model context."""
+    context_window = _model_context_window(model_id)
+    available_budget = max(1, context_window - max(0, int(input_tokens)))
+    if requested_max_tokens is not None and requested_max_tokens > 0:
+        return max(1, min(int(requested_max_tokens), available_budget))
+
+    # No UI token knob: use server default budget, but never exceed context.
+    default_budget = int(getattr(app_config, "MAX_NEW_TOKENS", 100) or 100)
+    return max(1, min(default_budget, available_budget))
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +554,7 @@ def _discover_daemon_with_utilization():
                 )
                 try:
                     stub = inference_pb2_grpc.InferenceNodeStub(ch)
-                    fee = stub.GetFeeEstimate(
+                    fee = stub.GetLoad(
                         inference_pb2.FeeEstimateRequest(estimated_tokens=1),
                         timeout=2,
                     )
@@ -685,7 +728,7 @@ async def chain_fees():
         )
         stub = inference_pb2_grpc.InferenceNodeStub(channel)
 
-        resp = stub.GetFeeEstimate(
+        resp = stub.GetLoad(
             inference_pb2.FeeEstimateRequest(estimated_tokens=100),
             timeout=5,
         )
@@ -829,11 +872,75 @@ async def get_client_balance(address: str = ""):
         }
 
 
+class ClientAuthVerifyRequest(BaseModel):
+    challenge: str
+    signature: str
+    address: str = ""
+
+
 @app.post("/api/client/auth")
 async def client_auth():
     """Get a challenge for wallet signature authentication."""
     challenge = _wallet_auth.generate_challenge()
     return {"challenge": challenge}
+
+
+@app.get("/api/client/auth/mode")
+async def client_auth_mode():
+    """Expose wallet auth mode to frontend (strict vs dev bypass)."""
+    return {
+        "dev_auth_bypass": _DEV_AUTH_BYPASS,
+    }
+
+
+@app.get("/api/security/modes")
+async def security_modes():
+    """Expose enabled security transport modes for frontend/backends."""
+    return {
+        "he_output_enabled": _HE_OUTPUT_ENABLED,
+        "he_output_strict": _HE_OUTPUT_STRICT,
+        "return_path_encryption_supported": True,
+    }
+
+
+@app.post("/api/client/auth/verify")
+async def client_auth_verify(body: ClientAuthVerifyRequest):
+    """Verify wallet signature and issue a short-lived session token."""
+    challenge = (body.challenge or "").strip()
+    signature = (body.signature or "").strip()
+    claimed = (body.address or "").strip()
+    if not challenge or not signature:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Missing challenge or signature."},
+        )
+
+    recovered = _wallet_auth.consume_signed_challenge(challenge, signature)
+    if not recovered:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid or expired wallet challenge/signature."},
+        )
+
+    try:
+        recovered_addr = _normalize_eth_address(recovered)
+        if claimed:
+            claimed_addr = _normalize_eth_address(claimed)
+            if claimed_addr != recovered_addr:
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Signed address does not match claimed wallet."},
+                )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    session_token = _wallet_auth.create_session(recovered_addr)
+    return {
+        "success": True,
+        "address": recovered_addr,
+        "session_token": session_token,
+        "expires_in_seconds": _wallet_auth.session_ttl_seconds,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -917,8 +1024,8 @@ async def ws_chat(websocket: WebSocket):
     WebSocket for streaming chat generation.
 
     Query params:
-        wallet: Ethereum address for escrow billing (optional).
-                If omitted, falls back to demo default address.
+        session: Wallet-auth session token from /api/client/auth/verify.
+        wallet: accepted only when UNFED_DEV_AUTH_BYPASS=1.
 
     Client sends:
         {
@@ -941,18 +1048,32 @@ async def ws_chat(websocket: WebSocket):
     """
     await websocket.accept()
 
-    # Resolve client wallet from query param or fall back to demo default.
-    wallet_param = websocket.query_params.get("wallet", "")
-    try:
-        if wallet_param:
+    if _DEV_AUTH_BYPASS:
+        wallet_param = (websocket.query_params.get("wallet", "") or "").strip()
+        if not wallet_param:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Dev bypass enabled: provide wallet query param.",
+            })
+            await websocket.close(code=1008)
+            return
+        try:
             client_address = _normalize_eth_address(wallet_param)
-        else:
-            client_address = _wallet_auth.authenticate(wallet_address="")
-            client_address = _normalize_eth_address(client_address)
-    except ValueError as exc:
-        await websocket.send_json({"type": "error", "message": str(exc)})
-        await websocket.close(code=1008)
-        return
+        except ValueError as exc:
+            await websocket.send_json({"type": "error", "message": str(exc)})
+            await websocket.close(code=1008)
+            return
+    else:
+        # Strict wallet auth: session token is required for chat websocket.
+        session_token = (websocket.query_params.get("session", "") or "").strip()
+        client_address = _wallet_auth.get_session_address(session_token)
+        if not client_address:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Wallet authentication required. Sign in and retry.",
+            })
+            await websocket.close(code=1008)
+            return
 
     # Notify the client which address is active for this session
     await websocket.send_json({
@@ -966,16 +1087,23 @@ async def ws_chat(websocket: WebSocket):
             prompt = data.get("prompt", "")
             image_path = data.get("image_path")
             model_type = data.get("model_type", "qwen2")
-            max_tokens = data.get("max_tokens", 100)
+            max_tokens_raw = data.get("max_tokens")
+            try:
+                max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else None
+            except (TypeError, ValueError):
+                max_tokens = None
             use_voting = data.get("use_voting", False)
             model_id = data.get("model_id", "")
             cluster_endpoint = data.get("cluster_endpoint", "")
+            he_output_requested = bool(data.get("he_output", False))
+            he_output_enabled = _HE_OUTPUT_ENABLED or he_output_requested
 
             await _run_generation(
                 websocket, prompt, image_path, model_type,
                 max_tokens, use_voting, model_id,
                 cluster_endpoint=cluster_endpoint,
                 client_address=client_address,
+                he_output_enabled=he_output_enabled,
             )
 
     except WebSocketDisconnect:
@@ -992,11 +1120,12 @@ async def _run_generation(
     prompt: str,
     image_path: Optional[str],
     model_type: str,
-    max_tokens: int,
+    max_tokens: Optional[int],
     use_voting: bool,
     model_id: str,
     cluster_endpoint: str = "",
     client_address: str = "",
+    he_output_enabled: bool = False,
 ):
     """Run generation and stream results to the WebSocket."""
     from client.client import UnfedClient
@@ -1006,9 +1135,12 @@ async def _run_generation(
         "message": f"Initializing client ({model_type})..."
     })
 
-    # Fall back to demo address if none provided (shouldn't happen — ws_chat resolves it)
     if not client_address:
-        client_address = _wallet_auth.default_address
+        await websocket.send_json({
+            "type": "error",
+            "message": "Wallet session missing for this request.",
+        })
+        return
 
     try:
         # --- Client deposit balance check ---
@@ -1057,7 +1189,13 @@ async def _run_generation(
             registry_address=registry_addr,
             use_voting=use_voting,
             model_id=model_id,
+            use_he_output=he_output_enabled,
         )
+        if he_output_enabled:
+            await websocket.send_json({
+                "type": "status",
+                "message": "HE output artifact mode enabled.",
+            })
 
         # For image-based multimodal requests, enforce a deterministic default
         # prompt before token accounting and generation.
@@ -1140,12 +1278,20 @@ async def _run_generation(
             input_tokens, model_type, model_id
         )
 
+        effective_max_tokens = _resolve_max_new_tokens(
+            model_id=model_id,
+            input_tokens=input_tokens,
+            requested_max_tokens=max_tokens,
+        )
+
         # Send circuit info to frontend
         circuit_msg = {
             "type": "circuit",
             "text_nodes": [],
             "vision_nodes": [],
         }
+        text_hop_addresses: list[str] = []
+        vision_hop_addresses: list[str] = []
 
         # Check for MPC nodes — use them for shard 0 if available
         mpc_nodes = discovery.discover_mpc(model_id)
@@ -1153,6 +1299,7 @@ async def _run_generation(
 
         if text_circuit:
             addrs, pks = text_circuit
+            text_hop_addresses = list(addrs)
             # Get full node info for each address
             all_nodes = discovery.discover("")
             node_map = {n.address: n for n in all_nodes}
@@ -1161,6 +1308,7 @@ async def _run_generation(
             if using_mpc:
                 mpc_entry = mpc_nodes[0]
                 addrs[0] = mpc_entry.address
+                text_hop_addresses[0] = mpc_entry.address
                 node_map[mpc_entry.address] = mpc_entry
 
                 # Discover the MPC peer (Node B) — convention: port - 1
@@ -1195,6 +1343,7 @@ async def _run_generation(
 
         if vision_circuit:
             addrs, pks = vision_circuit
+            vision_hop_addresses = list(addrs)
             all_nodes = discovery.discover("")
             node_map = {n.address: n for n in all_nodes}
             for i, addr in enumerate(addrs):
@@ -1206,6 +1355,25 @@ async def _run_generation(
                 })
 
         await websocket.send_json(circuit_msg)
+
+        # Emit live hop events so UI can animate actual selected route.
+        for i, addr in enumerate(vision_hop_addresses):
+            await websocket.send_json({
+                "type": "hop",
+                "phase": "vision",
+                "shard_index": i,
+                "address": addr,
+            })
+            await asyncio.sleep(0)
+
+        for i, addr in enumerate(text_hop_addresses):
+            await websocket.send_json({
+                "type": "hop",
+                "phase": "text",
+                "shard_index": i,
+                "address": addr,
+            })
+            await asyncio.sleep(0)
 
         # Run generation
         gen_start = time.time()
@@ -1222,7 +1390,7 @@ async def _run_generation(
                 generator = client.generate_multimodal_smolvlm(
                     prompt=prompt,
                     image_path=image_path,
-                    max_new_tokens=max_tokens,
+                    max_new_tokens=effective_max_tokens,
                     verbose=False,
                     model_id=model_id,
                 )
@@ -1230,7 +1398,7 @@ async def _run_generation(
                 generator = client.generate_multimodal(
                     prompt=prompt,
                     image_path=image_path,
-                    max_new_tokens=max_tokens,
+                    max_new_tokens=effective_max_tokens,
                     verbose=False,
                     model_id=model_id,
                 )
@@ -1238,7 +1406,7 @@ async def _run_generation(
             # Text-only generation
             generator = client.generate(
                 prompt=prompt,
-                max_new_tokens=max_tokens,
+                max_new_tokens=effective_max_tokens,
                 verbose=False,
             )
 

@@ -25,7 +25,7 @@ Usage:
 import hashlib
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -46,6 +46,7 @@ class AuthSession:
     api_key: str = ""
     authenticated_at: float = 0.0
     last_activity: float = 0.0
+    expires_at: float = 0.0
 
 
 class WalletAuth:
@@ -64,6 +65,14 @@ class WalletAuth:
         }
         # Active sessions (session_id -> AuthSession)
         self._sessions: dict[str, AuthSession] = {}
+        # Single-use auth challenges (challenge -> expiry epoch seconds)
+        self._challenges: dict[str, float] = {}
+        self._challenge_ttl_seconds = int(
+            os.environ.get("UNFED_AUTH_CHALLENGE_TTL_SECONDS", "300")
+        )
+        self._session_ttl_seconds = int(
+            os.environ.get("UNFED_AUTH_SESSION_TTL_SECONDS", "86400")
+        )
 
     def register_api_key(self, api_key: str, address: str):
         """Register an API key -> address mapping."""
@@ -94,16 +103,18 @@ class WalletAuth:
     def create_session(self, client_address: str,
                        api_key: str = "") -> str:
         """Create an authenticated session.  Returns session ID."""
+        now = time.time()
         session_id = hashlib.sha256(
-            f"{client_address}:{time.time()}:{os.urandom(16).hex()}"
+            f"{client_address}:{now}:{os.urandom(16).hex()}"
             .encode()
         ).hexdigest()[:32]
 
         self._sessions[session_id] = AuthSession(
             client_address=client_address,
             api_key=api_key,
-            authenticated_at=time.time(),
-            last_activity=time.time(),
+            authenticated_at=now,
+            last_activity=now,
+            expires_at=now + max(60, self._session_ttl_seconds),
         )
         return session_id
 
@@ -111,6 +122,10 @@ class WalletAuth:
         """Get the address for an active session."""
         session = self._sessions.get(session_id)
         if session:
+            now = time.time()
+            if session.expires_at <= now:
+                self._sessions.pop(session_id, None)
+                return None
             session.last_activity = time.time()
             return session.client_address
         return None
@@ -120,10 +135,14 @@ class WalletAuth:
         return self._default_address
 
     def generate_challenge(self) -> str:
-        """Generate a challenge string for wallet signature auth."""
+        """Generate and persist a single-use challenge string."""
+        now = int(time.time())
         nonce = os.urandom(16).hex()
-        timestamp = int(time.time())
-        return f"UNFED-AUTH:{timestamp}:{nonce}"
+        challenge = f"UNFED-AUTH:{now}:{nonce}"
+        self._challenges[challenge] = (
+            float(now) + max(30, self._challenge_ttl_seconds)
+        )
+        return challenge
 
     def verify_signature(self, challenge: str,
                          signature: str) -> Optional[str]:
@@ -142,3 +161,15 @@ class WalletAuth:
             return address
         except Exception:
             return None
+
+    def consume_signed_challenge(self, challenge: str,
+                                 signature: str) -> Optional[str]:
+        """Verify a signed challenge and consume it (single-use)."""
+        expires_at = self._challenges.pop(challenge, 0.0)
+        if expires_at <= time.time():
+            return None
+        return self.verify_signature(challenge, signature)
+
+    @property
+    def session_ttl_seconds(self) -> int:
+        return self._session_ttl_seconds

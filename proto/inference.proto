@@ -33,8 +33,8 @@ service InferenceNode {
   // Returns historical blocks from from_height, then keeps streaming new ones.
   rpc SubscribeBlocks(SubscribeBlocksRequest) returns (stream BlockMessage);
 
-  // Get the current fee estimate from the daemon's fee oracle.
-  rpc GetFeeEstimate(FeeEstimateRequest) returns (FeeEstimateResponse);
+  // Get current node load/telemetry (used by smart routing and UI).
+  rpc GetLoad(FeeEstimateRequest) returns (FeeEstimateResponse);
 
   // Capacity verification: registry challenges node to prove reported resources.
   rpc VerifyCapacity(VerifyCapacityRequest) returns (VerifyCapacityResponse);
@@ -128,6 +128,22 @@ message ForwardRequest {
   // Wire dtype for activation serialization: "float16" halves transfer size.
   // Empty or "float32" = default full precision.
   string wire_dtype = 23;
+
+  // --- HE output protection fields ---
+  // When enabled, last-hop nodes should return encrypted token artifacts
+  // instead of plaintext token_id/has_token/is_eos.
+  bool he_output_enabled = 24;
+
+  // Client ephemeral public key (X25519, 32 bytes) used to derive a
+  // per-session shared key for output artifact encryption.
+  bytes he_client_pubkey = 25;
+
+  // Session-scoped key identifier chosen by the caller for anti-downgrade
+  // and key-mismatch checks.
+  string he_key_id = 26;
+
+  // Monotonic decode step expected by the caller (0-based).
+  int32 he_step = 27;
 }
 
 message ForwardResponse {
@@ -159,6 +175,28 @@ message ForwardResponse {
 
   // If true, activation_data is gzip-compressed (application-level).
   bool compressed = 8;
+
+  // --- HE output artifact fields ---
+  // Encrypted token payload for HE output mode.
+  bytes he_ciphertext = 9;
+
+  // Nonce used for AEAD encryption of he_ciphertext.
+  bytes he_nonce = 10;
+
+  // Algorithm identifier for he_ciphertext.
+  string he_algo = 11;
+
+  // Session and step binding metadata for replay/substitution protection.
+  string he_session_id = 12;
+  int32 he_step = 13;
+  string he_key_id = 14;
+
+  // Sender ephemeral public key (X25519, 32 bytes) used by the client to
+  // derive the shared key for decryption.
+  bytes he_sender_pubkey = 15;
+
+  // Optional error message specific to HE artifact mode.
+  string he_error = 16;
 }
 
 // --- Shard Transfer (P2P weight distribution) ---

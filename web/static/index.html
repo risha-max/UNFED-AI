@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>UNFED AI Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/style.css?v=11">
 </head>
 <body>
     <!-- Top bar -->
@@ -75,12 +75,13 @@
                 <div class="setting-group">
                     <label>Wallet</label>
                     <input type="text" id="walletAddress"
-                           placeholder="0x... (leave empty for demo)"
+                           placeholder="0x..."
                            spellcheck="false" autocomplete="off">
                     <p class="setting-hint" id="walletHint">
-                        Your Ethereum address for escrow billing.
-                        Each wallet has its own deposit balance.
+                        Sign in with a wallet signature before chat.
                     </p>
+                    <button class="faucet-btn" id="walletAuthBtn"
+                            title="Sign wallet challenge">&#128273; Sign In Wallet</button>
                     <button class="faucet-btn" id="faucetBtn"
                             title="Request free test tokens">&#128167; Get Test Tokens</button>
                     <p class="setting-hint" id="faucetStatus"></p>
@@ -97,8 +98,11 @@
                 </div>
 
                 <div class="setting-group">
-                    <label>Max tokens</label>
-                    <input type="number" id="maxTokens" value="100" min="1" max="1000">
+                    <label>Generation limit</label>
+                    <input type="number" id="maxTokens" min="1" step="1" value="100" placeholder="100">
+                    <p class="setting-hint">
+                        Maximum output tokens per reply. Leave at default for normal chat.
+                    </p>
                 </div>
 
                 <div class="setting-group">
@@ -180,150 +184,151 @@
     <!-- Tab 3: Chain -->
     <!-- ================================================================ -->
     <main class="tab-content" id="tab-chain">
-        <!-- Explainer banner -->
-        <div class="chain-explainer">
-            <div class="chain-explainer-icon">&#9939;</div>
-            <div class="chain-explainer-text">
-                <h3>Mini-Chain &mdash; Compute Ledger</h3>
-                <p>
-                    Every time a node computes a shard (embedding, transformer layer, etc.),
-                    it records a <strong>compute share</strong> &mdash; cryptographic proof
-                    that real work was done. Shares are bundled into <strong>blocks</strong>
-                    and gossiped across the network, forming a lightweight side-chain
-                    (similar to Monero's P2Pool share-chain).
-                </p>
-                <p>
-                    Blocks are only created when actual inference happens &mdash; no empty blocks.
-                    After every <strong>6 blocks</strong>, a <strong>settlement</strong> tallies
-                    each node's contributions for fair reward distribution.
-                    MPC nodes record <strong>two shares per computation</strong> (one for each
-                    party in the secret-sharing pair).
-                </p>
-            </div>
-        </div>
-
-        <div class="chain-layout">
-            <!-- Block list -->
-            <div class="blocks-panel">
-                <div class="blocks-header">
-                    <h3>Block Explorer</h3>
-                    <button class="refresh-btn" id="refreshChainBtn">Refresh</button>
+        <div class="chain-explorer-shell">
+            <div class="chain-explorer-head">
+                <div>
+                    <h3>Sharechain Explorer</h3>
+                    <p class="chain-card-hint">Etherscan-style view of blocks, shares, and settlement activity.</p>
                 </div>
-                <p class="blocks-subtitle">
-                    Each node proposes blocks containing its own compute shares
-                    (like a miner's coinbase). Different blocks come from different
-                    nodes &mdash; the full contribution picture is in the sidebar.
-                    Click a block to expand.
-                </p>
-                <div class="blocks-list" id="blocksList">
-                    <p class="blocks-empty">Loading chain...</p>
+                <button class="refresh-btn" id="refreshChainBtn">Refresh</button>
+            </div>
+
+            <div class="explorer-summary-row">
+                <div class="explorer-summary-card">
+                    <span class="summary-label">Height</span>
+                    <span class="summary-value" id="chainHeight">—</span>
+                </div>
+                <div class="explorer-summary-card">
+                    <span class="summary-label">Total Shares</span>
+                    <span class="summary-value" id="chainShares">—</span>
+                </div>
+                <div class="explorer-summary-card">
+                    <span class="summary-label">Settlements</span>
+                    <span class="summary-value" id="chainSettlements">—</span>
+                </div>
+                <div class="explorer-summary-card summary-hash">
+                    <span class="summary-label">Latest Hash</span>
+                    <span class="summary-value mono" id="chainLatestHash">—</span>
                 </div>
             </div>
 
-            <!-- Stats sidebar -->
-            <aside class="chain-sidebar">
-                <div class="chain-stats-card">
-                    <h3>Chain Stats</h3>
-                    <p class="chain-card-hint">
-                        Live metrics from the distributed ledger.
-                    </p>
-                    <div class="chain-stats-grid" id="chainStats">
-                        <div class="stat">
-                            <span class="stat-label">Height</span>
-                            <span class="stat-value" id="chainHeight">—</span>
-                            <span class="stat-hint">Blocks since genesis</span>
-                        </div>
-                        <div class="stat">
-                            <span class="stat-label">Total shares</span>
-                            <span class="stat-value" id="chainShares">—</span>
-                            <span class="stat-hint">Compute units recorded</span>
-                        </div>
-                        <div class="stat">
-                            <span class="stat-label">Settlements</span>
-                            <span class="stat-value" id="chainSettlements">—</span>
-                            <span class="stat-hint">Payout cycles completed</span>
-                        </div>
-                        <div class="stat">
-                            <span class="stat-label">Latest hash</span>
-                            <span class="stat-value mono" id="chainLatestHash">—</span>
-                            <span class="stat-hint">SHA-256 of the tip block</span>
-                        </div>
+            <div class="chain-subnav" id="chainSubnav">
+                <button class="tab-btn active" data-chain-view="blocks" type="button">Blocks</button>
+                <button class="tab-btn" data-chain-view="fees" type="button">Fee Market</button>
+                <button class="tab-btn" data-chain-view="contributions" type="button">Contributions</button>
+                <button class="tab-btn" data-chain-view="settlements" type="button">Settlements</button>
+            </div>
+
+            <section class="chain-view active" id="chainViewBlocks">
+                <div class="explorer-toolbar">
+                    <input type="text" id="chainSearch" class="explorer-search-input" placeholder="Search block #, hash, session id, or node...">
+                    <div class="explorer-pagination">
+                        <button class="refresh-btn" id="chainPageNewest" type="button">Newest</button>
+                        <button class="refresh-btn" id="chainPageNewer" type="button">Newer</button>
+                        <span class="explorer-page-info" id="chainPageInfo">Page 1 / 1</span>
+                        <button class="refresh-btn" id="chainPageOlder" type="button">Older</button>
+                        <button class="refresh-btn" id="chainPageOldest" type="button">Oldest</button>
                     </div>
                 </div>
 
+                <div class="explorer-table-wrap">
+                    <table class="explorer-table">
+                        <thead>
+                            <tr>
+                                <th>Block</th>
+                                <th>Age</th>
+                                <th>Block Hash</th>
+                                <th>Proposer</th>
+                                <th>Shares</th>
+                                <th>Sessions</th>
+                                <th>Shards</th>
+                            </tr>
+                        </thead>
+                        <tbody id="blocksList">
+                            <tr><td colspan="7" class="blocks-empty">Loading chain...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="chain-view" id="chainViewFees">
                 <div class="chain-stats-card fee-market-card">
-                    <h3>Fee Market <span class="badge badge-eip1559">EIP-1559</span></h3>
-                    <p class="chain-card-hint">
-                        Dynamic pricing based on network utilization. The base fee adjusts
-                        automatically &mdash; up when the network is busy, down when idle.
-                        Clients can add a priority tip to be served first.
-                    </p>
-                    <div class="fee-stats-grid" id="feeStats">
-                        <div class="fee-stat">
-                            <span class="fee-stat-label">Base Fee</span>
-                            <span class="fee-stat-value" id="feeBaseFee">&mdash;</span>
-                            <span class="fee-stat-unit">per token</span>
-                        </div>
-                        <div class="fee-stat">
-                            <span class="fee-stat-label">Utilization</span>
-                            <div class="utilization-gauge" id="feeUtilGauge">
-                                <div class="utilization-fill" id="feeUtilFill" style="width:0%"></div>
+                        <h3>Fee Market <span class="badge badge-eip1559">EIP-1559</span></h3>
+                        <p class="chain-card-hint">
+                            Dynamic pricing based on network utilization. The base fee adjusts
+                            automatically &mdash; up when the network is busy, down when idle.
+                            Clients can add a priority tip to be served first.
+                        </p>
+                        <div class="fee-stats-grid" id="feeStats">
+                            <div class="fee-stat">
+                                <span class="fee-stat-label">Base Fee</span>
+                                <span class="fee-stat-value" id="feeBaseFee">&mdash;</span>
+                                <span class="fee-stat-unit">per token</span>
                             </div>
-                            <span class="fee-stat-value-sm" id="feeUtilPct">0%</span>
+                            <div class="fee-stat">
+                                <span class="fee-stat-label">Utilization</span>
+                                <div class="utilization-gauge" id="feeUtilGauge">
+                                    <div class="utilization-fill" id="feeUtilFill" style="width:0%"></div>
+                                </div>
+                                <span class="fee-stat-value-sm" id="feeUtilPct">0%</span>
+                            </div>
+                            <div class="fee-stat">
+                                <span class="fee-stat-label">Est. Cost (100 tok)</span>
+                                <span class="fee-stat-value" id="feeEstCost">&mdash;</span>
+                            </div>
+                            <div class="fee-stat">
+                                <span class="fee-stat-label">Suggested Tip</span>
+                                <span class="fee-stat-value" id="feeSugTip">&mdash;</span>
+                            </div>
                         </div>
-                        <div class="fee-stat">
-                            <span class="fee-stat-label">Est. Cost (100 tok)</span>
-                            <span class="fee-stat-value" id="feeEstCost">&mdash;</span>
-                        </div>
-                        <div class="fee-stat">
-                            <span class="fee-stat-label">Suggested Tip</span>
-                            <span class="fee-stat-value" id="feeSugTip">&mdash;</span>
+                        <div class="fee-roles">
+                            <div class="fee-role">
+                                <span class="fee-role-icon">&#9881;</span>
+                                <span class="fee-role-label">Compute/MPC</span>
+                                <span class="fee-role-weight">1.0x share</span>
+                            </div>
+                            <div class="fee-role">
+                                <span class="fee-role-icon">&#9878;</span>
+                                <span class="fee-role-label">Daemon</span>
+                                <span class="fee-role-weight">unpaid infra</span>
+                            </div>
                         </div>
                     </div>
-                    <div class="fee-roles">
-                        <div class="fee-role">
-                            <span class="fee-role-icon">&#9881;</span>
-                            <span class="fee-role-label">Compute/MPC</span>
-                            <span class="fee-role-weight">1.0x share</span>
-                        </div>
-                        <div class="fee-role">
-                            <span class="fee-role-icon">&#9878;</span>
-                            <span class="fee-role-label">Daemon</span>
-                            <span class="fee-role-weight">unpaid infra</span>
-                        </div>
-                    </div>
-                </div>
+            </section>
 
+            <section class="chain-view" id="chainViewContributions">
                 <div class="chain-stats-card">
                     <h3>Node Contributions</h3>
                     <p class="chain-card-hint">
-                        How much work each node has done (weighted). Compute/MPC shares
-                        count as 1.0. MPC pairs each get credit for shared computation.
+                        Weighted compute shares by node across the observed chain.
                     </p>
                     <div class="contributions-chart" id="contributionsChart">
                         <p class="chart-empty">No contributions yet &mdash; send a query to generate compute shares.</p>
                     </div>
                 </div>
+            </section>
 
+            <section class="chain-view" id="chainViewSettlements">
                 <div class="chain-stats-card">
                     <h3>Settlements</h3>
                     <p class="chain-card-hint">
-                        Every 6 blocks, the chain produces a settlement that
-                        tallies shares per node &mdash; like a mining pool payout round.
-                        This determines who gets rewarded and how much.
+                        Payout windows produced every 6 blocks.
                     </p>
+                    <div class="infra-payout-summary" id="infraPayoutSummary">
+                        <p class="settlements-empty">Loading infra payout recipients...</p>
+                    </div>
                     <div class="settlements-list" id="settlementsList">
                         <p class="settlements-empty">No settlements yet &mdash; need at least 6 blocks of compute activity.</p>
                     </div>
                 </div>
-            </aside>
+            </section>
         </div>
     </main>
 
     <!-- Scripts -->
-    <script src="/static/app.js"></script>
-    <script src="/static/chat.js"></script>
-    <script src="/static/network.js"></script>
-    <script src="/static/chain.js"></script>
+    <script src="/static/app.js?v=11"></script>
+    <script src="/static/chat.js?v=11"></script>
+    <script src="/static/network.js?v=11"></script>
+    <script src="/static/chain.js?v=11"></script>
 </body>
 </html>

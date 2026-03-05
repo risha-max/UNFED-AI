@@ -81,6 +81,7 @@ const Network = {
             const flags = [];
             if (node.has_embedding) flags.push('embed');
             if (node.has_lm_head) flags.push('lm_head');
+            if (node.node_type === 'verifier') flags.push('registry-coordinated');
 
             card.innerHTML = `
                 <div class="node-card-header">

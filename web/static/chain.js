@@ -5,24 +5,84 @@
 const Chain = {
     blocksList: null,
     refreshBtn: null,
+    searchInput: null,
+    pageNewestBtn: null,
+    pageNewerBtn: null,
+    pageOlderBtn: null,
+    pageOldestBtn: null,
+    pageInfoEl: null,
+    subnavEl: null,
+    viewButtons: [],
+    views: {},
     chainHeight: null,
     chainShares: null,
     chainSettlements: null,
     chainLatestHash: null,
     contributionsChart: null,
     settlementsList: null,
+    infraPayoutSummary: null,
+    allBlocks: [],
+    pageSize: 50,
+    currentPage: 0,  // 0 = newest page
+    totalPages: 1,
+    totalBlocks: 0,
 
     init() {
         this.blocksList = document.getElementById('blocksList');
         this.refreshBtn = document.getElementById('refreshChainBtn');
+        this.searchInput = document.getElementById('chainSearch');
+        this.pageNewestBtn = document.getElementById('chainPageNewest');
+        this.pageNewerBtn = document.getElementById('chainPageNewer');
+        this.pageOlderBtn = document.getElementById('chainPageOlder');
+        this.pageOldestBtn = document.getElementById('chainPageOldest');
+        this.pageInfoEl = document.getElementById('chainPageInfo');
+        this.subnavEl = document.getElementById('chainSubnav');
+        this.viewButtons = Array.from(document.querySelectorAll('[data-chain-view]'));
+        this.views = {
+            blocks: document.getElementById('chainViewBlocks'),
+            fees: document.getElementById('chainViewFees'),
+            contributions: document.getElementById('chainViewContributions'),
+            settlements: document.getElementById('chainViewSettlements'),
+        };
         this.chainHeight = document.getElementById('chainHeight');
         this.chainShares = document.getElementById('chainShares');
         this.chainSettlements = document.getElementById('chainSettlements');
         this.chainLatestHash = document.getElementById('chainLatestHash');
         this.contributionsChart = document.getElementById('contributionsChart');
         this.settlementsList = document.getElementById('settlementsList');
+        this.infraPayoutSummary = document.getElementById('infraPayoutSummary');
 
         this.refreshBtn.addEventListener('click', () => this.loadAll());
+        if (this.searchInput) {
+            this.searchInput.addEventListener('input', () => this.renderBlocks(this.allBlocks));
+        }
+        this.viewButtons.forEach((btn) => {
+            btn.addEventListener('click', () => this.setView(btn.dataset.chainView || 'blocks'));
+        });
+        if (this.pageNewestBtn) {
+            this.pageNewestBtn.addEventListener('click', () => {
+                this.currentPage = 0;
+                this.loadBlocks();
+            });
+        }
+        if (this.pageNewerBtn) {
+            this.pageNewerBtn.addEventListener('click', () => {
+                this.currentPage = Math.max(0, this.currentPage - 1);
+                this.loadBlocks();
+            });
+        }
+        if (this.pageOlderBtn) {
+            this.pageOlderBtn.addEventListener('click', () => {
+                this.currentPage = Math.min(this.totalPages - 1, this.currentPage + 1);
+                this.loadBlocks();
+            });
+        }
+        if (this.pageOldestBtn) {
+            this.pageOldestBtn.addEventListener('click', () => {
+                this.currentPage = Math.max(0, this.totalPages - 1);
+                this.loadBlocks();
+            });
+        }
 
         // Chain WebSocket updates
         App.on('chainMessage', (msg) => this.onChainMessage(msg));
@@ -31,7 +91,18 @@ const Chain = {
         });
 
         // Initial load
+        this.setView('blocks');
         this.loadAll();
+    },
+
+    setView(view) {
+        this.viewButtons.forEach((btn) => {
+            btn.classList.toggle('active', (btn.dataset.chainView || '') === view);
+        });
+        Object.entries(this.views).forEach(([key, el]) => {
+            if (!el) return;
+            el.classList.toggle('active', key === view);
+        });
     },
 
     async loadAll() {
@@ -41,6 +112,7 @@ const Chain = {
             this.loadNodeTotals(),
             this.loadSettlements(),
             this.loadFees(),
+            this.loadInfraPayouts(),
         ]);
     },
 
@@ -55,9 +127,24 @@ const Chain = {
     },
 
     async loadBlocks() {
-        const data = await App.fetchJson('/api/chain/blocks?start=0&limit=50');
+        // Paginate across the entire chain, newest page first.
+        const info = await App.fetchJson('/api/chain/info');
+        const height = Number(info?.height || 0);
+        this.totalBlocks = Math.max(0, height + 1);
+        this.totalPages = Math.max(1, Math.ceil(this.totalBlocks / this.pageSize));
+        if (this.currentPage > this.totalPages - 1) {
+            this.currentPage = this.totalPages - 1;
+        }
+
+        const endExclusive = Math.max(0, this.totalBlocks - (this.currentPage * this.pageSize));
+        const start = Math.max(0, endExclusive - this.pageSize);
+        const limit = Math.max(0, endExclusive - start);
+        const data = await App.fetchJson(`/api/chain/blocks?start=${start}&limit=${limit}`);
         if (data && data.blocks) {
-            this.renderBlocks(data.blocks);
+            // API returns oldest->newest, we display newest first.
+            this.allBlocks = [...data.blocks].reverse();
+            this.renderBlocks(this.allBlocks);
+            this.updatePaginationUi();
         }
     },
 
@@ -72,6 +159,13 @@ const Chain = {
         const data = await App.fetchJson('/api/chain/settlements');
         if (data && data.settlements) {
             this.renderSettlements(data.settlements);
+        }
+    },
+
+    async loadInfraPayouts() {
+        const data = await App.fetchJson('/api/network/health');
+        if (data) {
+            this.renderInfraPayouts(data);
         }
     },
 
@@ -132,116 +226,149 @@ const Chain = {
         }
 
         if (msg.type === 'new_block' && msg.block) {
-            this.prependBlock(msg.block);
+            if (this.currentPage === 0) {
+                this.prependBlock(msg.block);
+            }
+            // Keep pagination/height accurate on any page.
+            this.loadInfo().then(() => this.updatePaginationUi());
         }
     },
 
-    // ---- Blocks list ----
+    // ---- Blocks table ----
     renderBlocks(blocks) {
-        if (!blocks || blocks.length === 0) {
-            this.blocksList.innerHTML = '<p class="blocks-empty">No blocks yet. Send a query through the Chat tab to trigger inference &mdash; each shard computation produces a compute share, and shares are bundled into blocks.</p>';
+        const searchTerm = (this.searchInput?.value || '').trim().toLowerCase();
+        const source = blocks || [];
+        const filtered = source.filter((block) => this.matchesSearch(block, searchTerm));
+
+        if (!filtered.length) {
+            const emptyText = searchTerm
+                ? 'No blocks match your search.'
+                : 'No blocks yet. Send a query through the Chat tab to generate compute shares.';
+            this.blocksList.innerHTML = `<tr><td colspan="7" class="blocks-empty">${emptyText}</td></tr>`;
             return;
         }
 
         this.blocksList.innerHTML = '';
-        // Show newest first
-        const reversed = [...blocks].reverse();
-        reversed.forEach(block => {
-            this.blocksList.appendChild(this.makeBlockCard(block));
+        filtered.forEach((block) => {
+            const { row, detailsRow } = this.makeBlockRows(block);
+            this.blocksList.appendChild(row);
+            this.blocksList.appendChild(detailsRow);
         });
     },
 
     prependBlock(block) {
-        const empty = this.blocksList.querySelector('.blocks-empty');
-        if (empty) empty.remove();
-
-        const card = this.makeBlockCard(block);
-        card.style.animation = 'fadeIn 0.3s ease';
-        this.blocksList.prepend(card);
+        this.allBlocks = [block, ...this.allBlocks];
+        if (this.allBlocks.length > this.pageSize) {
+            this.allBlocks = this.allBlocks.slice(0, this.pageSize);
+        }
+        this.renderBlocks(this.allBlocks);
     },
 
-    makeBlockCard(block) {
-        const card = document.createElement('div');
-        card.className = 'block-card';
-        if (block.index === 0) card.classList.add('genesis');
+    updatePaginationUi() {
+        if (this.pageInfoEl) {
+            this.pageInfoEl.textContent = `Page ${this.currentPage + 1} / ${this.totalPages}`;
+        }
+        if (this.pageNewestBtn) this.pageNewestBtn.disabled = this.currentPage === 0;
+        if (this.pageNewerBtn) this.pageNewerBtn.disabled = this.currentPage === 0;
+        if (this.pageOlderBtn) this.pageOlderBtn.disabled = this.currentPage >= this.totalPages - 1;
+        if (this.pageOldestBtn) this.pageOldestBtn.disabled = this.currentPage >= this.totalPages - 1;
+    },
+
+    matchesSearch(block, searchTerm) {
+        if (!searchTerm) return true;
+        const flat = [
+            String(block.index ?? ''),
+            String(block.block_hash ?? ''),
+            String(block.previous_hash ?? ''),
+            ...(block.shares || []).map((s) => `${s.node_id || ''} ${s.session_id || ''} ${s.activation_hash || ''}`),
+        ].join(' ').toLowerCase();
+        return flat.includes(searchTerm);
+    },
+
+    formatAge(timestamp) {
+        if (!timestamp) return '—';
+        const sec = Math.max(0, Math.floor(Date.now() / 1000 - timestamp));
+        if (sec < 60) return `${sec}s`;
+        if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+        if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+        return `${Math.floor(sec / 86400)}d`;
+    },
+
+    makeBlockRows(block) {
+        const row = document.createElement('tr');
+        row.className = 'explorer-row';
+        if (block.index === 0) row.classList.add('is-genesis');
+
+        const detailsRow = document.createElement('tr');
+        detailsRow.className = 'explorer-row-details';
+        detailsRow.hidden = true;
 
         const sharesCount = block.shares ? block.shares.length : 0;
-        const timeStr = block.timestamp ? App.formatTime(block.timestamp) : '—';
+        const age = this.formatAge(block.timestamp);
         const isGenesis = block.index === 0;
 
-        // Compute unique nodes and sessions in this block
         const uniqueNodes = new Set();
         const uniqueSessions = new Set();
         (block.shares || []).forEach(s => {
             if (s.node_id) uniqueNodes.add(s.node_id);
             if (s.session_id) uniqueSessions.add(s.session_id);
         });
-
-        // Identify the proposer (the node whose shares are in this block)
         const proposer = uniqueNodes.size === 1 ? [...uniqueNodes][0] : null;
-        const proposerLabel = proposer
-            ? `<span class="block-proposer" title="${proposer}">&#9650; ${proposer.slice(0, 8)}...</span>`
-            : (uniqueNodes.size > 1 ? `<span class="block-proposer">${uniqueNodes.size} nodes</span>` : '');
 
-        // Identify which shard(s) contributed
         const shardSet = new Set();
         (block.shares || []).forEach(s => { if (s.shard_index !== undefined) shardSet.add(s.shard_index); });
-        const shardLabel = shardSet.size > 0 ? `Shard${shardSet.size > 1 ? 's' : ''} ${[...shardSet].sort().join(', ')}` : '';
+        const shardLabel = shardSet.size ? [...shardSet].sort().join(', ') : '—';
+        const proposerLabel = proposer
+            ? `${proposer.slice(0, 8)}...`
+            : `${uniqueNodes.size || 0} nodes`;
+        const fullTime = block.timestamp ? new Date(block.timestamp * 1000).toISOString() : '—';
 
-        const summaryParts = [];
-        if (isGenesis) {
-            summaryParts.push('Genesis block &mdash; chain anchor');
-        } else {
-            summaryParts.push(`${sharesCount} share${sharesCount !== 1 ? 's' : ''}`);
-            if (shardLabel) summaryParts.push(shardLabel);
-            if (uniqueSessions.size > 0) summaryParts.push(`${uniqueSessions.size} session${uniqueSessions.size !== 1 ? 's' : ''}`);
-        }
-
-        card.innerHTML = `
-            <div class="block-card-header">
-                <div class="block-card-title">
-                    <span class="block-index">${isGenesis ? '&#9939; Genesis' : 'Block #' + block.index}</span>
-                    ${proposerLabel}
-                </div>
-                <span class="block-time">${timeStr}</span>
-            </div>
-            <div class="block-card-summary">
-                <span class="block-summary-text">${summaryParts.join(' &middot; ')}</span>
-                <span class="block-hash">${App.truncHash(block.block_hash, 8)}</span>
-            </div>
-            <div class="block-details">
-                ${isGenesis ? '<div class="block-genesis-note">The genesis block is the fixed starting point of the chain. All nodes start from this same block so they can validate each other\'s chains. It contains no shares (no computation happened yet).</div>' : ''}
-                ${this.renderShares(block.shares || [])}
-                <div class="block-meta">
-                    <div class="block-meta-row">
-                        <span class="block-meta-label">Block hash</span>
-                        <span class="block-meta-value">${block.block_hash || '—'}</span>
-                    </div>
-                    <div class="block-meta-row">
-                        <span class="block-meta-label">Previous hash</span>
-                        <span class="block-meta-value">${block.previous_hash || '—'}</span>
-                    </div>
-                    <div class="block-meta-row">
-                        <span class="block-meta-label">Timestamp</span>
-                        <span class="block-meta-value">${block.timestamp ? new Date(block.timestamp * 1000).toISOString() : '—'}</span>
-                    </div>
-                </div>
-            </div>
+        row.innerHTML = `
+            <td class="col-block">${isGenesis ? '&#9939; Genesis' : `#${block.index}`}</td>
+            <td title="${fullTime}">${age}</td>
+            <td class="mono">${App.truncHash(block.block_hash, 10)}</td>
+            <td class="mono" title="${proposer || ''}">${proposerLabel}</td>
+            <td>${sharesCount}</td>
+            <td>${uniqueSessions.size}</td>
+            <td>${shardLabel}</td>
         `;
 
-        card.addEventListener('click', () => {
-            card.classList.toggle('expanded');
+        detailsRow.innerHTML = `
+            <td colspan="7">
+                <div class="explorer-detail-wrap">
+                    <div class="block-meta">
+                        <div class="block-meta-row">
+                            <span class="block-meta-label">Block hash</span>
+                            <span class="block-meta-value">${block.block_hash || '—'}</span>
+                        </div>
+                        <div class="block-meta-row">
+                            <span class="block-meta-label">Previous hash</span>
+                            <span class="block-meta-value">${block.previous_hash || '—'}</span>
+                        </div>
+                        <div class="block-meta-row">
+                            <span class="block-meta-label">Timestamp</span>
+                            <span class="block-meta-value">${fullTime}</span>
+                        </div>
+                    </div>
+                    ${this.renderShares(block.shares || [])}
+                </div>
+            </td>
+        `;
+
+        row.addEventListener('click', () => {
+            const expanded = row.classList.toggle('expanded');
+            detailsRow.hidden = !expanded;
         });
 
-        return card;
+        return { row, detailsRow };
     },
 
     renderShares(shares) {
         if (shares.length === 0) {
-            return '';
+            return '<div class="explorer-no-shares">No shares in this block.</div>';
         }
 
-        let html = '<div class="shares-header-row"><span>Node</span><span>Shard</span><span>Weight</span><span>Tokens</span><span>Hash</span></div>';
+        let html = '<div class="shares-header-row"><span>Node</span><span>Shard</span><span>Weight</span><span>Tokens</span><span>Session</span><span>Hash</span></div>';
         shares.forEach(share => {
             const nodeShort = share.node_id ? share.node_id.slice(0, 8) : '—';
             const isMPC = share.node_id && share.node_id.startsWith('peer-of-');
@@ -262,6 +389,7 @@ const Chain = {
                     <span class="share-shard">${shardLabel}</span>
                     <span class="${weightClass}">${weightLabel}</span>
                     <span class="share-tokens">${share.tokens_processed} tok</span>
+                    <span class="share-session" title="${share.session_id || ''}">${App.truncHash(share.session_id || '—', 6)}</span>
                     <span class="share-hash" title="${share.activation_hash || ''}">${App.truncHash(share.activation_hash, 8)}</span>
                 </div>
             `;
@@ -303,6 +431,72 @@ const Chain = {
     },
 
     // ---- Settlements ----
+    renderInfraPayouts(data) {
+        if (!this.infraPayoutSummary) return;
+
+        const daemonMap = data.daemon_payout_share || {};
+        const verifierMap = data.verifier_payout_share || {};
+        const daemonWork = data.daemon_work_window || {};
+        const verifierWork = data.verifier_work_window || {};
+        const selectedDaemon = data.selected_daemon_recipient || '';
+        const selectedVerifier = data.selected_verifier_recipient || '';
+
+        const daemonRows = Object.entries(daemonMap).sort((a, b) => b[1] - a[1]);
+        const verifierRows = Object.entries(verifierMap).sort((a, b) => b[1] - a[1]);
+        const daemonWorkRows = Object.entries(daemonWork).sort((a, b) => b[1] - a[1]);
+        const verifierWorkRows = Object.entries(verifierWork).sort((a, b) => b[1] - a[1]);
+
+        if (
+            !daemonRows.length &&
+            !verifierRows.length &&
+            !daemonWorkRows.length &&
+            !verifierWorkRows.length &&
+            !selectedDaemon &&
+            !selectedVerifier
+        ) {
+            this.infraPayoutSummary.innerHTML = '<p class="settlements-empty">No daemon/verifier payout telemetry available yet.</p>';
+            return;
+        }
+
+        const renderShareRows = (rows, selected) => rows.map(([addr, share]) => {
+            const isSelected = selected && addr.toLowerCase() === selected.toLowerCase();
+            return `
+                <div class="infra-payout-row ${isSelected ? 'selected' : ''}">
+                    <span class="infra-payout-address mono" title="${addr}">${App.truncHash(addr, 8)}</span>
+                    <span class="infra-payout-share">${(Number(share) * 100).toFixed(1)}%</span>
+                </div>
+            `;
+        }).join('');
+
+        const renderWorkRows = (rows, selected) => rows.map(([addr, units]) => {
+            const isSelected = selected && addr.toLowerCase() === selected.toLowerCase();
+            return `
+                <div class="infra-payout-row ${isSelected ? 'selected' : ''}">
+                    <span class="infra-payout-address mono" title="${addr}">${App.truncHash(addr, 8)}</span>
+                    <span class="infra-payout-work">${Number(units).toFixed(1)} units</span>
+                </div>
+            `;
+        }).join('');
+
+        this.infraPayoutSummary.innerHTML = `
+            <div class="infra-payout-grid">
+                <div class="infra-payout-card">
+                    <div class="infra-payout-title">Daemon pending work</div>
+                    ${daemonWorkRows.length ? renderWorkRows(daemonWorkRows, selectedDaemon) : '<div class="infra-empty">No daemon work yet</div>'}
+                    <div class="infra-subtitle">Last payout share</div>
+                    ${daemonRows.length ? renderShareRows(daemonRows, selectedDaemon) : '<div class="infra-empty">No daemon payout rows yet</div>'}
+                </div>
+                <div class="infra-payout-card">
+                    <div class="infra-payout-title">Verifier pending work</div>
+                    ${verifierWorkRows.length ? renderWorkRows(verifierWorkRows, selectedVerifier) : '<div class="infra-empty">No verifier work yet</div>'}
+                    <div class="infra-subtitle">Last payout share</div>
+                    ${verifierRows.length ? renderShareRows(verifierRows, selectedVerifier) : '<div class="infra-empty">No verifier payout rows yet</div>'}
+                </div>
+            </div>
+            <div class="chain-card-hint">Pending work accumulates continuously; payout share updates after infra settlement accounting cycles.</div>
+        `;
+    },
+
     renderSettlements(settlements) {
         if (!settlements || settlements.length === 0) {
             this.settlementsList.innerHTML = '<p class="settlements-empty">No settlements yet &mdash; need at least 6 blocks of compute activity.</p>';

@@ -758,6 +758,234 @@ html, body {
    Chain Tab
    ================================================================ */
 /* Chain explainer banner */
+.chain-explorer-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px 24px 24px;
+    height: 100%;
+    overflow-y: auto;
+}
+
+.chain-explorer-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.chain-explorer-head h3 {
+    font-size: 16px;
+    margin-bottom: 4px;
+}
+
+.explorer-summary-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.chain-subnav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+}
+
+.chain-view {
+    display: none;
+}
+
+.chain-view.active {
+    display: block;
+}
+
+.explorer-summary-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+}
+
+.summary-label {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+}
+
+.summary-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.summary-hash .summary-value {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.explorer-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.explorer-search-input {
+    flex: 1;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: 10px 12px;
+    font-size: 13px;
+}
+
+.explorer-pagination {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.explorer-page-info {
+    font-size: 12px;
+    color: var(--text-secondary);
+    min-width: 84px;
+    text-align: center;
+}
+
+.infra-payout-summary {
+    margin-bottom: 10px;
+}
+
+.infra-payout-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.infra-payout-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+}
+
+.infra-payout-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.infra-subtitle {
+    margin-top: 6px;
+    margin-bottom: 4px;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.infra-payout-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 12px;
+}
+
+.infra-payout-row.selected .infra-payout-address {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.infra-payout-share {
+    color: var(--green);
+    font-size: 11px;
+    font-family: var(--font-mono);
+}
+
+.infra-payout-work {
+    color: var(--yellow, #f0ad4e);
+    font-size: 11px;
+    font-family: var(--font-mono);
+}
+
+.infra-empty {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.explorer-search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.explorer-table-wrap {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--bg-card);
+}
+
+.explorer-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.explorer-table th {
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    text-align: left;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.explorer-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+}
+
+.explorer-row {
+    cursor: pointer;
+}
+
+.explorer-row:hover td {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.explorer-row.expanded td {
+    border-bottom: none;
+}
+
+.explorer-row.is-genesis .col-block {
+    color: var(--yellow);
+}
+
+.explorer-row-details td {
+    padding: 0;
+    background: var(--bg-secondary);
+}
+
+.explorer-detail-wrap {
+    padding: 12px;
+}
+
+.explorer-no-shares {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
 .chain-explainer {
     display: flex;
     gap: 16px;
@@ -788,7 +1016,6 @@ html, body {
 .chain-layout {
     display: flex;
     width: 100%;
-    flex: 1;
     min-height: 0;
 }
 
@@ -954,7 +1181,9 @@ html, body {
 .shares-header-row span:nth-child(1) { min-width: 80px; }
 .shares-header-row span:nth-child(2) { min-width: 60px; }
 .shares-header-row span:nth-child(3) { min-width: 60px; }
-.shares-header-row span:nth-child(4) { flex: 1; }
+.shares-header-row span:nth-child(4) { min-width: 70px; }
+.shares-header-row span:nth-child(5) { min-width: 90px; }
+.shares-header-row span:nth-child(6) { flex: 1; }
 
 .share-row {
     display: flex;
@@ -982,6 +1211,13 @@ html, body {
     flex: 1;
 }
 
+.share-session {
+    min-width: 90px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
 /* Chain sidebar */
 .chain-sidebar {
     width: 300px;
@@ -990,6 +1226,28 @@ html, body {
     padding: 20px 16px;
     overflow-y: auto;
     flex-shrink: 0;
+}
+
+.chain-explorer-shell .chain-sidebar {
+    width: 100%;
+    border-left: none;
+    background: transparent;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+}
+
+.chain-explorer-shell .chain-stats-card {
+    margin-bottom: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+}
+
+.chain-view .chain-stats-card {
+    margin-top: 4px;
 }
 
 .chain-stats-card {
@@ -1278,6 +1536,8 @@ html, body {
    ================================================================ */
 @media (max-width: 900px) {
     .chat-sidebar { display: none; }
-    .chain-sidebar { display: none; }
+    .chain-sidebar { width: 100%; border-left: none; padding: 0; }
     .chat-layout, .chain-layout { flex-direction: column; }
+    .explorer-summary-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .infra-payout-grid { grid-template-columns: 1fr; }
 }

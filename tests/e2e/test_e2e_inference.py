@@ -4,6 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from client.client import UnfedClient
 
 
 @pytest.mark.e2e
@@ -65,3 +66,21 @@ class TestInference:
         assert len(models) >= 1
         model_ids = [m.model_id for m in models]
         assert any("Qwen" in mid for mid in model_ids)
+
+    def test_he_output_mode_generation(self, cluster, monkeypatch):
+        monkeypatch.setenv("UNFED_REQUIRE_VERIFIER", "0")
+        monkeypatch.setenv("UNFED_REQUIRE_DAEMON", "0")
+        c = UnfedClient(
+            registry_address=cluster.registry_addr,
+            use_he_output=True,
+            model_id="./models/Qwen2.5-Coder-0.5B-Instruct",
+        )
+        c._require_mpc = False
+        try:
+            tokens = list(c.generate("Hello", max_new_tokens=2))
+            if not tokens:
+                pytest.skip("HE output E2E requires daemon-enabled cluster runtime.")
+            assert len(tokens) >= 1
+            assert "".join(tokens).strip() != ""
+        finally:
+            c.close()

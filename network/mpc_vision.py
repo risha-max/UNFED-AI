@@ -280,11 +280,15 @@ class MPCVisionServicer(inference_pb2_grpc.InferenceNodeServicer):
     def __init__(self, mpc_node: MPCVisionNode, port: int):
         self.mpc = mpc_node
         self.port = port
+        self._active_inferences = 0
+        self._inference_lock = threading.Lock()
 
     def Forward(self, request, context):
         """Handle a vision forward pass through MPC."""
         session_id = request.session_id
 
+        with self._inference_lock:
+            self._active_inferences += 1
         try:
             if self.mpc.role == "A":
                 # Deserialize image pixels
@@ -375,6 +379,23 @@ class MPCVisionServicer(inference_pb2_grpc.InferenceNodeServicer):
             context.set_details(str(e))
             context.set_code(grpc.StatusCode.INTERNAL)
             return inference_pb2.ForwardResponse()
+        finally:
+            with self._inference_lock:
+                self._active_inferences -= 1
+
+    def GetLoad(self, request, context):
+        """Expose local load telemetry for smart routing decisions."""
+        estimated_tokens = max(1, int(request.estimated_tokens or 1))
+        with self._inference_lock:
+            active = self._active_inferences
+        utilization = float(active)
+        base_fee = 0.001
+        return inference_pb2.FeeEstimateResponse(
+            base_fee=base_fee,
+            utilization=utilization,
+            estimated_cost=base_fee * estimated_tokens,
+            suggested_tip=0.0,
+        )
 
 
 def serve(role: str, port: int, peer_address: str, host: str = "[::]",
