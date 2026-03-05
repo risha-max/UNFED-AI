@@ -40,6 +40,11 @@ import inference_pb2
 import inference_pb2_grpc
 
 from network.admission import resolve_mpc_required_flag
+from network.he_dispute import (
+    SAMPLED_AUDIT_REASON_CODE,
+    is_anomaly_reason,
+    verify_report_signature,
+)
 from network.share_auth import registration_pop_payload, verify_signature
 from economics.share_chain import ShareChain, ComputeShare
 from economics.payments import StakeManager, PaymentContract, SettlementProcessor
@@ -124,7 +129,9 @@ class NodeRecord:
                  shard_index: int, layer_start: int, layer_end: int,
                  has_embedding: bool, has_lm_head: bool,
                  public_key: bytes = b"", node_type: str = "compute",
-                 share_signing_public_key: bytes = b""):
+                 share_signing_public_key: bytes = b"",
+                 capability_json: str = "",
+                 stake_identity: str = ""):
         self.node_id = node_id
         self.address = address
         self.model_id = model_id
@@ -136,6 +143,8 @@ class NodeRecord:
         self.public_key = public_key
         self.node_type = node_type
         self.share_signing_public_key = share_signing_public_key
+        self.capability_json = capability_json
+        self.stake_identity = stake_identity
         self.last_heartbeat = time.time()
         self.registered_at = time.time()
 
@@ -153,6 +162,8 @@ class NodeRecord:
             public_key=self.public_key,
             node_type=self.node_type,
             share_signing_public_key=self.share_signing_public_key,
+            capability_json=self.capability_json,
+            stake_identity=self.stake_identity,
         )
 
 
@@ -204,6 +215,56 @@ class VerifierClaimRecord:
         }
 
 
+class HEDisputeRecord:
+    """Registry-side lifecycle state for HE sidecar disputes."""
+
+    def __init__(self, dispute_ticket_id: str, report_id: str, idempotency_key: str):
+        self.dispute_ticket_id = dispute_ticket_id
+        self.report_id = report_id
+        self.idempotency_key = idempotency_key
+        self.status = "open"  # open|invalid|valid|insufficient_evidence|rejected
+        self.reason = ""
+        self.sidecar_node_id = ""
+        self.sidecar_stake_identity = ""
+        self.reporter_node_id = ""
+        self.reporter_node_type = ""
+        self.session_id = ""
+        self.step = 0
+        self.key_id = ""
+        self.reason_code = ""
+        self.request_payload_hash = ""
+        self.response_payload_hash = ""
+        self.created_at = time.time()
+        self.updated_at = self.created_at
+        self.verifier_id = ""
+        self.verdict = ""
+        self.slash_amount = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "dispute_ticket_id": self.dispute_ticket_id,
+            "report_id": self.report_id,
+            "idempotency_key": self.idempotency_key,
+            "status": self.status,
+            "reason": self.reason,
+            "sidecar_node_id": self.sidecar_node_id,
+            "sidecar_stake_identity": self.sidecar_stake_identity,
+            "reporter_node_id": self.reporter_node_id,
+            "reporter_node_type": self.reporter_node_type,
+            "session_id": self.session_id,
+            "step": self.step,
+            "key_id": self.key_id,
+            "reason_code": self.reason_code,
+            "request_payload_hash": self.request_payload_hash,
+            "response_payload_hash": self.response_payload_hash,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "verifier_id": self.verifier_id,
+            "verdict": self.verdict,
+            "slash_amount": self.slash_amount,
+        }
+
+
 class RegistryServicer(registry_pb2_grpc.RegistryServicer):
     """gRPC service implementation for the node registry."""
 
@@ -252,6 +313,11 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._claim_rate_window: dict[tuple[str, int], int] = defaultdict(int)
         self._verifier_bonus_cooldown_until_window: dict[str, int] = {}
         self._verifier_penalty_events: list[dict] = []
+        self._he_dispute_lock = threading.Lock()
+        self._he_pending_tickets: list[registry_pb2.HEDisputeTicket] = []
+        self._he_disputes_by_ticket: dict[str, HEDisputeRecord] = {}
+        self._he_dispute_by_idempotency: dict[str, str] = {}
+        self._he_report_rate_window: dict[tuple[str, int], int] = defaultdict(int)
         self._infra_work_lock = threading.Lock()
         self._daemon_work_window: dict[str, float] = defaultdict(float)
         self._verifier_ticket_window: dict[str, float] = defaultdict(float)
@@ -708,6 +774,12 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             "bonus_cooldown_windows": int(
                 getattr(self._cluster_config, "verifier_bonus_cooldown_windows", 1)
             ),
+            "he_dispute_sampling_rate": float(
+                getattr(self._cluster_config, "he_dispute_sampling_rate", config.HE_DISPUTE_SAMPLING_RATE)
+            ),
+            "he_dispute_rollout_stage": str(
+                getattr(self._cluster_config, "he_dispute_rollout_stage", config.HE_DISPUTE_ROLLOUT_STAGE)
+            ),
         }
         return json.dumps(policy)
 
@@ -715,6 +787,67 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         blocks = max(1, int(self._share_chain.settlement_blocks))
         height = max(0, int(self._share_chain.get_tip_height()))
         return height // blocks
+
+    def _current_he_dispute_window(self) -> int:
+        window_seconds = int(
+            max(1, getattr(self._cluster_config, "he_dispute_window_seconds", config.HE_DISPUTE_WINDOW_SECONDS))
+        )
+        return int(time.time()) // window_seconds
+
+    def _he_rollout_stage(self) -> str:
+        stage = str(
+            getattr(self._cluster_config, "he_dispute_rollout_stage", config.HE_DISPUTE_ROLLOUT_STAGE)
+        ).strip().lower()
+        if stage not in {"shadow", "soft", "enforced"}:
+            return "shadow"
+        return stage
+
+    def _validate_he_suspicion_report(self, request) -> tuple[bool, str]:
+        if not request.reporter_node_id:
+            return False, "missing_reporter_node_id"
+        if not request.session_id:
+            return False, "missing_session_id"
+        if int(request.step) < 0:
+            return False, "invalid_step"
+        if not request.reason_code:
+            return False, "missing_reason_code"
+        if not request.request_payload_hash:
+            return False, "missing_request_payload_hash"
+        if not request.response_payload_hash:
+            return False, "missing_response_payload_hash"
+        payload = {
+            "report_id": request.report_id,
+            "reporter_node_id": request.reporter_node_id,
+            "reporter_node_type": request.reporter_node_type,
+            "sidecar_node_id": request.sidecar_node_id,
+            "sidecar_stake_identity": request.sidecar_stake_identity,
+            "session_id": request.session_id,
+            "step": int(request.step),
+            "key_id": request.key_id,
+            "reason_code": request.reason_code,
+            "he_compute_format": request.he_compute_format,
+            "request_payload_hash": request.request_payload_hash,
+            "response_payload_hash": request.response_payload_hash,
+            "timestamp": float(request.timestamp),
+        }
+        if not verify_report_signature(
+            bytes(request.reporter_signing_public_key),
+            payload,
+            bytes(request.reporter_signature),
+        ):
+            return False, "invalid_report_signature"
+        return True, "ok"
+
+    def _resolve_sidecar_stake_identity(self, sidecar_node_id: str, provided_identity: str) -> str:
+        if provided_identity and _is_eth_address(provided_identity):
+            return provided_identity
+        with self._lock:
+            rec = self._nodes.get(sidecar_node_id)
+            if rec and rec.stake_identity and _is_eth_address(rec.stake_identity):
+                return rec.stake_identity
+            if rec and _is_eth_address(rec.node_id):
+                return rec.node_id
+        return provided_identity or sidecar_node_id
 
     def _claim_status_snapshot(self, limit: int = 200) -> list[dict]:
         with self._claim_lock:
@@ -1169,8 +1302,38 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     success=False,
                     message="invalid share_signing_pop signature",
                 )
+        if request.node_type == "he_sidecar":
+            if not (request.capability_json or "").strip():
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="he_sidecar requires capability_json",
+                )
+            stake_identity = (request.stake_identity or "").strip()
+            if not stake_identity:
+                stake_identity = (request.node_id or "").strip()
+            if not _is_eth_address(stake_identity):
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="he_sidecar requires EVM stake_identity (or node_id as EVM address)",
+                )
+            if self._onchain_escrow:
+                try:
+                    if not self._onchain_escrow.is_eligible(stake_identity):
+                        min_stake = self._onchain_escrow.min_stake()
+                        return registry_pb2.RegisterResponse(
+                            success=False,
+                            message=f"he_sidecar stake too low. Minimum: {min_stake} wei",
+                        )
+                except Exception as e:
+                    return registry_pb2.RegisterResponse(
+                        success=False,
+                        message=f"he_sidecar stake check failed: {e}",
+                    )
 
         with self._lock:
+            effective_stake_identity = (request.stake_identity or "").strip()
+            if not effective_stake_identity and request.node_type == "he_sidecar":
+                effective_stake_identity = (request.node_id or "").strip()
             record = NodeRecord(
                 node_id=request.node_id,
                 address=request.address,
@@ -1183,6 +1346,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 public_key=request.public_key,
                 node_type=request.node_type or "compute",
                 share_signing_public_key=bytes(request.share_signing_public_key),
+                capability_json=(request.capability_json or "").strip(),
+                stake_identity=effective_stake_identity,
             )
             self._nodes[request.node_id] = record
 
@@ -1645,6 +1810,242 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             claim_id=claim.claim_id,
             claim_status=claim.status,
             message=claim.reason,
+        )
+
+    def SubmitHESuspicionReport(self, request, context):
+        """Accept signed HE suspicion reports and open verifier challenge tickets."""
+        report_id = (getattr(request, "report_id", "") or "").strip() or str(uuid.uuid4())
+        idem = (getattr(request, "idempotency_key", "") or "").strip() or (
+            f"{request.reporter_node_id}:{request.session_id}:{request.step}:{request.reason_code}"
+        )
+        window = self._current_he_dispute_window()
+        reporter = (request.reporter_node_id or "").strip()
+
+        with self._he_dispute_lock:
+            existing_ticket_id = self._he_dispute_by_idempotency.get(idem)
+            if existing_ticket_id and existing_ticket_id in self._he_disputes_by_ticket:
+                existing = self._he_disputes_by_ticket[existing_ticket_id]
+                return registry_pb2.HESuspicionReportResponse(
+                    accepted=True,
+                    report_id=existing.report_id,
+                    dispute_ticket_id=existing.dispute_ticket_id,
+                    status="duplicate",
+                    message="idempotent_replay",
+                )
+            self._he_report_rate_window[(reporter, window)] += 1
+            report_count = self._he_report_rate_window[(reporter, window)]
+
+        limit = int(
+            max(1, getattr(
+                self._cluster_config,
+                "he_dispute_report_rate_limit_per_window",
+                config.HE_DISPUTE_REPORT_RATE_LIMIT_PER_WINDOW,
+            ))
+        )
+        if report_count > limit:
+            self._record_penalty_event({
+                "ts": time.time(),
+                "kind": "he_report_rate_limited",
+                "reporter_node_id": reporter,
+                "report_id": report_id,
+                "window": window,
+                "limit": limit,
+            })
+            return registry_pb2.HESuspicionReportResponse(
+                accepted=False,
+                report_id=report_id,
+                status="rate_limited",
+                message="report_rate_limited",
+            )
+
+        valid, reason = self._validate_he_suspicion_report(request)
+        if not valid:
+            return registry_pb2.HESuspicionReportResponse(
+                accepted=False,
+                report_id=report_id,
+                status="rejected",
+                message=reason,
+            )
+
+        dispute_ticket_id = f"he-dsp-{uuid.uuid4().hex[:16]}"
+        rec = HEDisputeRecord(
+            dispute_ticket_id=dispute_ticket_id,
+            report_id=report_id,
+            idempotency_key=idem,
+        )
+        rec.sidecar_node_id = (request.sidecar_node_id or "").strip()
+        rec.sidecar_stake_identity = self._resolve_sidecar_stake_identity(
+            rec.sidecar_node_id,
+            (request.sidecar_stake_identity or "").strip(),
+        )
+        rec.reporter_node_id = reporter
+        rec.reporter_node_type = (request.reporter_node_type or "").strip()
+        rec.session_id = request.session_id
+        rec.step = int(request.step)
+        rec.key_id = request.key_id
+        rec.reason_code = request.reason_code
+        rec.request_payload_hash = request.request_payload_hash
+        rec.response_payload_hash = request.response_payload_hash
+
+        ticket = registry_pb2.HEDisputeTicket(
+            dispute_ticket_id=dispute_ticket_id,
+            report_id=report_id,
+            sidecar_node_id=rec.sidecar_node_id,
+            sidecar_stake_identity=rec.sidecar_stake_identity,
+            reporter_node_id=rec.reporter_node_id,
+            reporter_node_type=rec.reporter_node_type,
+            session_id=rec.session_id,
+            step=rec.step,
+            key_id=rec.key_id,
+            reason_code=rec.reason_code,
+            he_compute_format=request.he_compute_format,
+            request_payload_hash=rec.request_payload_hash,
+            response_payload_hash=rec.response_payload_hash,
+            evidence_json=request.evidence_json,
+            report_timestamp=float(request.timestamp or time.time()),
+        )
+        with self._he_dispute_lock:
+            self._he_pending_tickets.append(ticket)
+            self._he_disputes_by_ticket[dispute_ticket_id] = rec
+            self._he_dispute_by_idempotency[idem] = dispute_ticket_id
+        self._record_penalty_event({
+            "ts": time.time(),
+            "kind": "he_dispute_opened",
+            "dispute_ticket_id": dispute_ticket_id,
+            "report_id": report_id,
+            "reason_code": rec.reason_code,
+            "sampled_audit": rec.reason_code == SAMPLED_AUDIT_REASON_CODE,
+            "anomaly_escalation": is_anomaly_reason(rec.reason_code),
+        })
+        return registry_pb2.HESuspicionReportResponse(
+            accepted=True,
+            report_id=report_id,
+            dispute_ticket_id=dispute_ticket_id,
+            status="accepted",
+            message="challenge_opened",
+        )
+
+    def GetPendingHEDisputes(self, request, context):
+        """Return and clear pending HE dispute tickets for verifier adjudication."""
+        verifier_id = (getattr(request, "verifier_id", "") or "").strip()
+        with self._he_dispute_lock:
+            limit = request.max_tickets if request.max_tickets > 0 else len(self._he_pending_tickets)
+            tickets = self._he_pending_tickets[:limit]
+            self._he_pending_tickets = self._he_pending_tickets[limit:]
+        if verifier_id and tickets:
+            with self._infra_work_lock:
+                self._verifier_ticket_window[verifier_id] += float(len(tickets))
+        return registry_pb2.GetPendingHEDisputesResponse(tickets=tickets)
+
+    def SubmitHEVerifierVerdict(self, request, context):
+        """Apply verifier adjudication verdict for HE sidecar disputes."""
+        ticket_id = (request.dispute_ticket_id or "").strip()
+        if not ticket_id:
+            return registry_pb2.HEVerifierVerdictResponse(
+                accepted=False,
+                dispute_ticket_id=ticket_id,
+                status="rejected",
+                message="missing_dispute_ticket_id",
+            )
+        verdict = (request.verdict or "").strip().lower()
+        if verdict not in {"valid", "invalid", "insufficient_evidence"}:
+            return registry_pb2.HEVerifierVerdictResponse(
+                accepted=False,
+                dispute_ticket_id=ticket_id,
+                status="rejected",
+                message="invalid_verdict",
+            )
+        with self._he_dispute_lock:
+            rec = self._he_disputes_by_ticket.get(ticket_id)
+            if rec is None:
+                return registry_pb2.HEVerifierVerdictResponse(
+                    accepted=False,
+                    dispute_ticket_id=ticket_id,
+                    status="rejected",
+                    message="unknown_dispute_ticket",
+                )
+            if rec.status != "open":
+                return registry_pb2.HEVerifierVerdictResponse(
+                    accepted=True,
+                    dispute_ticket_id=ticket_id,
+                    status="duplicate",
+                    message=f"already_{rec.status}",
+                )
+
+        rec.verifier_id = (request.verifier_id or "").strip()
+        rec.verdict = verdict
+        rec.updated_at = time.time()
+        rec.reason = (request.reason or "").strip()
+        slash_amount = 0.0
+        status = "confirmed_valid"
+
+        if verdict == "invalid":
+            stage = self._he_rollout_stage()
+            configured_fraction = float(
+                max(0.0, min(1.0, getattr(self._cluster_config, "he_dispute_slash_fraction", 0.5)))
+            )
+            apply_fraction = 0.0
+            if stage == "soft":
+                apply_fraction = configured_fraction * 0.25
+            elif stage == "enforced":
+                apply_fraction = configured_fraction
+            target = self._resolve_sidecar_stake_identity(
+                request.sidecar_node_id or rec.sidecar_node_id,
+                request.sidecar_stake_identity or rec.sidecar_stake_identity,
+            )
+            if apply_fraction > 0.0:
+                if self._onchain_escrow and _is_eth_address(target):
+                    try:
+                        self._onchain_escrow.slash_node(target)
+                    except Exception as e:
+                        print(f"[Registry] WARNING: HE sidecar on-chain slash failed for {target}: {e}")
+                slash_amount = float(
+                    self._payment_contract.stakes.slash(target, pool_slash_fraction=apply_fraction)
+                )
+            rec.slash_amount = slash_amount
+            rec.status = "invalid"
+            status = "confirmed_invalid"
+            self._record_penalty_event({
+                "ts": rec.updated_at,
+                "kind": "he_dispute_invalid",
+                "stage": stage,
+                "dispute_ticket_id": ticket_id,
+                "sidecar_stake_identity": target,
+                "slash_amount": slash_amount,
+                "slash_fraction_applied": apply_fraction,
+                "reason_code": rec.reason_code,
+            })
+        elif verdict == "insufficient_evidence":
+            rec.status = "insufficient_evidence"
+            status = "insufficient_evidence"
+            self._record_penalty_event({
+                "ts": rec.updated_at,
+                "kind": "he_dispute_insufficient_evidence",
+                "dispute_ticket_id": ticket_id,
+                "reason_code": rec.reason_code,
+            })
+        else:
+            rec.status = "valid"
+            status = "confirmed_valid"
+            self._record_penalty_event({
+                "ts": rec.updated_at,
+                "kind": "he_dispute_valid",
+                "dispute_ticket_id": ticket_id,
+                "reason_code": rec.reason_code,
+            })
+
+        if rec.verifier_id:
+            with self._infra_work_lock:
+                if verdict == "invalid":
+                    self._verifier_bonus_window[rec.verifier_id] += 1.0
+                else:
+                    self._verifier_ticket_window[rec.verifier_id] += 0.25
+
+        return registry_pb2.HEVerifierVerdictResponse(
+            accepted=True,
+            dispute_ticket_id=ticket_id,
+            status=status,
+            message=rec.reason or rec.status,
         )
 
     def GetFraudProofs(self, request, context):

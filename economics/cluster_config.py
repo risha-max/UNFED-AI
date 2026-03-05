@@ -112,6 +112,11 @@ class ClusterConfig:
     verifier_false_claim_slash_bps: int = 500
     verifier_claim_rate_limit_per_window: int = 64
     verifier_bonus_cooldown_windows: int = 1
+    he_dispute_sampling_rate: float = 0.05
+    he_dispute_report_rate_limit_per_window: int = 64
+    he_dispute_window_seconds: int = 60
+    he_dispute_slash_fraction: float = 0.5
+    he_dispute_rollout_stage: str = "shadow"  # shadow|soft|enforced
 
     # --- Metadata ---
     created_at: float = 0.0
@@ -182,6 +187,16 @@ class ClusterConfig:
             errors.append("verifier_claim_rate_limit_per_window must be > 0")
         if int(self.verifier_bonus_cooldown_windows) < 0:
             errors.append("verifier_bonus_cooldown_windows must be >= 0")
+        if not 0.0 <= float(self.he_dispute_sampling_rate) <= 1.0:
+            errors.append("he_dispute_sampling_rate must be in [0.0, 1.0]")
+        if int(self.he_dispute_report_rate_limit_per_window) <= 0:
+            errors.append("he_dispute_report_rate_limit_per_window must be > 0")
+        if int(self.he_dispute_window_seconds) <= 0:
+            errors.append("he_dispute_window_seconds must be > 0")
+        if not 0.0 <= float(self.he_dispute_slash_fraction) <= 1.0:
+            errors.append("he_dispute_slash_fraction must be in [0.0, 1.0]")
+        if str(self.he_dispute_rollout_stage) not in {"shadow", "soft", "enforced"}:
+            errors.append("he_dispute_rollout_stage must be one of shadow|soft|enforced")
         # Warn (not error) if on-chain fields are missing
         if not self.chain_rpc_url or not self.escrow_contract_address:
             errors.append(

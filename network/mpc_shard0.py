@@ -1151,6 +1151,15 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     next_request.he_client_pubkey = request.he_client_pubkey
                     next_request.he_key_id = request.he_key_id
                     next_request.he_step = request.he_step
+                    next_request.he_compute_mode = request.he_compute_mode
+                    next_request.he_compute_payload = request.he_compute_payload
+                    next_request.he_compute_format = request.he_compute_format
+                    next_request.he_top_k = request.he_top_k
+                    next_request.he_temperature = request.he_temperature
+                    next_request.he_top_p = request.he_top_p
+                    next_request.he_disable_plaintext_sampling = (
+                        request.he_disable_plaintext_sampling
+                    )
 
                 channel = create_resilient_channel(
                     next_address, config.GRPC_OPTIONS)

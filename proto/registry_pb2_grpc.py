@@ -78,6 +78,21 @@ class RegistryStub(object):
                 request_serializer=registry__pb2.FraudProofMessage.SerializeToString,
                 response_deserializer=registry__pb2.FraudProofResponse.FromString,
                 _registered_method=True)
+        self.SubmitHESuspicionReport = channel.unary_unary(
+                '/unfed.Registry/SubmitHESuspicionReport',
+                request_serializer=registry__pb2.HESuspicionReport.SerializeToString,
+                response_deserializer=registry__pb2.HESuspicionReportResponse.FromString,
+                _registered_method=True)
+        self.GetPendingHEDisputes = channel.unary_unary(
+                '/unfed.Registry/GetPendingHEDisputes',
+                request_serializer=registry__pb2.GetPendingHEDisputesRequest.SerializeToString,
+                response_deserializer=registry__pb2.GetPendingHEDisputesResponse.FromString,
+                _registered_method=True)
+        self.SubmitHEVerifierVerdict = channel.unary_unary(
+                '/unfed.Registry/SubmitHEVerifierVerdict',
+                request_serializer=registry__pb2.HEVerifierVerdict.SerializeToString,
+                response_deserializer=registry__pb2.HEVerifierVerdictResponse.FromString,
+                _registered_method=True)
         self.GetFraudProofs = channel.unary_unary(
                 '/unfed.Registry/GetFraudProofs',
                 request_serializer=registry__pb2.GetFraudProofsRequest.SerializeToString,
@@ -223,6 +238,27 @@ class RegistryServicer(object):
 
     def SubmitFraudProof(self, request, context):
         """Submit fraud proofs discovered by verifiers.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SubmitHESuspicionReport(self, request, context):
+        """Submit suspicion reports for HE sidecar responses.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPendingHEDisputes(self, request, context):
+        """Fetch pending HE dispute tickets for verifier adjudication.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SubmitHEVerifierVerdict(self, request, context):
+        """Submit verifier verdict for an HE dispute ticket.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -395,6 +431,21 @@ def add_RegistryServicer_to_server(servicer, server):
                     servicer.SubmitFraudProof,
                     request_deserializer=registry__pb2.FraudProofMessage.FromString,
                     response_serializer=registry__pb2.FraudProofResponse.SerializeToString,
+            ),
+            'SubmitHESuspicionReport': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitHESuspicionReport,
+                    request_deserializer=registry__pb2.HESuspicionReport.FromString,
+                    response_serializer=registry__pb2.HESuspicionReportResponse.SerializeToString,
+            ),
+            'GetPendingHEDisputes': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPendingHEDisputes,
+                    request_deserializer=registry__pb2.GetPendingHEDisputesRequest.FromString,
+                    response_serializer=registry__pb2.GetPendingHEDisputesResponse.SerializeToString,
+            ),
+            'SubmitHEVerifierVerdict': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitHEVerifierVerdict,
+                    request_deserializer=registry__pb2.HEVerifierVerdict.FromString,
+                    response_serializer=registry__pb2.HEVerifierVerdictResponse.SerializeToString,
             ),
             'GetFraudProofs': grpc.unary_unary_rpc_method_handler(
                     servicer.GetFraudProofs,
@@ -702,6 +753,87 @@ class Registry(object):
             '/unfed.Registry/SubmitFraudProof',
             registry__pb2.FraudProofMessage.SerializeToString,
             registry__pb2.FraudProofResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubmitHESuspicionReport(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/SubmitHESuspicionReport',
+            registry__pb2.HESuspicionReport.SerializeToString,
+            registry__pb2.HESuspicionReportResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPendingHEDisputes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/GetPendingHEDisputes',
+            registry__pb2.GetPendingHEDisputesRequest.SerializeToString,
+            registry__pb2.GetPendingHEDisputesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubmitHEVerifierVerdict(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/SubmitHEVerifierVerdict',
+            registry__pb2.HEVerifierVerdict.SerializeToString,
+            registry__pb2.HEVerifierVerdictResponse.FromString,
             options,
             channel_credentials,
             insecure,

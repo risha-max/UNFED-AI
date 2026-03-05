@@ -97,6 +97,33 @@ WIRE_DTYPE = os.environ.get("UNFED_WIRE_DTYPE", "float32")
 PREFILL_PIPELINE_MIN_TOKENS = int(os.environ.get("UNFED_PREFILL_MIN", "64"))
 PREFILL_CHUNK_SIZE = 64            # tokens per chunk in pipelined prefill
 
+# --- HE compute rollout ---
+# off | decode_client_sample | server_sample
+HE_COMPUTE_MODE = os.environ.get("UNFED_HE_COMPUTE_MODE", "off")
+HE_COMPUTE_TOP_K = int(os.environ.get("UNFED_HE_TOP_K", "64"))
+HE_COMPUTE_TEMPERATURE = float(os.environ.get("UNFED_HE_TEMPERATURE", "1.0"))
+HE_COMPUTE_TOP_P = float(os.environ.get("UNFED_HE_TOP_P", "1.0"))
+HE_FULL_VOCAB_SIDECAR_URL = os.environ.get("UNFED_HE_SIDECAR_URL", "").strip()
+HE_FULL_VOCAB_SIDECAR_TIMEOUT_MS = int(os.environ.get("UNFED_HE_SIDECAR_TIMEOUT_MS", "2000"))
+HE_FULL_VOCAB_SIDECAR_REQUIRED = (
+    os.environ.get("UNFED_HE_SIDECAR_REQUIRED", "0").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+HE_SIDECAR_ALLOWED_FORMATS = tuple(
+    item.strip()
+    for item in os.environ.get("UNFED_HE_SIDECAR_ALLOWED_FORMATS", "paillier_v1").split(",")
+    if item.strip()
+)
+HE_SIDECAR_MAX_PAYLOAD_BYTES = int(
+    os.environ.get("UNFED_HE_SIDECAR_MAX_PAYLOAD_BYTES", str(2 * 1024 * 1024))
+)
+HE_DISPUTE_SAMPLING_RATE = float(os.environ.get("UNFED_HE_DISPUTE_SAMPLING_RATE", "0.05"))
+HE_DISPUTE_REPORT_RATE_LIMIT_PER_WINDOW = int(
+    os.environ.get("UNFED_HE_DISPUTE_REPORT_RATE_LIMIT_PER_WINDOW", "64")
+)
+HE_DISPUTE_WINDOW_SECONDS = int(os.environ.get("UNFED_HE_DISPUTE_WINDOW_SECONDS", "60"))
+HE_DISPUTE_ROLLOUT_STAGE = os.environ.get("UNFED_HE_DISPUTE_ROLLOUT_STAGE", "shadow").strip().lower()
+
 # --- Fee / Economics (EIP-1559-style dynamic pricing) ---
 # NOTE: These are *network-wide defaults*. Per-model economics (staking,
 # reward schemes, fees) are configured via PoolConfig and published to the

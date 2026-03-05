@@ -899,6 +899,8 @@ async def security_modes():
     return {
         "he_output_enabled": _HE_OUTPUT_ENABLED,
         "he_output_strict": _HE_OUTPUT_STRICT,
+        "he_compute_mode": config.HE_COMPUTE_MODE,
+        "he_sidecar_configured": bool(config.HE_FULL_VOCAB_SIDECAR_URL),
         "return_path_encryption_supported": True,
     }
 

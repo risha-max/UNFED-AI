@@ -46,6 +46,8 @@ class RegistryClient:
                  has_embedding: bool = False, has_lm_head: bool = False,
                  public_key: bytes = b"",
                  node_type: str = "compute",
+                 capability_json: str = "",
+                 stake_identity: str = "",
                  share_signing_public_key: bytes = b"",
                  share_signing_pop: bytes = b"") -> bool:
         """Register a node with the registry."""
@@ -61,6 +63,8 @@ class RegistryClient:
                 has_lm_head=has_lm_head,
                 public_key=public_key,
                 node_type=node_type,
+                capability_json=capability_json,
+                stake_identity=stake_identity,
                 share_signing_public_key=share_signing_public_key,
                 share_signing_pop=share_signing_pop,
             ))
@@ -157,7 +161,7 @@ class RegistryClient:
         """Discover only compute nodes (excludes vision and MPC nodes)."""
         all_nodes = self.discover(model_id)
         return [n for n in all_nodes
-                if n.node_type not in ("vision", "mpc")]
+                if n.node_type not in ("vision", "mpc", "daemon", "he_sidecar")]
 
     def discover_mpc(self, model_id: str = "") -> list:
         """Discover MPC entry nodes (role A) for shard 0."""
@@ -494,7 +498,7 @@ class RegistryPool:
         """Discover only compute nodes (excludes vision and MPC)."""
         nodes = self.discover(model_id)
         return [n for n in nodes
-                if n.node_type not in ("vision", "mpc")]
+                if n.node_type not in ("vision", "mpc", "daemon", "he_sidecar")]
 
     def discover_mpc(self, model_id: str = "") -> list:
         """Discover MPC entry nodes."""
@@ -715,6 +719,7 @@ class NodeRegistration:
                  layer_start: int, layer_end: int,
                  has_embedding: bool = False, has_lm_head: bool = False,
                  registry_address: str = None, node_type: str = "compute",
+                 capability_json: str = "", stake_identity: str = "",
                  node_id: str = None):
         self.node_id = node_id or str(uuid.uuid4())
         self.address = address
@@ -725,6 +730,8 @@ class NodeRegistration:
         self.has_embedding = has_embedding
         self.has_lm_head = has_lm_head
         self.node_type = node_type
+        self.capability_json = capability_json or ""
+        self.stake_identity = stake_identity or ""
 
         # Generate X25519 key pair for onion routing
         from network.onion import generate_keypair, public_key_to_bytes
@@ -760,6 +767,8 @@ class NodeRegistration:
             has_lm_head=self.has_lm_head,
             public_key=self.public_key_bytes,
             node_type=self.node_type,
+            capability_json=self.capability_json,
+            stake_identity=self.stake_identity,
             share_signing_public_key=self.share_signing_public_key,
             share_signing_pop=share_signing_pop,
         )
@@ -795,6 +804,8 @@ class NodeRegistration:
                         has_lm_head=self.has_lm_head,
                         public_key=self.public_key_bytes,
                         node_type=self.node_type,
+                        capability_json=self.capability_json,
+                        stake_identity=self.stake_identity,
                         share_signing_public_key=self.share_signing_public_key,
                         share_signing_pop=sign_bytes(
                             self.share_signing_private_key,

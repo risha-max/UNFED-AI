@@ -47,6 +47,13 @@ from network.onion import (
     generate_response_keys, decrypt_response_layers,
 )
 from network.he_output import generate_client_keypair, decrypt_token_artifact
+from network.he_compute import (
+    HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
+    HE_COMPUTE_MODE_OFF,
+    decrypt_topk_artifact,
+    generate_client_compute_keypair,
+    sample_from_topk_scores,
+)
 from network.voting import VotingCoordinator
 from network.racing import RacingCoordinator
 
@@ -137,6 +144,13 @@ class UnfedClient:
         self.use_return_encryption = use_return_encryption
         self.use_racing = use_racing
         self.use_he_output = bool(use_he_output)
+        self.he_compute_mode = (config.HE_COMPUTE_MODE or HE_COMPUTE_MODE_OFF).strip()
+        if self.he_compute_mode not in (
+            HE_COMPUTE_MODE_OFF,
+            HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
+            "server_sample",
+        ):
+            self.he_compute_mode = HE_COMPUTE_MODE_OFF
 
         # Voting coordinator
         self._voter = VotingCoordinator() if use_voting else None
@@ -150,7 +164,10 @@ class UnfedClient:
         self._require_mpc = resolve_mpc_required_flag()
 
     def _start_he_output_session(self) -> tuple[bytes, bytes, str]:
-        private_key, public_key = generate_client_keypair()
+        if self.he_compute_mode == HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE:
+            private_key, public_key = generate_client_compute_keypair()
+        else:
+            private_key, public_key = generate_client_keypair()
         return private_key, public_key, uuid.uuid4().hex
 
     def count_text_input_tokens(self, prompt: str, model_id: str = None) -> int:
@@ -388,7 +405,10 @@ class UnfedClient:
             public_key_bytes[0] = bytes(mpc_node.public_key)
             using_mpc = True
 
-        if use_random_routing:
+        if self.use_he_output and self.he_compute_mode == HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE:
+            # Keep deterministic plain routing for first HE-compute rollout.
+            routing_mode = "plain"
+        elif use_random_routing:
             routing_mode = "random"
         elif use_onion:
             routing_mode = "onion"
@@ -482,6 +502,12 @@ class UnfedClient:
                 request.he_client_pubkey = he_public_key
                 request.he_key_id = he_key_id
                 request.he_step = step
+                request.he_compute_mode = self.he_compute_mode
+                request.he_top_k = int(config.HE_COMPUTE_TOP_K)
+                request.he_temperature = float(config.HE_COMPUTE_TEMPERATURE)
+                request.he_top_p = float(config.HE_COMPUTE_TOP_P)
+                if self.he_compute_mode in (HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE, "server_sample"):
+                    request.he_disable_plaintext_sampling = True
 
             # Attach routing
             if routing_mode == "random":
@@ -537,6 +563,28 @@ class UnfedClient:
             if self.use_he_output:
                 if response.he_error:
                     raise RuntimeError(response.he_error)
+                if response.he_compute_payload:
+                    token_ids, scores = decrypt_topk_artifact(
+                        artifact_bytes=bytes(response.he_compute_payload),
+                        client_private_key=he_private_key,
+                        expected_session_id=session_id,
+                        expected_step=step,
+                        expected_key_id=he_key_id,
+                    )
+                    token_id = sample_from_topk_scores(
+                        token_ids=token_ids,
+                        scores=scores,
+                        temperature=float(request.he_temperature or config.HE_COMPUTE_TEMPERATURE or 1.0),
+                        top_p=float(request.he_top_p or config.HE_COMPUTE_TOP_P or 1.0),
+                    )
+                    generated_tokens.append(token_id)
+                    token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
+                    if verbose:
+                        print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} (he-compute)")
+                    yield token_text
+                    if token_id == self.tokenizer.eos_token_id:
+                        break
+                    continue
                 if not response.he_ciphertext:
                     raise RuntimeError("HE output mode enabled but server returned no HE artifact.")
                 if response.he_session_id and response.he_session_id != session_id:

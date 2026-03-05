@@ -144,6 +144,26 @@ message ForwardRequest {
 
   // Monotonic decode step expected by the caller (0-based).
   int32 he_step = 27;
+
+  // --- HE compute contract (output-layer decode path) ---
+  // Mode selector for HE compute rollout.
+  // Supported values: "off", "decode_client_sample", "server_sample".
+  string he_compute_mode = 28;
+
+  // Optional HE compute payload transported across shard hops.
+  // Used for ciphertext artifacts between penultimate and final stages.
+  bytes he_compute_payload = 29;
+
+  // Format identifier for he_compute_payload.
+  string he_compute_format = 30;
+
+  // Decode controls for HE compute mode.
+  int32 he_top_k = 31;
+  double he_temperature = 32;
+  double he_top_p = 33;
+
+  // Hint to downstream nodes to avoid plaintext token sampling path.
+  bool he_disable_plaintext_sampling = 34;
 }
 
 message ForwardResponse {
@@ -197,6 +217,16 @@ message ForwardResponse {
 
   // Optional error message specific to HE artifact mode.
   string he_error = 16;
+
+  // --- HE compute artifact fields ---
+  // Encrypted top-k/logit artifact for client-side sampling mode.
+  bytes he_compute_payload = 17;
+
+  // Format identifier for he_compute_payload.
+  string he_compute_format = 18;
+
+  // Number of candidate tokens included in he_compute_payload.
+  int32 he_top_k = 19;
 }
 
 // --- Shard Transfer (P2P weight distribution) ---

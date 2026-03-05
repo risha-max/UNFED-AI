@@ -33,6 +33,7 @@ import config
 import registry_pb2
 import registry_pb2_grpc
 
+from network.he_dispute import ANOMALY_REASON_CODES, SAMPLED_AUDIT_REASON_CODE
 from network.verification import Verifier, VerificationTicket
 
 
@@ -56,6 +57,8 @@ def _parse_policy(config_json: str) -> dict:
         "poll_interval_seconds": 5.0,
         "max_tickets_per_poll": 10,
         "heartbeat_timeout_seconds": 30,
+        "he_dispute_sampling_rate": 0.05,
+        "he_dispute_rollout_stage": "shadow",
     }
     if not config_json:
         return defaults
@@ -67,6 +70,23 @@ def _parse_policy(config_json: str) -> dict:
         if key in parsed:
             defaults[key] = parsed[key]
     return defaults
+
+
+def _adjudicate_he_dispute(ticket) -> tuple[str, str, dict]:
+    """Return (verdict, reason, proof_json_payload)."""
+    if not ticket.session_id or int(ticket.step) < 0:
+        return "insufficient_evidence", "missing_session_binding", {"missing": "session_id_or_step"}
+    if not ticket.request_payload_hash or not ticket.response_payload_hash:
+        return "insufficient_evidence", "missing_payload_hashes", {"missing": "payload_hashes"}
+    if not ticket.he_compute_format:
+        return "insufficient_evidence", "missing_compute_format", {"missing": "he_compute_format"}
+
+    reason_code = (ticket.reason_code or "").strip()
+    if reason_code == SAMPLED_AUDIT_REASON_CODE:
+        return "valid", "sampled_audit_no_anomaly", {"sampling_ticket": True}
+    if reason_code in ANOMALY_REASON_CODES:
+        return "invalid", f"inline_integrity_violation:{reason_code}", {"inline_check_failed": reason_code}
+    return "valid", "non_anomalous_report", {"reason_code": reason_code}
 
 
 def run_verifier(registry_address: str = None, poll_interval: float = 5.0,
@@ -188,6 +208,37 @@ def run_verifier(registry_address: str = None, poll_interval: float = 5.0,
                     stats = verifier.get_stats()
                     print(f"  [Stats] verified={stats['verified']}, "
                           f"failed={stats['failed']}")
+                    print()
+
+                he_resp = stub.GetPendingHEDisputes(
+                    registry_pb2.GetPendingHEDisputesRequest(
+                        max_tickets=int(policy["max_tickets_per_poll"]),
+                        verifier_id=verifier_id,
+                    )
+                )
+                if he_resp.tickets:
+                    print(f"[Verifier] Got {len(he_resp.tickets)} HE dispute ticket(s)")
+                    for ticket in he_resp.tickets:
+                        verdict, reason, proof_payload = _adjudicate_he_dispute(ticket)
+                        try:
+                            stub.SubmitHEVerifierVerdict(
+                                registry_pb2.HEVerifierVerdict(
+                                    dispute_ticket_id=ticket.dispute_ticket_id,
+                                    verifier_id=verifier_id,
+                                    verdict=verdict,
+                                    reason=reason,
+                                    proof_json=json.dumps(proof_payload, sort_keys=True),
+                                    sidecar_node_id=ticket.sidecar_node_id,
+                                    sidecar_stake_identity=ticket.sidecar_stake_identity,
+                                    timestamp=time.time(),
+                                )
+                            )
+                            print(
+                                f"  HE dispute {ticket.dispute_ticket_id[:12]}... "
+                                f"=> {verdict} ({reason})"
+                            )
+                        except grpc.RpcError as e:
+                            print(f"  Failed to submit HE verdict: {e}")
                     print()
 
             except grpc.RpcError as e:

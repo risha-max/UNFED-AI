@@ -402,6 +402,7 @@ class GenericTextRunner(nn.Module):
         prefix_length: int = 0,
         image_embeddings: Optional[torch.Tensor] = None,
         mrope_position_ids: Optional[torch.Tensor] = None,
+        sample_token: bool = True,
     ) -> tuple[torch.Tensor, Optional[int]]:
         """Run text decoder forward pass.
 
@@ -496,13 +497,13 @@ class GenericTextRunner(nn.Module):
         # Advance cache position
         session_cache.advance(seq_len)
 
-        # Last shard: final norm + LM head + sampling
+        # Last shard: final norm + LM head + optional sampling
         sampled_token = None
         if self.is_last:
             hidden_states = self.final_norm(hidden_states)
-            logits = self.lm_head(hidden_states)
-            # Greedy sample from last position
-            sampled_token = int(logits[0, -1].argmax(dim=-1).item())
+            if sample_token:
+                logits = self.lm_head(hidden_states)
+                sampled_token = int(logits[0, -1].argmax(dim=-1).item())
 
         return hidden_states, sampled_token
 
