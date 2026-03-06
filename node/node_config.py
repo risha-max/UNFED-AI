@@ -146,6 +146,10 @@ class ComputeConfig(BaseNodeConfig):
     inference_priority: bool = True              # pause transfers during inference
     require_daemon: bool = True                  # fail requests if daemon unavailable
     allowed_prev_node_types: list[str] = field(default_factory=list)
+    require_forward_attestation: bool = True
+    require_forward_proof: bool = False
+    forward_proof_max_bytes: int = 8192
+    forward_proof_allowed_formats: list[str] = field(default_factory=lambda: ["none"])
 
     # --- Wire/compression ---
     wire_dtype: str = "float32"                  # "float32" or "float16"

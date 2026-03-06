@@ -71,6 +71,15 @@ from network.share_auth import (
     canonical_share_payload_bytes,
     sign_bytes,
 )
+from network.forward_attestation import (
+    FORWARD_ATTESTATION_VERSION,
+    ForwardAttestationPayload,
+    make_tensor_shape_signature,
+    proof_bytes_hash,
+    sign_forward_attestation,
+    tensor_bytes_digest,
+    verify_forward_attestation,
+)
 from economics.distributed_chain import (
     share_to_proto, block_to_proto, proto_to_block, proto_to_share,
 )
@@ -386,6 +395,25 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             for t in (node_config.allowed_prev_node_types if node_config else [])
             if t and t.strip()
         )
+        self._require_forward_attestation = (
+            node_config.require_forward_attestation if node_config else True
+        )
+        self._require_forward_proof = (
+            node_config.require_forward_proof if node_config else False
+        )
+        self._forward_proof_max_bytes = (
+            node_config.forward_proof_max_bytes if node_config else 8192
+        )
+        self._forward_proof_allowed_formats = set(
+            str(fmt or "").strip().lower()
+            for fmt in (node_config.forward_proof_allowed_formats if node_config else ["none"])
+            if str(fmt or "").strip()
+        )
+        if not self._forward_proof_allowed_formats:
+            self._forward_proof_allowed_formats = {"none"}
+        self._forward_signer_pubkeys: dict[str, bytes] = {}
+        self._forward_signer_cache_ts = 0.0
+        self._forward_signer_cache_ttl_seconds = 10.0
         self._session_nonce_by_session: dict[str, str] = {}
         self._session_step_by_session: dict[str, int] = {}
         self._session_prev_share_hash: dict[str, str] = {}
@@ -555,6 +583,25 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             idempotency_key=payload.idempotency_key,
         )
 
+    def _record_success_share(
+        self,
+        *,
+        session_id: str,
+        activation_hash: str = "",
+        tokens_processed: int = 1,
+        share_weight: float = 1.0,
+    ) -> None:
+        """Record local work only after hop success is confirmed."""
+        if not self.registration:
+            return
+        share = self._build_signed_share(
+            session_id=session_id,
+            activation_hash=activation_hash,
+            tokens_processed=tokens_processed,
+            share_weight=share_weight,
+        )
+        self._submit_share_to_daemon(share)
+
     def _flush_share_buffer(self):
         """Send any buffered shares to the daemon."""
         with self._share_buffer_lock:
@@ -616,6 +663,120 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             registry_addr = self.registration._client.registry_address if self.registration else None
             self._discovery = RegistryClient(registry_addr)
         return self._discovery
+
+    def _refresh_forward_signer_cache(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and (now - self._forward_signer_cache_ts) < self._forward_signer_cache_ttl_seconds:
+            return
+        model_id = self.registration.model_id if self.registration else ""
+        nodes = self._get_discovery().discover(model_id)
+        cache: dict[str, bytes] = {}
+        for node in nodes:
+            if node.node_id and node.share_signing_public_key:
+                cache[str(node.node_id)] = bytes(node.share_signing_public_key)
+        if cache:
+            self._forward_signer_pubkeys = cache
+            self._forward_signer_cache_ts = now
+
+    def _get_forward_signer_key(self, signer_node_id: str) -> bytes | None:
+        key = self._forward_signer_pubkeys.get(signer_node_id)
+        if key:
+            return key
+        self._refresh_forward_signer_cache(force=True)
+        return self._forward_signer_pubkeys.get(signer_node_id)
+
+    def _build_forward_attestation(
+        self,
+        *,
+        request: inference_pb2.ForwardRequest,
+        activation_bytes: bytes,
+    ) -> tuple[str, bytes, str, bytes, str]:
+        if not self.registration or not self.registration.share_signing_private_key:
+            return "", b"", "", b"", ""
+        activation_digest = tensor_bytes_digest(activation_bytes)
+        proof = b""
+        proof_format = "none"
+        payload = ForwardAttestationPayload(
+            version=FORWARD_ATTESTATION_VERSION,
+            signer_node_id=str(self.registration.node_id),
+            signer_node_type=str(self.registration.node_type or "compute"),
+            session_id=str(request.session_id),
+            he_step=int(request.he_step),
+            he_key_id=str(request.he_key_id or ""),
+            activation_digest=activation_digest,
+            tensor_shape=make_tensor_shape_signature(list(request.tensor_shape)),
+            compressed=bool(request.compressed),
+            wire_dtype=str(request.wire_dtype or ""),
+            proof_format=proof_format,
+            proof_hash=proof_bytes_hash(proof),
+        )
+        signature = sign_forward_attestation(
+            self.registration.share_signing_private_key,
+            payload,
+        )
+        return activation_digest, signature, payload.version, proof, proof_format
+
+    def _verify_forward_attestation(
+        self,
+        request: inference_pb2.ForwardRequest,
+    ) -> tuple[bool, str]:
+        if not self._require_forward_attestation:
+            return True, "attestation_disabled"
+        if not request.activation_data:
+            return True, "no_activation_payload"
+        if not request.route_prev_node_id:
+            # Client-origin request entering the first shard.
+            return True, "no_prev_node_route"
+        signer_node_id = str(request.prev_attestation_signer_node_id or "")
+        expected_prev_node_id = str(request.route_prev_node_id or "")
+        if signer_node_id != expected_prev_node_id:
+            return False, "attestation_signer_mismatch"
+        if not request.prev_attestation_signature:
+            return False, "missing_attestation_signature"
+        computed_digest = tensor_bytes_digest(bytes(request.activation_data))
+        claimed_digest = str(request.prev_activation_digest or "")
+        if not claimed_digest:
+            return False, "missing_activation_digest"
+        if claimed_digest != computed_digest:
+            return False, "activation_digest_mismatch"
+
+        proof = bytes(request.prev_attestation_proof or b"")
+        proof_format = (request.prev_attestation_proof_format or "none").strip().lower()
+        if proof_format not in self._forward_proof_allowed_formats:
+            return False, "attestation_proof_format_not_allowed"
+        if len(proof) > int(self._forward_proof_max_bytes):
+            return False, "attestation_proof_too_large"
+        if self._require_forward_proof and proof_format == "none":
+            return False, "attestation_proof_required"
+        if proof_format != "none" and not proof:
+            return False, "attestation_proof_missing"
+        if proof_format == "none" and proof:
+            return False, "attestation_proof_unexpected"
+
+        payload = ForwardAttestationPayload(
+            version=str(request.prev_attestation_version or FORWARD_ATTESTATION_VERSION),
+            signer_node_id=signer_node_id,
+            signer_node_type=str(request.route_prev_node_type or "compute"),
+            session_id=str(request.session_id),
+            he_step=int(request.he_step),
+            he_key_id=str(request.he_key_id or ""),
+            activation_digest=claimed_digest,
+            tensor_shape=make_tensor_shape_signature(list(request.tensor_shape)),
+            compressed=bool(request.compressed),
+            wire_dtype=str(request.wire_dtype or ""),
+            proof_format=proof_format,
+            proof_hash=proof_bytes_hash(proof),
+        )
+        signer_public_key = self._get_forward_signer_key(signer_node_id)
+        if not signer_public_key:
+            return False, "attestation_signer_key_missing"
+        if not verify_forward_attestation(
+            signer_public_key,
+            payload,
+            bytes(request.prev_attestation_signature),
+        ):
+            return False, "invalid_attestation_signature"
+        return True, "ok"
 
     def _report_he_suspicion(
         self,
@@ -777,6 +938,13 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 )
                 context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
                 return inference_pb2.ForwardResponse()
+        attest_ok, attest_reason = self._verify_forward_attestation(request)
+        if not attest_ok:
+            context.set_details(
+                f"Forward attestation failed: {attest_reason}"
+            )
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            return inference_pb2.ForwardResponse()
 
         # Track active inferences for bandwidth priority
         with self._inference_lock:
@@ -876,16 +1044,6 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         is_prefill=True,
                     )
 
-                # --- Record compute share on the distributed chain ---
-                if self.registration:
-                    share = self._build_signed_share(
-                        session_id=session_id,
-                        activation_hash="",
-                        tokens_processed=1,
-                        share_weight=1.0,
-                    )
-                    self._submit_share_to_daemon(share)
-
             # --- Determine next hop ---
             next_address = None
             next_onion_blob = b""
@@ -958,6 +1116,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                             step=int(request.he_step),
                             key_id=request.he_key_id or "",
                         )
+                        self._record_success_share(
+                            session_id=session_id,
+                            activation_hash=activation_commitment,
+                        )
                         return inference_pb2.ForwardResponse(
                             has_token=False,
                             he_compute_payload=artifact,
@@ -992,6 +1154,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                             key_id=request.he_key_id or "",
                             token_id=int(sampled_token),
                             is_eos=bool(is_eos),
+                        )
+                        self._record_success_share(
+                            session_id=session_id,
+                            activation_hash=activation_commitment,
                         )
                         return inference_pb2.ForwardResponse(
                             has_token=False,
@@ -1030,6 +1196,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     resp.encrypted_response = encrypt_response(
                         my_response_key, plaintext)
 
+                self._record_success_share(
+                    session_id=session_id,
+                    activation_hash=activation_commitment,
+                )
                 return resp
 
             elif next_address is None:
@@ -1055,6 +1225,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         my_response_key, activation_bytes)
 
                 forward_ok = True
+                self._record_success_share(
+                    session_id=session_id,
+                    activation_hash=activation_commitment,
+                )
                 return resp
 
             else:
@@ -1175,6 +1349,22 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 if remaining_response_keys:
                     next_request.response_keys.extend(remaining_response_keys)
 
+                # Attach signed forward attestation so the next hop verifies
+                # before trusting activation bytes.
+                (
+                    next_request.prev_activation_digest,
+                    next_request.prev_attestation_signature,
+                    next_request.prev_attestation_version,
+                    next_request.prev_attestation_proof,
+                    next_request.prev_attestation_proof_format,
+                ) = self._build_forward_attestation(
+                    request=next_request,
+                    activation_bytes=bytes(next_request.activation_data),
+                )
+                next_request.prev_attestation_signer_node_id = (
+                    self.registration.node_id if self.registration else ""
+                )
+
                 stub = self._get_stub(next_address)
                 response = stub.Forward(next_request)
 
@@ -1182,6 +1372,11 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 if my_response_key and response.encrypted_response:
                     encrypted = encrypt_response(
                         my_response_key, response.encrypted_response)
+                    forward_ok = True
+                    self._record_success_share(
+                        session_id=session_id,
+                        activation_hash=activation_commitment,
+                    )
                     return inference_pb2.ForwardResponse(
                         encrypted_response=encrypted,
                         token_id=response.token_id,
@@ -1191,6 +1386,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     )
 
                 forward_ok = True
+                self._record_success_share(
+                    session_id=session_id,
+                    activation_hash=activation_commitment,
+                )
                 return response
 
         except Exception as e:

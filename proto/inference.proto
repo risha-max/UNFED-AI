@@ -168,6 +168,19 @@ message ForwardRequest {
   // Route provenance metadata injected by previous hop for policy checks.
   string route_prev_node_type = 35;
   string route_prev_node_id = 36;
+
+  // --- Inter-node forward attestation ---
+  // Digest of activation_data bytes signed by the previous hop.
+  string prev_activation_digest = 37;
+  // Signature over canonical forward-attestation payload.
+  bytes prev_attestation_signature = 38;
+  // Signing node identity (must match route_prev_node_id).
+  string prev_attestation_signer_node_id = 39;
+  // Attestation payload version.
+  string prev_attestation_version = 40;
+  // Optional proof artifact and format (placeholder for zk proof-carrying path).
+  bytes prev_attestation_proof = 41;
+  string prev_attestation_proof_format = 42;
 }
 
 message ForwardResponse {

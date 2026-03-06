@@ -93,6 +93,13 @@ def _build_light_servicer() -> InferenceNodeServicer:
     servicer._he_dispute_report_rate_limit_per_window = 64
     servicer._he_dispute_window_seconds = 60
     servicer._allowed_prev_node_types = set()
+    servicer._require_forward_attestation = False
+    servicer._require_forward_proof = False
+    servicer._forward_proof_max_bytes = 8192
+    servicer._forward_proof_allowed_formats = {"none"}
+    servicer._forward_signer_pubkeys = {}
+    servicer._forward_signer_cache_ts = 0.0
+    servicer._forward_signer_cache_ttl_seconds = 10.0
     servicer._report_he_suspicion = lambda **kwargs: None
     return servicer
 
