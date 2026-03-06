@@ -58,13 +58,7 @@ from network.he_compute import (
     build_encrypted_hidden_state_artifact,
     build_encrypted_topk_artifact,
 )
-from network.he_full_vocab_sidecar import (
-    SidecarUnavailableError,
-    request_full_vocab_he_artifact,
-)
 from network.he_dispute import (
-    SAMPLED_AUDIT_REASON_CODE,
-    deterministic_sample,
     sign_report_payload,
 )
 from network.randomness import compute_activation_hash, select_next_node, SessionCircuit
@@ -143,13 +137,15 @@ def _simple_log(message: str):
 
 def tensor_to_bytes(tensor: torch.Tensor,
                     compress: bool = None,
-                    wire_dtype: str = None) -> tuple[bytes, list[int], bool]:
+                    wire_dtype: str = None,
+                    threshold: int | None = None) -> tuple[bytes, list[int], bool]:
     """Serialize a tensor to bytes + shape for gRPC transfer.
 
     Args:
         tensor: Input tensor.
         compress: Override compression (None = use config default).
         wire_dtype: "float16" to halve transfer size, "float32" or None for full precision.
+        threshold: Minimum payload size (bytes) before considering compression.
 
     Returns:
         (data_bytes, shape, is_compressed)
@@ -326,6 +322,9 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
         # Verification: sample forward passes (prefill only)
         self._ticket_collector = TicketCollector(sampling_rate=sampling_rate)
+        # Verifier ticket sampling is deprecated in favor of deterministic
+        # integrity checks + suspicion/dispute handling.
+        self._ticket_collector = None
         self._seen_sessions: set[str] = set()  # track sessions to identify prefill
 
         # Daemon stub for submitting shares (replaces embedded chain)
@@ -382,8 +381,15 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._he_dispute_window_seconds = (
             node_config.he_dispute_window_seconds if node_config else 60
         )
+        self._allowed_prev_node_types = set(
+            t.strip().lower()
+            for t in (node_config.allowed_prev_node_types if node_config else [])
+            if t and t.strip()
+        )
         self._session_nonce_by_session: dict[str, str] = {}
         self._session_step_by_session: dict[str, int] = {}
+        self._session_prev_share_hash: dict[str, str] = {}
+        self._session_prev_block_hash: dict[str, str] = {}
         self._he_report_counts_by_window: dict[tuple[str, int], int] = {}
         self._he_report_lock = threading.Lock()
 
@@ -458,14 +464,22 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             return
 
         try:
-            self._daemon_stub.SubmitShares(req, timeout=5)
+            resp = self._daemon_stub.SubmitShares(req, timeout=5)
+            if int(getattr(resp, "accepted", 0)) > 0:
+                self._session_prev_share_hash[share.session_id] = share.hash()
+                if getattr(resp, "chain_tip_hash", ""):
+                    self._session_prev_block_hash[share.session_id] = str(resp.chain_tip_hash)
         except grpc.RpcError:
             self._daemon_stub = None
             self._refresh_daemon_from_registry(self._daemon_registry_addr)
             # Fast failover path: after refreshing to a new daemon, retry once.
             if self._daemon_stub is not None:
                 try:
-                    self._daemon_stub.SubmitShares(req, timeout=5)
+                    resp = self._daemon_stub.SubmitShares(req, timeout=5)
+                    if int(getattr(resp, "accepted", 0)) > 0:
+                        self._session_prev_share_hash[share.session_id] = share.hash()
+                        if getattr(resp, "chain_tip_hash", ""):
+                            self._session_prev_block_hash[share.session_id] = str(resp.chain_tip_hash)
                     return
                 except grpc.RpcError:
                     self._daemon_stub = None
@@ -514,6 +528,9 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             share_weight=share_weight,
             timestamp_ms=timestamp_ms,
             payload_hash_version=PAYLOAD_HASH_VERSION,
+            prev_block_hash=self._session_prev_block_hash.get(session_id, ""),
+            prev_share_hash=self._session_prev_share_hash.get(session_id, ""),
+            idempotency_key=f"{self.registration.node_id}:{nonce}:{step_index}",
         )
         signature = sign_bytes(
             self.registration.share_signing_private_key,
@@ -533,6 +550,9 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             signature=signature,
             payload_hash_version=payload.payload_hash_version,
             validated=False,
+            prev_block_hash=payload.prev_block_hash,
+            prev_share_hash=payload.prev_share_hash,
+            idempotency_key=payload.idempotency_key,
         )
 
     def _flush_share_buffer(self):
@@ -727,6 +747,10 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             HE_COMPUTE_MODE_SERVER_SAMPLE,
         ):
             he_compute_mode = HE_COMPUTE_MODE_OFF
+        # Registry now owns HE adjudication path; he_sidecar node role is retired.
+        # Keep compatibility by downgrading server_sample to client-sample artifact mode.
+        if he_compute_mode == HE_COMPUTE_MODE_SERVER_SAMPLE:
+            he_compute_mode = HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE
         he_decode_client_sample = (
             bool(request.he_output_enabled)
             and he_compute_mode == HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE
@@ -745,6 +769,14 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             context.set_details("Daemon is required but unavailable.")
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             return inference_pb2.ForwardResponse()
+        if self._allowed_prev_node_types:
+            prev_type = (request.route_prev_node_type or "").strip().lower()
+            if prev_type not in self._allowed_prev_node_types:
+                context.set_details(
+                    f"Previous node type '{prev_type or 'unknown'}' not allowed."
+                )
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                return inference_pb2.ForwardResponse()
 
         # Track active inferences for bandwidth priority
         with self._inference_lock:
@@ -826,7 +858,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 # --- Verification sampling (prefill only) ---
                 is_prefill = session_id not in self._seen_sessions
                 self._seen_sessions.add(session_id)
-                if is_prefill and self._ticket_collector.should_sample():
+                if self._ticket_collector and is_prefill and self._ticket_collector.should_sample():
                     # Generate ZK commitment for this computation
                     zk_commit = create_commitment(
                         shard_index=self.shard_index,
@@ -941,154 +973,6 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                             he_error=f"HE compute artifact build failed: {e}",
                         )
 
-                if request.he_output_enabled and he_compute_mode == HE_COMPUTE_MODE_SERVER_SAMPLE:
-                    try:
-                        request_payload_hash = hashlib.sha256(
-                            bytes(request.he_compute_payload)
-                        ).hexdigest()
-                        sidecar_result = request_full_vocab_he_artifact(
-                            sidecar_url=self._he_full_vocab_sidecar_url,
-                            timeout_ms=self._he_full_vocab_sidecar_timeout_ms,
-                            session_id=session_id,
-                            step=int(request.he_step),
-                            key_id=request.he_key_id or "",
-                            compute_format=request.he_compute_format or "",
-                            compute_payload=bytes(request.he_compute_payload),
-                            top_k=int(request.he_top_k or self._he_compute_top_k or 64),
-                            temperature=float(
-                                request.he_temperature
-                                if request.he_temperature > 0
-                                else self._he_compute_temperature
-                            ),
-                            top_p=float(
-                                request.he_top_p
-                                if request.he_top_p > 0
-                                else self._he_compute_top_p
-                            ),
-                        )
-                        if sidecar_result.get("he_error"):
-                            return inference_pb2.ForwardResponse(
-                                has_token=False,
-                                he_error=str(sidecar_result["he_error"]),
-                            )
-                        sidecar_payload = bytes(sidecar_result.get("he_compute_payload", b""))
-                        response_payload_hash = hashlib.sha256(sidecar_payload).hexdigest()
-                        sidecar_node_id = str(sidecar_result.get("sidecar_node_id", "") or "")
-                        sidecar_stake_identity = str(
-                            sidecar_result.get("sidecar_stake_identity", "") or ""
-                        )
-                        sidecar_step = int(sidecar_result.get("step", int(request.he_step)))
-                        sidecar_session_id = str(
-                            sidecar_result.get("session_id", session_id) or session_id
-                        )
-                        sidecar_key_id = str(
-                            sidecar_result.get("key_id", request.he_key_id or "")
-                            or (request.he_key_id or "")
-                        )
-                        sidecar_format = str(sidecar_result.get("he_compute_format", "") or "")
-                        sidecar_top_k = int(sidecar_result.get("he_top_k", 0))
-                        format_allowlist = set(self._he_sidecar_allowed_formats)
-                        violation = ""
-                        if not sidecar_payload:
-                            violation = "response_missing_payload"
-                        elif sidecar_format not in format_allowlist:
-                            violation = "response_format_not_allowed"
-                        elif sidecar_session_id != session_id or sidecar_step != int(request.he_step) or sidecar_key_id != (request.he_key_id or ""):
-                            violation = "response_binding_mismatch"
-                        elif sidecar_top_k <= 0 or sidecar_top_k > max(1, int(request.he_top_k or self._he_compute_top_k or 64)):
-                            violation = "response_schema_invalid"
-                        elif len(sidecar_payload) > int(max(1, self._he_sidecar_max_payload_bytes)):
-                            violation = "response_schema_invalid"
-                        if violation:
-                            self._report_he_suspicion(
-                                session_id=session_id,
-                                step=int(request.he_step),
-                                key_id=request.he_key_id or "",
-                                reason_code=violation,
-                                request_payload_hash=request_payload_hash,
-                                response_payload_hash=response_payload_hash,
-                                he_compute_format=sidecar_format,
-                                sidecar_node_id=sidecar_node_id,
-                                sidecar_stake_identity=sidecar_stake_identity,
-                                evidence={
-                                    "len_payload": len(sidecar_payload),
-                                    "reported_top_k": sidecar_top_k,
-                                    "expected_top_k": int(request.he_top_k or self._he_compute_top_k or 64),
-                                    "expected_format_allowlist": sorted(format_allowlist),
-                                    "reported_session_id": sidecar_session_id,
-                                    "reported_step": sidecar_step,
-                                    "reported_key_id": sidecar_key_id,
-                                },
-                            )
-                            return inference_pb2.ForwardResponse(
-                                has_token=False,
-                                he_error=f"HE sidecar integrity check failed: {violation}",
-                            )
-                        if deterministic_sample(session_id, int(request.he_step), self._he_dispute_sampling_rate):
-                            self._report_he_suspicion(
-                                session_id=session_id,
-                                step=int(request.he_step),
-                                key_id=request.he_key_id or "",
-                                reason_code=SAMPLED_AUDIT_REASON_CODE,
-                                request_payload_hash=request_payload_hash,
-                                response_payload_hash=response_payload_hash,
-                                he_compute_format=sidecar_format,
-                                sidecar_node_id=sidecar_node_id,
-                                sidecar_stake_identity=sidecar_stake_identity,
-                                evidence={
-                                    "sampling_rate": self._he_dispute_sampling_rate,
-                                    "sampled": True,
-                                },
-                            )
-                        return inference_pb2.ForwardResponse(
-                            has_token=False,
-                            he_compute_payload=sidecar_payload,
-                            he_compute_format=sidecar_format,
-                            he_top_k=sidecar_top_k,
-                            he_session_id=session_id,
-                            he_step=int(request.he_step),
-                            he_key_id=request.he_key_id or "",
-                        )
-                    except SidecarUnavailableError as e:
-                        if self._he_full_vocab_sidecar_required or he_server_sidecar_passthrough:
-                            return inference_pb2.ForwardResponse(
-                                has_token=False,
-                                he_error=str(e),
-                            )
-                        # Secure fallback to phase-1 client-side sampling artifact.
-                        if not request.he_client_pubkey:
-                            return inference_pb2.ForwardResponse(
-                                has_token=False,
-                                he_error="HE fallback requires he_client_pubkey.",
-                            )
-                        try:
-                            logits = self.runner.lm_head(hidden)
-                            last_logits = logits[0, -1].detach().cpu()
-                            top_k = int(request.he_top_k or self._he_compute_top_k or 64)
-                            top_k = max(1, min(top_k, int(last_logits.shape[-1])))
-                            artifact = build_encrypted_topk_artifact(
-                                logits_last_token=last_logits,
-                                client_public_key=bytes(request.he_client_pubkey),
-                                top_k=top_k,
-                                session_id=session_id,
-                                step=int(request.he_step),
-                                key_id=request.he_key_id or "",
-                            )
-                            return inference_pb2.ForwardResponse(
-                                has_token=False,
-                                he_compute_payload=artifact,
-                                he_compute_format=HE_COMPUTE_FORMAT_PAILLIER_V1,
-                                he_top_k=top_k,
-                                he_session_id=session_id,
-                                he_step=int(request.he_step),
-                                he_key_id=request.he_key_id or "",
-                            )
-                        except Exception as inner:
-                            return inference_pb2.ForwardResponse(
-                                has_token=False,
-                                he_error=f"HE fallback artifact build failed: {inner}",
-                            )
-
                 if request.he_output_enabled:
                     if not request.he_client_pubkey:
                         context.set_details("HE output enabled but client key is missing.")
@@ -1190,6 +1074,14 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     prefix_length=prefix_length,
                     compressed=is_compressed,
                     wire_dtype=wire_dtype or "",
+                    route_prev_node_type=(
+                        self.registration.node_type
+                        if self.registration and self.registration.node_type
+                        else "compute"
+                    ),
+                    route_prev_node_id=(
+                        self.registration.node_id if self.registration else ""
+                    ),
                 )
 
                 # Forward VL fields (image_embeddings, mrope, etc.)
@@ -1673,46 +1565,8 @@ def serve(shard_index: int, port: int, host: str = "[::]",
     cleanup_thread = threading.Thread(target=_cache_cleanup_loop, daemon=True)
     cleanup_thread.start()
 
-    # Start background ticket submission thread
-    import registry_pb2 as reg_pb2
-    import registry_pb2_grpc as reg_pb2_grpc
-
-    def _submit_tickets_loop():
-        """Periodically drain collected tickets and submit them to the registry."""
-        reg_channel = grpc.insecure_channel(
-            registry_address or config.REGISTRY_ADDRESS)
-        reg_stub = reg_pb2_grpc.RegistryStub(reg_channel)
-        while True:
-            time.sleep(ticket_interval)
-            tickets = servicer._ticket_collector.drain_tickets()
-            if not tickets:
-                continue
-            # Convert to proto messages
-            proto_tickets = []
-            for t in tickets:
-                proto_tickets.append(reg_pb2.VerificationTicketProto(
-                    ticket_id=t.ticket_id,
-                    shard_index=t.shard_index,
-                    input_data=t.input_data,
-                    input_shape=list(t.input_shape),
-                    input_is_tokens=t.input_is_tokens,
-                    expected_output_data=t.expected_output_data,
-                    expected_output_shape=list(t.expected_output_shape),
-                    expected_token=t.expected_token if t.expected_token is not None else 0,
-                    has_expected_token=t.expected_token is not None,
-                    timestamp=t.timestamp,
-                ))
-            try:
-                resp = reg_stub.SubmitTickets(reg_pb2.SubmitTicketsRequest(
-                    node_id=registration.node_id,
-                    tickets=proto_tickets,
-                ))
-                print(f"[Node] Submitted {resp.accepted} verification ticket(s)")
-            except grpc.RpcError:
-                pass  # registry may be temporarily unreachable
-
-    ticket_thread = threading.Thread(target=_submit_tickets_loop, daemon=True)
-    ticket_thread.start()
+    # Legacy verifier ticket submission is disabled; registry handles
+    # suspicion/dispute intake and settlement/slashing decisions.
 
     shutdown_event = threading.Event()
 

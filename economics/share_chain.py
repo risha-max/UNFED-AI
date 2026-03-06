@@ -56,6 +56,9 @@ class ComputeShare:
     signature: bytes = b""
     payload_hash_version: str = "v1"
     validated: bool = True
+    prev_block_hash: str = ""
+    prev_share_hash: str = ""
+    idempotency_key: str = ""
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -81,13 +84,17 @@ class ComputeShare:
                        else bytes(d.get("signature", b""))),
             payload_hash_version=d.get("payload_hash_version", "v1"),
             validated=bool(d.get("validated", True)),
+            prev_block_hash=d.get("prev_block_hash", ""),
+            prev_share_hash=d.get("prev_share_hash", ""),
+            idempotency_key=d.get("idempotency_key", ""),
         )
 
     def hash(self) -> str:
         data = f"{self.node_id}:{self.shard_index}:{self.session_id}:" \
                f"{self.activation_hash}:{self.tokens_processed}:{self.timestamp}:" \
                f"{self.session_nonce}:{self.step_index}:{self.timestamp_ms}:" \
-               f"{self.payload_hash_version}:{int(self.validated)}"
+               f"{self.payload_hash_version}:{int(self.validated)}:" \
+               f"{self.prev_block_hash}:{self.prev_share_hash}:{self.idempotency_key}"
         return hashlib.sha256(data.encode()).hexdigest()
 
 

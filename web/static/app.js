@@ -156,7 +156,9 @@ const App = {
 
             const entered = this.getWalletAddress();
             if (entered && entered.toLowerCase() !== signerAddress.toLowerCase()) {
-                throw new Error('Entered wallet does not match connected signer account');
+                // Prefer the actual signer account; users often have stale/typed
+                // addresses in the field while MetaMask is connected to another one.
+                this.setWalletHint('Using connected signer account from wallet extension.');
             }
 
             const walletEl = document.getElementById('walletAddress');

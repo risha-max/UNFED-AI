@@ -114,42 +114,6 @@ class RegistryClient:
             print(f"[Discovery] Failed to get pool health: {e.details()}")
             return None
 
-    def register_verifier(self, verifier_id: str, address: str = ""):
-        try:
-            return self._stub.RegisterVerifier(
-                registry_pb2.RegisterVerifierRequest(
-                    verifier_id=verifier_id,
-                    address=address,
-                )
-            )
-        except grpc.RpcError as e:
-            print(f"[Discovery] Failed to register verifier: {e.details()}")
-            return None
-
-    def verifier_heartbeat(self, verifier_id: str):
-        try:
-            return self._stub.VerifierHeartbeat(
-                registry_pb2.VerifierHeartbeatRequest(verifier_id=verifier_id)
-            )
-        except grpc.RpcError:
-            return None
-
-    def get_verifier_config(self, verifier_id: str = ""):
-        try:
-            return self._stub.GetVerifierConfig(
-                registry_pb2.GetVerifierConfigRequest(verifier_id=verifier_id)
-            )
-        except grpc.RpcError as e:
-            print(f"[Discovery] Failed to get verifier config: {e.details()}")
-            return None
-
-    def get_verifier_health(self):
-        try:
-            return self._stub.GetVerifierHealth(registry_pb2.GetVerifierHealthRequest())
-        except grpc.RpcError as e:
-            print(f"[Discovery] Failed to get verifier health: {e.details()}")
-            return None
-
     def get_infra_telemetry(self):
         try:
             return self._stub.GetInfraTelemetry(registry_pb2.GetInfraTelemetryRequest())
@@ -161,7 +125,7 @@ class RegistryClient:
         """Discover only compute nodes (excludes vision and MPC nodes)."""
         all_nodes = self.discover(model_id)
         return [n for n in all_nodes
-                if n.node_type not in ("vision", "mpc", "daemon", "he_sidecar")]
+                if n.node_type not in ("vision", "mpc", "daemon", "he_sidecar", "verifier")]
 
     def discover_mpc(self, model_id: str = "") -> list:
         """Discover MPC entry nodes (role A) for shard 0."""
@@ -498,7 +462,7 @@ class RegistryPool:
         """Discover only compute nodes (excludes vision and MPC)."""
         nodes = self.discover(model_id)
         return [n for n in nodes
-                if n.node_type not in ("vision", "mpc", "daemon", "he_sidecar")]
+                if n.node_type not in ("vision", "mpc", "daemon", "he_sidecar", "verifier")]
 
     def discover_mpc(self, model_id: str = "") -> list:
         """Discover MPC entry nodes."""
@@ -546,12 +510,6 @@ class RegistryPool:
         return self._try_each(
             lambda c: c.get_pool_health(model_id),
             f"get_pool_health({model_id})",
-        )
-
-    def get_verifier_health(self):
-        return self._try_each(
-            lambda c: c.get_verifier_health(),
-            "get_verifier_health",
         )
 
     def get_infra_telemetry(self):

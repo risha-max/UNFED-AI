@@ -18,7 +18,8 @@ from network.share_auth import (
 )
 
 
-def _signed_share_proto(*, node_id: str, private_key: bytes, step_index: int = 0, timestamp_ms: int | None = None):
+def _signed_share_proto(*, node_id: str, private_key: bytes, step_index: int = 0, timestamp_ms: int | None = None,
+                        prev_block_hash: str = "", prev_share_hash: str = ""):
     if timestamp_ms is None:
         timestamp_ms = int(time.time() * 1000)
     payload = SharePayload(
@@ -32,6 +33,9 @@ def _signed_share_proto(*, node_id: str, private_key: bytes, step_index: int = 0
         share_weight=1.0,
         timestamp_ms=timestamp_ms,
         payload_hash_version=PAYLOAD_HASH_VERSION,
+        prev_block_hash=prev_block_hash,
+        prev_share_hash=prev_share_hash,
+        idempotency_key=f"{node_id}:nonce-1:{step_index}",
     )
     sig = sign_bytes(private_key, canonical_share_payload_bytes(payload))
     return inference_pb2.ShareProto(
@@ -47,6 +51,9 @@ def _signed_share_proto(*, node_id: str, private_key: bytes, step_index: int = 0
         timestamp_ms=payload.timestamp_ms,
         signature=sig,
         payload_hash_version=payload.payload_hash_version,
+        prev_block_hash=payload.prev_block_hash,
+        prev_share_hash=payload.prev_share_hash,
+        idempotency_key=payload.idempotency_key,
     )
 
 
@@ -113,3 +120,47 @@ def test_daemon_enforces_session_cap(monkeypatch):
     r2 = svc.SubmitShares(second, None)
     assert r1.accepted == 1
     assert r2.accepted == 0
+
+
+def test_daemon_requires_prev_share_chain_for_next_step():
+    priv, pub = generate_signing_keypair()
+    node_id = "0x8888888888888888888888888888888888888888"
+    svc = _servicer_with_signer(node_id, pub)
+    first_share = _signed_share_proto(node_id=node_id, private_key=priv, step_index=0)
+    r1 = svc.SubmitShares(
+        inference_pb2.SubmitSharesRequest(shares=[first_share], submitter_id=node_id),
+        None,
+    )
+    assert r1.accepted == 1
+    seq_key = ("sess-1", node_id)
+    prev_share_hash = svc._last_share_hash[seq_key]
+    second_share = _signed_share_proto(
+        node_id=node_id,
+        private_key=priv,
+        step_index=1,
+        prev_block_hash=svc.chain.latest_block.block_hash,
+        prev_share_hash=prev_share_hash,
+    )
+    r2 = svc.SubmitShares(
+        inference_pb2.SubmitSharesRequest(shares=[second_share], submitter_id=node_id),
+        None,
+    )
+    assert r2.accepted == 1
+
+
+def test_daemon_rejects_tip_anchor_mismatch():
+    priv, pub = generate_signing_keypair()
+    node_id = "0x6666666666666666666666666666666666666666"
+    svc = _servicer_with_signer(node_id, pub)
+    bad_share = _signed_share_proto(
+        node_id=node_id,
+        private_key=priv,
+        step_index=1,
+        prev_block_hash="deadbeef",
+        prev_share_hash="abc",
+    )
+    resp = svc.SubmitShares(
+        inference_pb2.SubmitSharesRequest(shares=[bad_share], submitter_id=node_id),
+        None,
+    )
+    assert resp.accepted == 0

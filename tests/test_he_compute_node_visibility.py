@@ -92,6 +92,7 @@ def _build_light_servicer() -> InferenceNodeServicer:
     servicer._he_dispute_sampling_rate = 0.05
     servicer._he_dispute_report_rate_limit_per_window = 64
     servicer._he_dispute_window_seconds = 60
+    servicer._allowed_prev_node_types = set()
     servicer._report_he_suspicion = lambda **kwargs: None
     return servicer
 
@@ -136,44 +137,24 @@ def test_he_compute_mode_disables_plaintext_sampling_and_token_fields():
     assert len(scores) == 3
 
 
-def test_server_sample_passthrough_skips_output_runner_forward():
+def test_server_sample_mode_downgrades_to_client_sample_artifact():
     servicer = _build_light_servicer()
     context = _DummyContext()
-    called = {"value": False}
-    original = node_server_mod.request_full_vocab_he_artifact
-
-    def _fake_sidecar(**kwargs):
-        called["value"] = True
-        return {
-            "he_compute_payload": b'{"format":"paillier-topk-v1","session_id":"sess-he-sidecar-pass","step":1,"key_id":"kid-sidecar-pass","token_ids":[1],"scores":[{"ciphertext":"1","exponent":0}]}',
-            "he_compute_format": "paillier_v1",
-            "he_top_k": 1,
-            "he_error": "",
-            "session_id": "sess-he-sidecar-pass",
-            "step": 1,
-            "key_id": "kid-sidecar-pass",
-            "sidecar_node_id": "sidecar-x",
-            "sidecar_stake_identity": "0x0000000000000000000000000000000000000001",
-        }
-
-    node_server_mod.request_full_vocab_he_artifact = _fake_sidecar
-    try:
-        req = inference_pb2.ForwardRequest(
-            session_id="sess-he-sidecar-pass",
-            he_output_enabled=True,
-            he_key_id="kid-sidecar-pass",
-            he_step=1,
-            he_compute_mode="server_sample",
-            he_compute_payload=b"opaque-encrypted-hidden",
-            he_compute_format="paillier-hidden-v1",
-            he_top_k=1,
-            he_disable_plaintext_sampling=True,
-        )
-        resp = servicer.Forward(req, context)
-        assert called["value"] is True
-        # Critical visibility check: output-node model forward was not run.
-        assert servicer.runner.sample_token_flags == []
-        assert resp.has_token is False
-        assert resp.he_compute_payload
-    finally:
-        node_server_mod.request_full_vocab_he_artifact = original
+    _, pub = generate_client_compute_keypair()
+    req = inference_pb2.ForwardRequest(
+        session_id="sess-he-sidecar-pass",
+        activation_data=torch.zeros(1, 1, 4, dtype=torch.float32).numpy().tobytes(),
+        tensor_shape=[1, 1, 4],
+        he_output_enabled=True,
+        he_client_pubkey=pub,
+        he_key_id="kid-sidecar-pass",
+        he_step=1,
+        he_compute_mode="server_sample",
+        he_top_k=1,
+        he_disable_plaintext_sampling=True,
+    )
+    resp = servicer.Forward(req, context)
+    assert servicer.runner.sample_token_flags == [False]
+    assert resp.has_token is False
+    assert not resp.he_error
+    assert resp.he_compute_payload

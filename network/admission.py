@@ -20,11 +20,13 @@ def resolve_mpc_required_flag() -> bool:
 
 
 def resolve_verifier_required_flag() -> bool:
-    """Default true unless UNFED_REQUIRE_VERIFIER is explicitly false-like."""
-    raw = os.environ.get("UNFED_REQUIRE_VERIFIER", "1").strip().lower()
+    """Default false unless UNFED_REQUIRE_VERIFIER is explicitly true-like."""
+    raw = os.environ.get("UNFED_REQUIRE_VERIFIER", "0").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
     if raw in ("0", "false", "no", "off"):
         return False
-    return True
+    return False
 
 
 def resolve_daemon_required_flag() -> bool:

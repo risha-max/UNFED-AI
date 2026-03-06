@@ -30,6 +30,9 @@ class SharePayload:
     share_weight: float
     timestamp_ms: int
     payload_hash_version: str = PAYLOAD_HASH_VERSION
+    prev_block_hash: str = ""
+    prev_share_hash: str = ""
+    idempotency_key: str = ""
 
 
 def canonical_share_payload_bytes(payload: SharePayload) -> bytes:
@@ -37,7 +40,8 @@ def canonical_share_payload_bytes(payload: SharePayload) -> bytes:
         f"{payload.payload_hash_version}|{payload.node_id}|{payload.shard_index}|"
         f"{payload.session_id}|{payload.session_nonce}|{payload.step_index}|"
         f"{payload.activation_hash}|{payload.tokens_processed}|{payload.share_weight:.8f}|"
-        f"{payload.timestamp_ms}"
+        f"{payload.timestamp_ms}|{payload.prev_block_hash}|{payload.prev_share_hash}|"
+        f"{payload.idempotency_key}"
     ).encode("utf-8")
 
 

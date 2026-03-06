@@ -59,13 +59,11 @@ const Network = {
         // Sort infra first, then execution nodes.
         const sorted = [...nodes].sort((a, b) => {
             const order = {
-                verifier: 0,
-                daemon: 1,
-                he_sidecar: 2,
-                mpc: 3,
-                compute: 4,
-                vision: 5,
-                guard: 6,
+                daemon: 0,
+                mpc: 1,
+                compute: 2,
+                vision: 3,
+                guard: 4,
             };
             const ta = order[a.node_type] ?? 9;
             const tb = order[b.node_type] ?? 9;
@@ -81,18 +79,15 @@ const Network = {
             card.className = `node-card type-${node.node_type}`;
 
             const typeClass = node.node_type || 'compute';
-            const typeLabel = typeClass === 'he_sidecar' ? 'he-sidecar' : typeClass;
+            const typeLabel = typeClass;
             const layerInfo = node.node_function
                 || (node.node_type === 'guard'
                     ? 'Guard relay'
-                    : node.node_type === 'he_sidecar'
-                        ? 'HE encrypted compute sidecar'
                     : `Layers ${node.layer_start}-${node.layer_end - 1}`);
 
             const flags = [];
             if (node.has_embedding) flags.push('embed');
             if (node.has_lm_head) flags.push('lm_head');
-            if (node.node_type === 'verifier') flags.push('registry-coordinated');
 
             card.innerHTML = `
                 <div class="node-card-header">

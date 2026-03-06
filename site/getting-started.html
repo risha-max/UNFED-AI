@@ -150,8 +150,7 @@ pip install web3  # for on-chain staking (optional)</code></pre>
   "escrow_contract_address": "0x&lt;from deployed.env&gt;",
   "staking_token_address": "0x&lt;from deployed.env&gt;",
   "operator_private_key": "0x&lt;operator private key&gt;",
-  "daemon_required_count": 1,
-  "verifier_required_count": 3
+  "daemon_required_count": 1
 }</code></pre>
 
       <span class="code-label">Start the registry</span>
@@ -163,8 +162,7 @@ pip install web3  # for on-chain staking (optional)</code></pre>
         <p>
           <strong>Policy scope:</strong> <code>cluster_config.json</code> is loaded by
           the registry process at startup. Quorum knobs like
-          <code>daemon_required_count</code> and
-          <code>verifier_required_count</code> are registry-local policy.
+          <code>daemon_required_count</code> are registry-local policy.
         </p>
       </div>
 
@@ -263,12 +261,10 @@ python -m network.mpc_shard0 \
         </div>
 
         <div class="card">
-          <h3>Verifier Node</h3>
-          <p>Spot-check computations and detect fraud.</p>
-          <pre><code>python -m network.verifier_node \
-  --registry localhost:50050 \
-  --poll-interval 5 \
-  --shards-dir shards_smolvlm</code></pre>
+          <h3>Registry Adjudication</h3>
+          <p>The registry now handles suspicion intake, adjudication, slashing, and payments.</p>
+          <pre><code># No standalone verifier node required.
+# Start registry + daemon + compute/mpc nodes only.</code></pre>
         </div>
       </div>
 

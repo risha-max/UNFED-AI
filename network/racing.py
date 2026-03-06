@@ -7,7 +7,7 @@ each shard hop and races N replica nodes in parallel at each step.
 How it works:
   1. Client discovers N nodes per shard from the registry
   2. For each shard hop, the client sends the input to all N replicas
-  3. The first response wins (concurrent.futures.FIRST_COMPLETED)
+  3. The first valid response wins (concurrent.futures.FIRST_COMPLETED)
   4. All replicas process every token to keep their KV caches in sync
   5. When the slower response arrives, its hash is compared for verification
 
@@ -120,9 +120,12 @@ class RacingCoordinator:
                 addr = future_to_addr[future]
                 try:
                     response = future.result()
+                    if not self._is_valid_response(response):
+                        errors.append((addr, "invalid_response"))
+                        continue
 
                     if winner_response is None:
-                        # First successful response — this is the winner
+                        # First valid response — this is the winner
                         winner_response = response
                         winner_address = addr
                         latency = (time.time() - start) * 1000
@@ -164,6 +167,21 @@ class RacingCoordinator:
         )
 
         return result
+
+    @staticmethod
+    def _is_valid_response(response: inference_pb2.ForwardResponse) -> bool:
+        """Basic validity gate for first-valid-wins racing selection."""
+        if (getattr(response, "he_error", "") or "").strip():
+            return False
+        if response.has_token:
+            return True
+        if response.activation_data:
+            return True
+        if response.he_compute_payload:
+            return True
+        if response.encrypted_response:
+            return True
+        return False
 
     def _compute_response_hash(self, response: inference_pb2.ForwardResponse) -> str:
         """Compute a hash of a ForwardResponse for verification."""

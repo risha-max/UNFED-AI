@@ -5,7 +5,8 @@ Each node role has its own config class with only the fields it needs:
 
   BaseNodeConfig     — shared by all roles (port, host, registry, gRPC, network)
   ├── ComputeConfig  — shard, model, KV cache, P2P serving, verification
-  └── VerifierConfig — polling, ZK verification, sampling
+  ├── MPCConfig      — shard-0 MPC entry and DNC tuning
+  └── DaemonConfig   — sharechain/block production settings
 
 Priority: CLI > config file > defaults
 
@@ -29,12 +30,11 @@ from typing import Optional, Union
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as global_config
 
-VALID_ROLES = ("compute", "verifier", "daemon", "mpc")
+VALID_ROLES = ("compute", "daemon", "mpc")
 
 # Default ports per role
 DEFAULT_PORTS = {
     "compute": 50051,
-    "verifier": 50070,
     "daemon": 50080,
     "mpc": 50061,
 }
@@ -42,7 +42,6 @@ DEFAULT_PORTS = {
 # Default grpc_max_workers per role
 DEFAULT_WORKERS = {
     "compute": 4,
-    "verifier": 2,
     "daemon": 10,
     "mpc": 4,
 }
@@ -146,6 +145,7 @@ class ComputeConfig(BaseNodeConfig):
     max_concurrent_transfers: int = 0            # 0 = unlimited
     inference_priority: bool = True              # pause transfers during inference
     require_daemon: bool = True                  # fail requests if daemon unavailable
+    allowed_prev_node_types: list[str] = field(default_factory=list)
 
     # --- Wire/compression ---
     wire_dtype: str = "float32"                  # "float32" or "float16"
@@ -274,7 +274,6 @@ NodeConfig = Union[ComputeConfig, MPCConfig, VerifierConfig, DaemonConfig]
 _ROLE_CONFIG_MAP = {
     "compute": ComputeConfig,
     "mpc": MPCConfig,
-    "verifier": VerifierConfig,
     "daemon": DaemonConfig,
 }
 
@@ -386,6 +385,9 @@ def _validate(cfg: NodeConfig):
             raise ValueError(
                 f"kv_quantize must be 'none' or 'int8', "
                 f"got '{cfg.kv_quantize}'")
+        if (not isinstance(cfg.allowed_prev_node_types, list)
+                or any(not isinstance(x, str) for x in cfg.allowed_prev_node_types)):
+            raise ValueError("allowed_prev_node_types must be a list[string]")
         if cfg.wire_dtype not in ("float32", "float16"):
             raise ValueError(
                 f"wire_dtype must be 'float32' or 'float16', got '{cfg.wire_dtype}'")
@@ -537,6 +539,7 @@ def print_config_summary(cfg: NodeConfig, config_path: Optional[str]):
         print(f"  Max transfers:   {conc_str}")
         print(f"  Infer priority:  {'yes' if cfg.inference_priority else 'no'}")
         print(f"  Require daemon:  {'yes' if cfg.require_daemon else 'no'}")
+        print(f"  Allowed prev:    {', '.join(cfg.allowed_prev_node_types) if cfg.allowed_prev_node_types else '(any)'}")
         print(div)
         print(f"  Wire dtype:      {cfg.wire_dtype}")
         print(f"  Compress acts:   {'yes' if cfg.compress_activations else 'no'}")

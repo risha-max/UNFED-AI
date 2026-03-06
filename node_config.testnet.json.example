@@ -7,6 +7,7 @@
   "shards_dir": "./shards",
   "device": "auto",
   "require_daemon": true,
+  "allowed_prev_node_types": [],
   "wire_dtype": "float32",
   "compress_activations": true,
   "compress_threshold": 16384,

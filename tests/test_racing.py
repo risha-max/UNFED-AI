@@ -141,6 +141,41 @@ def test_race_shard_fault_tolerance():
     coordinator.close()
 
 
+def test_race_shard_first_valid_wins_over_fast_invalid():
+    """Fast invalid response must lose to slower valid response."""
+    print("\n=== Test: Race Shard First Valid Wins ===")
+
+    coordinator = RacingCoordinator(replicas=2, timeout=10)
+
+    invalid_fast = inference_pb2.ForwardResponse(
+        has_token=False,
+        he_error="MAC verification failed",
+    )
+    valid_slow = _make_activation_response(b"valid_activation")
+
+    def mock_forward(address, request):
+        if address == "fast-bad:50051":
+            time.sleep(0.05)
+            return invalid_fast
+        time.sleep(0.2)
+        return valid_slow
+
+    coordinator._forward_to_node = mock_forward
+    request = inference_pb2.ForwardRequest(session_id="test-first-valid")
+
+    result = coordinator.race_shard(
+        shard_index=0,
+        node_addresses=["fast-bad:50051", "slow-good:50052"],
+        request=request,
+    )
+
+    assert result.winner_address == "slow-good:50052"
+    assert result.response.activation_data == b"valid_activation"
+    print(f"  Winner: {result.winner_address}")
+    print("  PASSED")
+    coordinator.close()
+
+
 def test_all_racers_fail():
     """Test that racing raises RuntimeError when all racers fail."""
     print("\n=== Test: All Racers Fail ===")

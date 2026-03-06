@@ -60,11 +60,8 @@ class Settlement:
     finalized: bool = False
     total_payout: float = 0.0
     daemon_recipient: str = ""
-    verifier_recipient: str = ""
     daemon_fee_bps: int = 0
-    verifier_fee_bps: int = 0
     daemon_work_map: dict[str, float] = field(default_factory=dict)
-    verifier_work_map: dict[str, float] = field(default_factory=dict)
 
 
 # --- Stake Manager ---
@@ -215,9 +212,7 @@ class PaymentContract:
         self._settlements: list[Settlement] = []
         self._lock = threading.Lock()
         self._default_daemon_recipient: str = ""
-        self._default_verifier_recipient: str = ""
         self._default_daemon_fee_bps: int = 0
-        self._default_verifier_fee_bps: int = 0
 
         if self._onchain_escrow:
             print("[PaymentContract] On-chain escrow attached — "
@@ -275,11 +270,8 @@ class PaymentContract:
         summary: SettlementSummary,
         *,
         daemon_recipient: str | None = None,
-        verifier_recipient: str | None = None,
         daemon_fee_bps: int | None = None,
-        verifier_fee_bps: int | None = None,
         daemon_work_map: dict[str, float] | None = None,
-        verifier_work_map: dict[str, float] | None = None,
     ) -> Settlement:
         """
         Post a settlement from the share-chain.
@@ -310,20 +302,11 @@ class PaymentContract:
                 self._default_daemon_recipient
                 if daemon_recipient is None else (daemon_recipient or "")
             ),
-            verifier_recipient=(
-                self._default_verifier_recipient
-                if verifier_recipient is None else (verifier_recipient or "")
-            ),
             daemon_fee_bps=(
                 self._default_daemon_fee_bps
                 if daemon_fee_bps is None else int(max(0, daemon_fee_bps))
             ),
-            verifier_fee_bps=(
-                self._default_verifier_fee_bps
-                if verifier_fee_bps is None else int(max(0, verifier_fee_bps))
-            ),
             daemon_work_map=dict(daemon_work_map or {}),
-            verifier_work_map=dict(verifier_work_map or {}),
         )
 
         with self._lock:
@@ -340,73 +323,46 @@ class PaymentContract:
         self,
         *,
         daemon_recipient: str = "",
-        verifier_recipient: str = "",
         daemon_fee_bps: int = 0,
-        verifier_fee_bps: int = 0,
     ) -> None:
         """Set default infra payout policy used for new settlements."""
         self._default_daemon_recipient = daemon_recipient or ""
-        self._default_verifier_recipient = verifier_recipient or ""
         self._default_daemon_fee_bps = int(max(0, daemon_fee_bps))
-        self._default_verifier_fee_bps = int(max(0, verifier_fee_bps))
 
     def _settlement_payout_split(self, settlement: Settlement) -> dict[str, float]:
-        """Compute payout map for compute nodes + infra recipients."""
-        total_revenue = settlement.total_payout
-        daemon_fee_bps = int(max(0, settlement.daemon_fee_bps))
-        verifier_fee_bps = int(max(0, settlement.verifier_fee_bps))
-        max_fee_bps = min(9999, daemon_fee_bps + verifier_fee_bps)
-        if daemon_fee_bps + verifier_fee_bps != max_fee_bps:
-            scale = max_fee_bps / max(1, daemon_fee_bps + verifier_fee_bps)
-            daemon_fee_bps = int(daemon_fee_bps * scale)
-            verifier_fee_bps = int(verifier_fee_bps * scale)
-        daemon_cut = total_revenue * (daemon_fee_bps / 10000.0)
-        verifier_cut = total_revenue * (verifier_fee_bps / 10000.0)
+        """Compute payout map for compute nodes + registry recipient.
 
-        daemon_weights = {
+        Node payouts are computed first from total settlement revenue.
+        Registry/infra recipients receive only any remainder.
+        """
+        total_revenue = settlement.total_payout
+        registry_weights = {
             node_id: float(weight)
             for node_id, weight in (settlement.daemon_work_map or {}).items()
             if float(weight) > 0
         }
-        verifier_weights = {
-            node_id: float(weight)
-            for node_id, weight in (settlement.verifier_work_map or {}).items()
-            if float(weight) > 0
-        }
-
-        if not daemon_weights and settlement.daemon_recipient:
-            daemon_weights = {settlement.daemon_recipient: 1.0}
-        if not verifier_weights and settlement.verifier_recipient:
-            verifier_weights = {settlement.verifier_recipient: 1.0}
-
-        if not daemon_weights:
-            daemon_cut = 0.0
-        if not verifier_weights:
-            verifier_cut = 0.0
-        node_pool = max(0.0, total_revenue - daemon_cut - verifier_cut)
+        if not registry_weights and settlement.daemon_recipient:
+            registry_weights = {settlement.daemon_recipient: 1.0}
 
         payouts: dict[str, float] = {}
         total_shares = settlement.summary.total_shares
+        node_paid_total = 0.0
         for node_id, weighted_shares in settlement.summary.node_shares.items():
             payout = 0.0
             if total_shares > 0:
-                payout = node_pool * (weighted_shares / total_shares)
+                payout = total_revenue * (weighted_shares / total_shares)
             if payout > 0:
                 payouts[node_id] = payouts.get(node_id, 0.0) + payout
+                node_paid_total += payout
 
-        if daemon_cut > 0 and daemon_weights:
-            daemon_total = sum(daemon_weights.values())
-            if daemon_total > 0:
-                for node_id, weight in daemon_weights.items():
+        # Registry payout is only the remainder after compute node payouts.
+        registry_remainder = max(0.0, total_revenue - node_paid_total)
+        if registry_remainder > 0 and registry_weights:
+            registry_total = sum(registry_weights.values())
+            if registry_total > 0:
+                for node_id, weight in registry_weights.items():
                     payouts[node_id] = payouts.get(node_id, 0.0) + (
-                        daemon_cut * (weight / daemon_total)
-                    )
-        if verifier_cut > 0 and verifier_weights:
-            verifier_total = sum(verifier_weights.values())
-            if verifier_total > 0:
-                for node_id, weight in verifier_weights.items():
-                    payouts[node_id] = payouts.get(node_id, 0.0) + (
-                        verifier_cut * (weight / verifier_total)
+                        registry_remainder * (weight / registry_total)
                     )
         return payouts
 
@@ -462,7 +418,20 @@ class PaymentContract:
                     continue
 
                 payouts = self._settlement_payout_split(s)
+                compute_recipient_ids = set(s.summary.node_shares.keys())
+
+                # 1) Pay compute nodes first.
                 for node_id, payout in payouts.items():
+                    if node_id not in compute_recipient_ids:
+                        continue
+                    if payout > 0 and payout <= self._escrow_balance:
+                        self._escrow_balance -= payout
+                        self.stakes.credit_earnings(node_id, payout)
+
+                # 2) Pay registry/infra recipients with remaining escrow.
+                for node_id, payout in payouts.items():
+                    if node_id in compute_recipient_ids:
+                        continue
                     if payout > 0 and payout <= self._escrow_balance:
                         self._escrow_balance -= payout
                         self.stakes.credit_earnings(node_id, payout)

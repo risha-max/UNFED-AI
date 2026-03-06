@@ -164,6 +164,10 @@ message ForwardRequest {
 
   // Hint to downstream nodes to avoid plaintext token sampling path.
   bool he_disable_plaintext_sampling = 34;
+
+  // Route provenance metadata injected by previous hop for policy checks.
+  string route_prev_node_type = 35;
+  string route_prev_node_id = 36;
 }
 
 message ForwardResponse {
@@ -388,6 +392,9 @@ message ShareProto {
   bytes signature = 11;
   string payload_hash_version = 12;
   bool validated = 13;
+  string prev_block_hash = 14;      // daemon tip anchor hash at share creation time
+  string prev_share_hash = 15;      // previous accepted share hash for this node/session
+  string idempotency_key = 16;      // unique key: node/session_nonce/step
 }
 
 message BlockMessage {
@@ -424,6 +431,8 @@ message SubmitSharesRequest {
 message SubmitSharesResponse {
   int32 accepted = 1;                 // Number of shares accepted
   int32 pending_pool_size = 2;       // Current size of daemon's pending pool
+  string chain_tip_hash = 3;         // Daemon tip hash after submission
+  int32 chain_tip_height = 4;        // Daemon tip height after submission
 }
 
 message SubscribeBlocksRequest {

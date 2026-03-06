@@ -29,19 +29,13 @@ class _FakeDiscovery:
             SimpleNamespace(node_type="compute"),
         ]
 
-    def get_verifier_health(self):
-        return SimpleNamespace(healthy_verifier_count=2, required_verifier_count=2)
-
     def get_infra_telemetry(self):
         return SimpleNamespace(
             healthy_daemon_count=1,
             required_daemon_count=1,
             selected_daemon_recipient="0xdaemon",
-            selected_verifier_recipient="0xverifier",
             daemon_work_window_json='{"0xdaemon": 4.0}',
-            verifier_work_window_json='{"ver-1": 3.0}',
             daemon_payout_share_json='{"0xdaemon": 1.0}',
-            verifier_payout_share_json='{"0xverifier": 1.0}',
         )
 
 
@@ -52,9 +46,8 @@ async def test_network_health_exposes_infra_telemetry(monkeypatch):
     assert payload["healthy_daemon_count"] == 1
     assert payload["required_daemon_count"] == 1
     assert payload["selected_daemon_recipient"] == "0xdaemon"
-    assert payload["selected_verifier_recipient"] == "0xverifier"
     assert payload["daemon_work_window"] == {"0xdaemon": 4.0}
-    assert payload["verifier_payout_share"] == {"0xverifier": 1.0}
+    assert payload["daemon_payout_share"] == {"0xdaemon": 1.0}
 
 
 @pytest.mark.anyio

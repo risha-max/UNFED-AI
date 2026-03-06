@@ -94,24 +94,10 @@ class ClusterConfig:
     cooldown_seconds: int = 3600         # Unbonding delay
     challenge_window_seconds: int = 60   # Settlement dispute window
 
-    # --- Verifier policy (registry-owned source of truth) ---
-    verifier_required_count: int = 1
-    verifier_heartbeat_timeout_seconds: int = 30
-    verifier_poll_interval_seconds: float = 5.0
-    verifier_max_tickets_per_poll: int = 10
-    verifier_sampling_baseline: float = 0.05
-    verifier_sampling_suspicious: float = 0.2
-    verifier_sampling_max: float = 1.0
-    verifier_adaptive_enabled: bool = True
+    # --- Infra policy ---
     daemon_required_count: int = 1
     daemon_heartbeat_timeout_seconds: int = 30
     daemon_fee_bps: int = 200
-    verifier_fee_bps: int = 100
-    verifier_fraud_bonus_weight: float = 3.0
-    verifier_bonus_requires_confirmation: bool = True
-    verifier_false_claim_slash_bps: int = 500
-    verifier_claim_rate_limit_per_window: int = 64
-    verifier_bonus_cooldown_windows: int = 1
     he_dispute_sampling_rate: float = 0.05
     he_dispute_report_rate_limit_per_window: int = 64
     he_dispute_window_seconds: int = 60
@@ -145,48 +131,12 @@ class ClusterConfig:
         if self.default_fee_min > self.default_fee_max:
             errors.append(f"default_fee_min ({self.default_fee_min}) > "
                           f"default_fee_max ({self.default_fee_max})")
-        if self.verifier_required_count < 1:
-            errors.append("verifier_required_count must be >= 1")
         if self.daemon_required_count < 1:
             errors.append("daemon_required_count must be >= 1")
-        if self.verifier_heartbeat_timeout_seconds <= 0:
-            errors.append("verifier_heartbeat_timeout_seconds must be > 0")
         if self.daemon_heartbeat_timeout_seconds <= 0:
             errors.append("daemon_heartbeat_timeout_seconds must be > 0")
-        if self.verifier_poll_interval_seconds <= 0:
-            errors.append("verifier_poll_interval_seconds must be > 0")
-        if self.verifier_max_tickets_per_poll <= 0:
-            errors.append("verifier_max_tickets_per_poll must be > 0")
-        for name in (
-            "verifier_sampling_baseline",
-            "verifier_sampling_suspicious",
-            "verifier_sampling_max",
-        ):
-            value = getattr(self, name)
-            if not 0.0 <= value <= 1.0:
-                errors.append(f"{name} must be in [0.0, 1.0], got {value}")
-        if self.verifier_sampling_baseline > self.verifier_sampling_suspicious:
-            errors.append(
-                "verifier_sampling_baseline must be <= verifier_sampling_suspicious"
-            )
-        if self.verifier_sampling_suspicious > self.verifier_sampling_max:
-            errors.append(
-                "verifier_sampling_suspicious must be <= verifier_sampling_max"
-            )
         if not 0 <= int(self.daemon_fee_bps) <= 10000:
             errors.append("daemon_fee_bps must be in [0, 10000]")
-        if not 0 <= int(self.verifier_fee_bps) <= 10000:
-            errors.append("verifier_fee_bps must be in [0, 10000]")
-        if int(self.daemon_fee_bps) + int(self.verifier_fee_bps) >= 10000:
-            errors.append("daemon_fee_bps + verifier_fee_bps must be < 10000")
-        if float(self.verifier_fraud_bonus_weight) < 0.0:
-            errors.append("verifier_fraud_bonus_weight must be >= 0.0")
-        if not 0 <= int(self.verifier_false_claim_slash_bps) <= 10000:
-            errors.append("verifier_false_claim_slash_bps must be in [0, 10000]")
-        if int(self.verifier_claim_rate_limit_per_window) <= 0:
-            errors.append("verifier_claim_rate_limit_per_window must be > 0")
-        if int(self.verifier_bonus_cooldown_windows) < 0:
-            errors.append("verifier_bonus_cooldown_windows must be >= 0")
         if not 0.0 <= float(self.he_dispute_sampling_rate) <= 1.0:
             errors.append("he_dispute_sampling_rate must be in [0.0, 1.0]")
         if int(self.he_dispute_report_rate_limit_per_window) <= 0:

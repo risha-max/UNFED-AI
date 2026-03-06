@@ -46,7 +46,7 @@ from network.he_dispute import (
     verify_report_signature,
 )
 from network.share_auth import registration_pop_payload, verify_signature
-from economics.share_chain import ShareChain, ComputeShare
+from economics.share_chain import ShareChain
 from economics.payments import StakeManager, PaymentContract, SettlementProcessor
 from economics.model_pools import PoolRegistry, PoolManifest
 from economics.pool_config import PoolConfig
@@ -295,17 +295,17 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 "last_seen": 0.0,
             }
 
-        # Verification ticket queue
-        self._pending_tickets: list = []  # VerificationTicketProto messages
+        # Legacy verification queue (retained for backwards-compatible state shape)
+        self._pending_tickets: list = []
         self._tickets_lock = threading.Lock()
 
-        # Fraud proofs
-        self._fraud_proofs: list = []  # FraudProofMessage messages
+        # Legacy fraud-proof storage (retained for backwards-compatible state shape)
+        self._fraud_proofs: list = []
         self._fraud_lock = threading.Lock()
 
         # Map ticket_id -> node_id (to identify the fraudulent node)
         self._ticket_owners: dict[str, str] = {}
-        self._ticket_index: dict[str, registry_pb2.VerificationTicketProto] = {}
+        self._ticket_index: dict[str, object] = {}
         self._ticket_owners_lock = threading.Lock()
         self._claim_lock = threading.Lock()
         self._claims_by_id: dict[str, VerifierClaimRecord] = {}
@@ -314,7 +314,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._verifier_bonus_cooldown_until_window: dict[str, int] = {}
         self._verifier_penalty_events: list[dict] = []
         self._he_dispute_lock = threading.Lock()
-        self._he_pending_tickets: list[registry_pb2.HEDisputeTicket] = []
+        self._he_pending_tickets: list = []
         self._he_disputes_by_ticket: dict[str, HEDisputeRecord] = {}
         self._he_dispute_by_idempotency: dict[str, str] = {}
         self._he_report_rate_window: dict[tuple[str, int], int] = defaultdict(int)
@@ -325,6 +325,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._daemon_height_cursor: dict[str, int] = {}
         self._last_daemon_payout_share: dict[str, float] = {}
         self._last_verifier_payout_share: dict[str, float] = {}
+        self._share_window_audit_lock = threading.Lock()
+        self._share_window_audits: list[dict] = []
 
         # Model manifests (model_id -> manifest JSON string)
         self._manifests: dict[str, str] = {}
@@ -433,14 +435,12 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             time.sleep(5)
             self._refresh_daemon_work_window()
             settlements = self._share_chain.get_settlements()
-            verifier_ok = self._verifier_healthy()
             daemon_ok = self._daemon_healthy()
-            infra_ok = verifier_ok and daemon_ok
-            if gate_last_state is None or gate_last_state != (verifier_ok, daemon_ok):
-                v_state = "healthy" if verifier_ok else "unhealthy"
+            infra_ok = daemon_ok
+            if gate_last_state is None or gate_last_state != (daemon_ok, daemon_ok):
                 d_state = "healthy" if daemon_ok else "unhealthy"
-                print(f"[Registry] Verifier gate={v_state}, daemon gate={d_state}")
-                gate_last_state = (verifier_ok, daemon_ok)
+                print(f"[Registry] Daemon gate={d_state}")
+                gate_last_state = (daemon_ok, daemon_ok)
 
             if len(settlements) > last_count:
                 if not infra_ok:
@@ -450,17 +450,30 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     if s.total_shares <= 0:
                         print("[Registry] Skipping settlement with zero validated shares")
                         continue
+                    with self._share_window_audit_lock:
+                        audited_windows = {
+                            str(item.get("window_id", ""))
+                            for item in self._share_window_audits
+                        }
+                    start_b, end_b = int(s.block_range[0]), int(s.block_range[1])
+                    missing_audits = [
+                        b for b in range(start_b, end_b + 1)
+                        if f"block-{b}" not in audited_windows
+                    ]
+                    if missing_audits:
+                        print(
+                            "[Registry] Skipping settlement: missing share-window audits "
+                            f"for blocks {missing_audits[:6]}"
+                            f"{'...' if len(missing_audits) > 6 else ''}"
+                        )
+                        continue
                     daemon_recipient = self._select_daemon_recipient()
-                    verifier_recipient = self._select_verifier_recipient()
-                    daemon_work_map, verifier_work_map = self._consume_infra_work_maps()
+                    daemon_work_map = self._consume_infra_work_maps()
                     self._settlement_processor.process_settlement(
                         s,
                         daemon_recipient=daemon_recipient,
-                        verifier_recipient=verifier_recipient,
                         daemon_fee_bps=int(self._cluster_config.daemon_fee_bps),
-                        verifier_fee_bps=int(self._cluster_config.verifier_fee_bps),
                         daemon_work_map=daemon_work_map,
-                        verifier_work_map=verifier_work_map,
                     )
 
                     # Post on-chain if escrow is enabled
@@ -505,13 +518,13 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 now = time.time()
                 still_pending = []
                 for s_hash, deadline in onchain_pending:
-                    if now >= deadline and verifier_ok and daemon_ok:
+                    if now >= deadline and daemon_ok:
                         try:
                             self._onchain_escrow.finalize_settlement(s_hash)
                         except Exception as e:
                             print(f"[Registry] On-chain finalization "
                                   f"failed: {e}")
-                    elif now >= deadline and (not verifier_ok or not daemon_ok):
+                    elif now >= deadline and (not daemon_ok):
                         still_pending.append((s_hash, deadline))
                     else:
                         still_pending.append((s_hash, deadline))
@@ -595,32 +608,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     print(f"[Registry] ORPHANED shard {record.shard_index} "
                           f"for {record.model_id} — queued for reassignment")
 
-        self._remove_stale_verifiers()
-
-    def _remove_stale_verifiers(self):
-        timeout = max(1, int(self._cluster_config.verifier_heartbeat_timeout_seconds))
-        now = time.time()
-        with self._verifier_lock:
-            stale = [
-                vid for vid, rec in self._verifiers.items()
-                if now - rec.last_heartbeat > timeout
-            ]
-            for vid in stale:
-                rec = self._verifiers.pop(vid)
-                print(f"[Registry] Removed stale verifier {vid[:8]}... ({rec.address})")
-                self._verifier_health_last_change = now
-
-    def _healthy_verifier_count(self) -> int:
-        timeout = max(1, int(self._cluster_config.verifier_heartbeat_timeout_seconds))
-        now = time.time()
-        with self._verifier_lock:
-            return sum(
-                1 for rec in self._verifiers.values()
-                if (now - rec.last_heartbeat) <= timeout
-            )
-
-    def _verifier_healthy(self) -> bool:
-        return self._healthy_verifier_count() >= int(self._cluster_config.verifier_required_count)
+        # Verifier role retired: no verifier liveness maintenance.
 
     def _healthy_daemon_count(self) -> int:
         timeout = max(1, int(self._cluster_config.daemon_heartbeat_timeout_seconds))
@@ -635,28 +623,13 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         return self._healthy_daemon_count() >= int(self._cluster_config.daemon_required_count)
 
     def _select_daemon_recipient(self) -> str:
-        """Pick deterministic daemon payout recipient from healthy daemon set."""
-        timeout = max(1, int(self._cluster_config.daemon_heartbeat_timeout_seconds))
-        now = time.time()
-        with self._lock:
-            healthy = [
-                rec.node_id for rec in self._nodes.values()
-                if rec.node_type == "daemon" and (now - rec.last_heartbeat) <= timeout
-            ]
-        healthy.sort()
-        return healthy[0] if healthy else ""
-
-    def _select_verifier_recipient(self) -> str:
-        """Pick deterministic verifier payout recipient from healthy verifier set."""
-        timeout = max(1, int(self._cluster_config.verifier_heartbeat_timeout_seconds))
-        now = time.time()
-        with self._verifier_lock:
-            healthy = [
-                rec.payout_address for rec in self._verifiers.values()
-                if rec.payout_address and (now - rec.last_heartbeat) <= timeout
-            ]
-        healthy.sort()
-        return healthy[0] if healthy else ""
+        """Registry payout recipient for settlement residuals."""
+        if self._onchain_escrow:
+            try:
+                return str(self._onchain_escrow.operator_address() or "")
+            except Exception:
+                pass
+        return "registry"
 
     def _refresh_daemon_work_window(self):
         """Accumulate daemon work units from newly produced daemon blocks."""
@@ -694,11 +667,10 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     self._daemon_work_window[daemon_id] += added_work
             self._daemon_height_cursor[daemon_id] = max_height
 
-    def _consume_infra_work_maps(self) -> tuple[dict[str, float], dict[str, float]]:
-        """Return and clear daemon/verifier work counters for current settlement."""
+    def _consume_infra_work_maps(self) -> dict[str, float]:
+        """Return and clear daemon work counters for current settlement."""
         now = time.time()
         daemon_timeout = max(1, int(self._cluster_config.daemon_heartbeat_timeout_seconds))
-        verifier_timeout = max(1, int(self._cluster_config.verifier_heartbeat_timeout_seconds))
 
         with self._lock:
             healthy_daemon_ids = {
@@ -706,39 +678,19 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 for rec in self._nodes.values()
                 if rec.node_type == "daemon" and (now - rec.last_heartbeat) <= daemon_timeout
             }
-        with self._verifier_lock:
-            healthy_verifier_payout = {
-                vid: rec.payout_address
-                for vid, rec in self._verifiers.items()
-                if rec.payout_address and (now - rec.last_heartbeat) <= verifier_timeout
-            }
 
         with self._infra_work_lock:
             daemon_raw = dict(self._daemon_work_window)
-            verifier_ticket_raw = dict(self._verifier_ticket_window)
-            verifier_bonus_raw = dict(self._verifier_bonus_window)
             self._daemon_work_window.clear()
-            self._verifier_ticket_window.clear()
-            self._verifier_bonus_window.clear()
 
         daemon_map: dict[str, float] = {}
         for daemon_id, units in daemon_raw.items():
             if daemon_id in healthy_daemon_ids and float(units) > 0:
                 daemon_map[daemon_id] = float(units)
 
-        bonus_weight = float(getattr(self._cluster_config, "verifier_fraud_bonus_weight", 3.0))
-        verifier_map: dict[str, float] = {}
-        for verifier_id, payout_addr in healthy_verifier_payout.items():
-            ticket_units = float(verifier_ticket_raw.get(verifier_id, 0.0))
-            bonus_units = float(verifier_bonus_raw.get(verifier_id, 0.0))
-            total_units = ticket_units + (bonus_units * bonus_weight)
-            if total_units > 0:
-                verifier_map[payout_addr] = verifier_map.get(payout_addr, 0.0) + total_units
-
         with self._infra_work_lock:
             self._last_daemon_payout_share = self._normalize_map(daemon_map)
-            self._last_verifier_payout_share = self._normalize_map(verifier_map)
-        return daemon_map, verifier_map
+        return daemon_map
 
     @staticmethod
     def _normalize_map(weight_map: dict[str, float]) -> dict[str, float]:
@@ -751,37 +703,6 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             for key, value in weight_map.items()
             if float(value) > 0
         }
-
-    def _effective_verifier_config_json(self) -> str:
-        policy = {
-            "poll_interval_seconds": float(self._cluster_config.verifier_poll_interval_seconds),
-            "max_tickets_per_poll": int(self._cluster_config.verifier_max_tickets_per_poll),
-            "sampling_baseline": float(self._cluster_config.verifier_sampling_baseline),
-            "sampling_suspicious": float(self._cluster_config.verifier_sampling_suspicious),
-            "sampling_max": float(self._cluster_config.verifier_sampling_max),
-            "adaptive_enabled": bool(self._cluster_config.verifier_adaptive_enabled),
-            "heartbeat_timeout_seconds": int(self._cluster_config.verifier_heartbeat_timeout_seconds),
-            "required_count": int(self._cluster_config.verifier_required_count),
-            "bonus_requires_confirmation": bool(
-                getattr(self._cluster_config, "verifier_bonus_requires_confirmation", True)
-            ),
-            "false_claim_slash_bps": int(
-                getattr(self._cluster_config, "verifier_false_claim_slash_bps", 500)
-            ),
-            "claim_rate_limit_per_window": int(
-                getattr(self._cluster_config, "verifier_claim_rate_limit_per_window", 64)
-            ),
-            "bonus_cooldown_windows": int(
-                getattr(self._cluster_config, "verifier_bonus_cooldown_windows", 1)
-            ),
-            "he_dispute_sampling_rate": float(
-                getattr(self._cluster_config, "he_dispute_sampling_rate", config.HE_DISPUTE_SAMPLING_RATE)
-            ),
-            "he_dispute_rollout_stage": str(
-                getattr(self._cluster_config, "he_dispute_rollout_stage", config.HE_DISPUTE_ROLLOUT_STAGE)
-            ),
-        }
-        return json.dumps(policy)
 
     def _current_settlement_window(self) -> int:
         blocks = max(1, int(self._share_chain.settlement_blocks))
@@ -1255,6 +1176,13 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         sufficient on-chain stake before admitting it.  The node_id
         is treated as an Ethereum address for stake lookups.
         """
+        node_type = (request.node_type or "compute").strip().lower()
+        if node_type in ("verifier", "he_sidecar"):
+            return registry_pb2.RegisterResponse(
+                success=False,
+                message=f"{node_type} role is retired; registry now owns this responsibility",
+            )
+
         # --- On-chain stake gate ---
         if self._onchain_escrow:
             try:
@@ -1275,7 +1203,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     success=False, message=msg)
 
         # --- Share signing key proof-of-possession gate ---
-        if request.node_type in ("compute", "mpc"):
+        if node_type in ("compute", "mpc"):
             if len(request.share_signing_public_key) != 32:
                 return registry_pb2.RegisterResponse(
                     success=False,
@@ -1291,7 +1219,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 address=request.address,
                 model_id=request.model_id,
                 shard_index=request.shard_index,
-                node_type=request.node_type or "compute",
+                node_type=node_type,
             )
             if not verify_signature(
                 bytes(request.share_signing_public_key),
@@ -1302,7 +1230,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     success=False,
                     message="invalid share_signing_pop signature",
                 )
-        if request.node_type == "he_sidecar":
+        if node_type == "he_sidecar":
             if not (request.capability_json or "").strip():
                 return registry_pb2.RegisterResponse(
                     success=False,
@@ -1332,7 +1260,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
         with self._lock:
             effective_stake_identity = (request.stake_identity or "").strip()
-            if not effective_stake_identity and request.node_type == "he_sidecar":
+            if not effective_stake_identity and node_type == "he_sidecar":
                 effective_stake_identity = (request.node_id or "").strip()
             record = NodeRecord(
                 node_id=request.node_id,
@@ -1344,14 +1272,13 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 has_embedding=request.has_embedding,
                 has_lm_head=request.has_lm_head,
                 public_key=request.public_key,
-                node_type=request.node_type or "compute",
+                node_type=node_type,
                 share_signing_public_key=bytes(request.share_signing_public_key),
                 capability_json=(request.capability_json or "").strip(),
                 stake_identity=effective_stake_identity,
             )
             self._nodes[request.node_id] = record
 
-        node_type = request.node_type or "compute"
         print(f"[Registry] Node registered: {request.node_id[:8]}... "
               f"type={node_type} model={request.model_id} shard={request.shard_index} "
               f"layers={request.layer_start}-{request.layer_end - 1} "
@@ -1382,120 +1309,44 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
         return registry_pb2.HeartbeatResponse(acknowledged=False)
 
-    def RegisterVerifier(self, request, context):
-        """Register a verifier process and return effective verifier config."""
-        verifier_id = (request.verifier_id or "").strip()
-        if not verifier_id:
-            return registry_pb2.RegisterVerifierResponse(
-                success=False, message="verifier_id is required"
-            )
-        payout_address = ""
-        if _is_eth_address(verifier_id):
-            payout_address = verifier_id
-        elif _is_eth_address(request.address or ""):
-            payout_address = request.address
-
-        # When on-chain escrow is active and verifier payouts are enabled,
-        # verifier recipient must be a staked EVM address.
-        if self._onchain_escrow and int(self._cluster_config.verifier_fee_bps) > 0:
-            if not payout_address:
-                return registry_pb2.RegisterVerifierResponse(
-                    success=False,
-                    message="verifier must provide EVM payout identity when verifier_fee_bps > 0",
-                )
-            if not self._onchain_escrow.is_eligible(payout_address):
-                min_stake = self._onchain_escrow.min_stake()
-                return registry_pb2.RegisterVerifierResponse(
-                    success=False,
-                    message=f"verifier stake too low. Minimum: {min_stake} wei",
-                )
-        with self._verifier_lock:
-            self._verifiers[verifier_id] = VerifierRecord(
-                verifier_id=verifier_id,
-                address=request.address or "",
-                payout_address=payout_address,
-            )
-            self._verifier_health_last_change = time.time()
-        print(f"[Registry] Verifier registered: {verifier_id[:8]}... at {request.address}")
-        return registry_pb2.RegisterVerifierResponse(
-            success=True,
-            message="registered",
-            config_json=self._effective_verifier_config_json(),
-        )
-
-    def VerifierHeartbeat(self, request, context):
-        """Update verifier heartbeat and return latest effective config."""
-        verifier_id = (request.verifier_id or "").strip()
-        if not verifier_id:
-            return registry_pb2.VerifierHeartbeatResponse(
-                acknowledged=False,
-                config_json=self._effective_verifier_config_json(),
-            )
-        with self._verifier_lock:
-            rec = self._verifiers.get(verifier_id)
-            if rec is None:
-                return registry_pb2.VerifierHeartbeatResponse(
-                    acknowledged=False,
-                    config_json=self._effective_verifier_config_json(),
-                )
-            rec.last_heartbeat = time.time()
-        return registry_pb2.VerifierHeartbeatResponse(
-            acknowledged=True,
-            config_json=self._effective_verifier_config_json(),
-        )
-
-    def GetVerifierConfig(self, request, context):
-        """Return current effective verifier config."""
-        return registry_pb2.GetVerifierConfigResponse(
-            success=True,
-            message="ok",
-            config_json=self._effective_verifier_config_json(),
-        )
-
-    def GetVerifierHealth(self, request, context):
-        """Return verifier liveness health for fail-closed gates."""
-        healthy_count = self._healthy_verifier_count()
-        required_count = int(self._cluster_config.verifier_required_count)
-        return registry_pb2.GetVerifierHealthResponse(
-            healthy_verifier_count=healthy_count,
-            required_verifier_count=required_count,
-            healthy=healthy_count >= required_count,
-        )
-
     def GetInfraTelemetry(self, request, context):
-        """Return routing/work/payout telemetry for daemon and verifier infra."""
+        """Return routing/work/payout telemetry for daemon infra."""
         healthy_daemon_count = self._healthy_daemon_count()
-        healthy_verifier_count = self._healthy_verifier_count()
         required_daemon_count = int(self._cluster_config.daemon_required_count)
-        required_verifier_count = int(self._cluster_config.verifier_required_count)
         with self._infra_work_lock:
             daemon_work_window = dict(self._daemon_work_window)
-            verifier_work_window = {
-                verifier_id: (
-                    float(self._verifier_ticket_window.get(verifier_id, 0.0))
-                    + float(self._verifier_bonus_window.get(verifier_id, 0.0))
-                    * float(getattr(self._cluster_config, "verifier_fraud_bonus_weight", 3.0))
-                )
-                for verifier_id in set(self._verifier_ticket_window.keys())
-                | set(self._verifier_bonus_window.keys())
-            }
             daemon_payout_share = dict(self._last_daemon_payout_share)
-            verifier_payout_share = dict(self._last_verifier_payout_share)
-        claim_status = self._claim_status_snapshot(limit=250)
-        penalty_events = self._penalty_events_snapshot(limit=250)
         return registry_pb2.GetInfraTelemetryResponse(
             healthy_daemon_count=healthy_daemon_count,
             required_daemon_count=required_daemon_count,
-            healthy_verifier_count=healthy_verifier_count,
-            required_verifier_count=required_verifier_count,
             selected_daemon_recipient=self._select_daemon_recipient(),
-            selected_verifier_recipient=self._select_verifier_recipient(),
             daemon_work_window_json=json.dumps(daemon_work_window),
-            verifier_work_window_json=json.dumps(verifier_work_window),
             daemon_payout_share_json=json.dumps(daemon_payout_share),
-            verifier_payout_share_json=json.dumps(verifier_payout_share),
-            verifier_claim_status_json=json.dumps(claim_status),
-            verifier_penalty_events_json=json.dumps(penalty_events),
+        )
+
+    def SubmitShareWindowAudit(self, request, context):
+        if not request.daemon_node_id or not request.share_root:
+            return registry_pb2.SubmitShareWindowAuditResponse(
+                accepted=False,
+                message="missing required fields",
+            )
+        record = {
+            "daemon_node_id": request.daemon_node_id,
+            "window_id": request.window_id,
+            "start_block": int(request.start_block),
+            "end_block": int(request.end_block),
+            "share_count": int(request.share_count),
+            "share_root": request.share_root,
+            "timestamp": float(request.timestamp),
+            "received_at": time.time(),
+        }
+        with self._share_window_audit_lock:
+            self._share_window_audits.append(record)
+            if len(self._share_window_audits) > 2048:
+                self._share_window_audits = self._share_window_audits[-2048:]
+        return registry_pb2.SubmitShareWindowAuditResponse(
+            accepted=True,
+            message="ok",
         )
 
     def Unregister(self, request, context):
@@ -1629,191 +1480,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             can_serve=all_covered,
         )
 
-    # --- Verification RPCs ---
-
-    def SubmitTickets(self, request, context):
-        """Accept verification tickets from a node and record compute shares."""
-        with self._tickets_lock:
-            for ticket in request.tickets:
-                self._pending_tickets.append(ticket)
-            count = len(request.tickets)
-
-        # Track which node submitted which ticket (for fraud proof attribution)
-        with self._ticket_owners_lock:
-            for ticket in request.tickets:
-                self._ticket_owners[ticket.ticket_id] = request.node_id
-                self._ticket_index[ticket.ticket_id] = ticket
-
-        # Record compute shares in the share-chain
-        # Each ticket represents verified compute work
-        for ticket in request.tickets:
-            share = ComputeShare(
-                node_id=request.node_id,
-                shard_index=ticket.shard_index,
-                session_id=ticket.ticket_id,  # use ticket_id as proxy
-                activation_hash=str(hash(ticket.expected_output_data))[:16],
-                tokens_processed=1,
-                validated=False,
-            )
-            self._share_chain.add_share(share)
-
-        if count > 0:
-            print(f"[Registry] Received {count} verification ticket(s) "
-                  f"from node {request.node_id[:8]}...")
-
-        return registry_pb2.SubmitTicketsResponse(accepted=count)
-
-    def GetPendingTickets(self, request, context):
-        """Return and clear pending verification tickets for verifiers."""
-        verifier_id = (getattr(request, "verifier_id", "") or "").strip()
-        with self._tickets_lock:
-            limit = request.max_tickets if request.max_tickets > 0 else len(self._pending_tickets)
-            tickets = self._pending_tickets[:limit]
-            self._pending_tickets = self._pending_tickets[limit:]
-        if verifier_id and tickets:
-            with self._infra_work_lock:
-                self._verifier_ticket_window[verifier_id] += float(len(tickets))
-
-        return registry_pb2.GetPendingTicketsResponse(tickets=tickets)
-
-    def SubmitFraudProof(self, request, context):
-        """Accept a fraud proof, validate evidence, then confirm/reject claim."""
-        verifier_id = (getattr(request, "verifier_id", "") or "").strip()
-        claim_id = (getattr(request, "claim_id", "") or "").strip() or str(uuid.uuid4())
-        idem = (getattr(request, "idempotency_key", "") or "").strip() or (
-            f"{verifier_id}:{request.ticket_id}:{request.shard_index}"
-        )
-        now = time.time()
-        current_window = self._current_settlement_window()
-
-        with self._claim_lock:
-            existing_id = self._claim_id_by_idempotency.get(idem)
-            if existing_id and existing_id in self._claims_by_id:
-                existing = self._claims_by_id[existing_id]
-                return registry_pb2.FraudProofResponse(
-                    accepted=(existing.status == "confirmed"),
-                    claim_id=existing.claim_id,
-                    claim_status=existing.status,
-                    message=f"idempotent_replay:{existing.reason}",
-                )
-            self._claim_id_by_idempotency[idem] = claim_id
-            claim = VerifierClaimRecord(
-                claim_id=claim_id,
-                idempotency_key=idem,
-                verifier_id=verifier_id,
-                ticket_id=request.ticket_id,
-                shard_index=request.shard_index,
-            )
-            self._claims_by_id[claim_id] = claim
-            self._claim_rate_window[(verifier_id, current_window)] += 1
-            claim_count = self._claim_rate_window[(verifier_id, current_window)]
-
-        limit = int(max(1, getattr(
-            self._cluster_config, "verifier_claim_rate_limit_per_window", 64)))
-        if claim_count > limit:
-            claim.status = "rejected"
-            claim.reason = "rate_limited"
-            claim.updated_at = now
-            self._record_penalty_event({
-                "ts": now,
-                "kind": "claim_rate_limited",
-                "verifier_id": verifier_id,
-                "claim_id": claim_id,
-                "window": current_window,
-                "limit": limit,
-            })
-            return registry_pb2.FraudProofResponse(
-                accepted=False,
-                claim_id=claim_id,
-                claim_status=claim.status,
-                message=claim.reason,
-            )
-
-        is_valid, reason, fraud_node_id = self._validate_claim_evidence(request, verifier_id)
-        claim.fraud_node_id = fraud_node_id
-        claim.reason = reason
-
-        with self._fraud_lock:
-            self._fraud_proofs.append(request)
-
-        if is_valid:
-            claim.status = "confirmed"
-            challenged = False
-            settlements = self._share_chain.get_settlements()
-            if fraud_node_id:
-                for s in settlements:
-                    if fraud_node_id in s.node_shares:
-                        result = self._payment_contract.challenge_settlement(
-                            settlement_hash=s.settlement_hash,
-                            fraud_node_id=fraud_node_id,
-                        )
-                        if result:
-                            challenged = True
-                            break
-                if self._onchain_escrow:
-                    try:
-                        self._onchain_escrow.slash_node(fraud_node_id)
-                    except Exception as e:
-                        print(f"[Registry] WARNING: On-chain slash failed "
-                              f"for {fraud_node_id[:8]}...: {e}")
-            claim.reason = "confirmed" if challenged or fraud_node_id else "confirmed_no_owner"
-            bonus_requires_confirmation = bool(
-                getattr(self._cluster_config, "verifier_bonus_requires_confirmation", True)
-            )
-            in_cooldown = self._claim_in_bonus_cooldown(verifier_id, current_window)
-            if verifier_id and (not in_cooldown) and bonus_requires_confirmation:
-                with self._infra_work_lock:
-                    self._verifier_bonus_window[verifier_id] += 1.0
-                claim.bonus_awarded = True
-            elif verifier_id and in_cooldown:
-                claim.reason = "confirmed_bonus_blocked_by_cooldown"
-        else:
-            claim.status = "rejected"
-            slash_bps = int(max(0, getattr(
-                self._cluster_config, "verifier_false_claim_slash_bps", 500)))
-            slash_fraction = float(slash_bps) / 10000.0
-            slash_amount = 0.0
-            if slash_fraction > 0 and verifier_id:
-                payout_addr = ""
-                with self._verifier_lock:
-                    rec = self._verifiers.get(verifier_id)
-                    if rec:
-                        payout_addr = rec.payout_address or rec.address or rec.verifier_id
-                target = payout_addr or verifier_id
-                if self._onchain_escrow and _is_eth_address(target):
-                    try:
-                        self._onchain_escrow.slash_node(target)
-                    except Exception:
-                        pass
-                slash_amount = self._payment_contract.stakes.slash(
-                    target, pool_slash_fraction=slash_fraction
-                )
-            claim.slash_amount = float(slash_amount)
-            self._set_claim_cooldown(verifier_id, current_window)
-            claim.cooldown_until_window = self._verifier_bonus_cooldown_until_window.get(
-                verifier_id, -1
-            )
-            self._record_penalty_event({
-                "ts": now,
-                "kind": "false_claim_penalty",
-                "verifier_id": verifier_id,
-                "claim_id": claim_id,
-                "reason": reason,
-                "slash_amount": float(slash_amount),
-                "cooldown_until_window": claim.cooldown_until_window,
-            })
-
-        claim.updated_at = time.time()
-        print(f"[Registry] Claim {claim.claim_id[:8]}... {claim.status}: {claim.reason}")
-        return registry_pb2.FraudProofResponse(
-            accepted=(claim.status == "confirmed"),
-            claim_id=claim.claim_id,
-            claim_status=claim.status,
-            message=claim.reason,
-        )
-
     def SubmitHESuspicionReport(self, request, context):
-        """Accept signed HE suspicion reports and open verifier challenge tickets."""
+        """Accept signed HE suspicion reports and adjudicate in-registry."""
         report_id = (getattr(request, "report_id", "") or "").strip() or str(uuid.uuid4())
         idem = (getattr(request, "idempotency_key", "") or "").strip() or (
             f"{request.reporter_node_id}:{request.session_id}:{request.step}:{request.reason_code}"
@@ -1867,7 +1535,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 message=reason,
             )
 
-        dispute_ticket_id = f"he-dsp-{uuid.uuid4().hex[:16]}"
+        dispute_ticket_id = f"he-rpt-{uuid.uuid4().hex[:16]}"
         rec = HEDisputeRecord(
             dispute_ticket_id=dispute_ticket_id,
             report_id=report_id,
@@ -1887,99 +1555,15 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         rec.request_payload_hash = request.request_payload_hash
         rec.response_payload_hash = request.response_payload_hash
 
-        ticket = registry_pb2.HEDisputeTicket(
-            dispute_ticket_id=dispute_ticket_id,
-            report_id=report_id,
-            sidecar_node_id=rec.sidecar_node_id,
-            sidecar_stake_identity=rec.sidecar_stake_identity,
-            reporter_node_id=rec.reporter_node_id,
-            reporter_node_type=rec.reporter_node_type,
-            session_id=rec.session_id,
-            step=rec.step,
-            key_id=rec.key_id,
-            reason_code=rec.reason_code,
-            he_compute_format=request.he_compute_format,
-            request_payload_hash=rec.request_payload_hash,
-            response_payload_hash=rec.response_payload_hash,
-            evidence_json=request.evidence_json,
-            report_timestamp=float(request.timestamp or time.time()),
-        )
         with self._he_dispute_lock:
-            self._he_pending_tickets.append(ticket)
             self._he_disputes_by_ticket[dispute_ticket_id] = rec
             self._he_dispute_by_idempotency[idem] = dispute_ticket_id
-        self._record_penalty_event({
-            "ts": time.time(),
-            "kind": "he_dispute_opened",
-            "dispute_ticket_id": dispute_ticket_id,
-            "report_id": report_id,
-            "reason_code": rec.reason_code,
-            "sampled_audit": rec.reason_code == SAMPLED_AUDIT_REASON_CODE,
-            "anomaly_escalation": is_anomaly_reason(rec.reason_code),
-        })
-        return registry_pb2.HESuspicionReportResponse(
-            accepted=True,
-            report_id=report_id,
-            dispute_ticket_id=dispute_ticket_id,
-            status="accepted",
-            message="challenge_opened",
-        )
 
-    def GetPendingHEDisputes(self, request, context):
-        """Return and clear pending HE dispute tickets for verifier adjudication."""
-        verifier_id = (getattr(request, "verifier_id", "") or "").strip()
-        with self._he_dispute_lock:
-            limit = request.max_tickets if request.max_tickets > 0 else len(self._he_pending_tickets)
-            tickets = self._he_pending_tickets[:limit]
-            self._he_pending_tickets = self._he_pending_tickets[limit:]
-        if verifier_id and tickets:
-            with self._infra_work_lock:
-                self._verifier_ticket_window[verifier_id] += float(len(tickets))
-        return registry_pb2.GetPendingHEDisputesResponse(tickets=tickets)
-
-    def SubmitHEVerifierVerdict(self, request, context):
-        """Apply verifier adjudication verdict for HE sidecar disputes."""
-        ticket_id = (request.dispute_ticket_id or "").strip()
-        if not ticket_id:
-            return registry_pb2.HEVerifierVerdictResponse(
-                accepted=False,
-                dispute_ticket_id=ticket_id,
-                status="rejected",
-                message="missing_dispute_ticket_id",
-            )
-        verdict = (request.verdict or "").strip().lower()
-        if verdict not in {"valid", "invalid", "insufficient_evidence"}:
-            return registry_pb2.HEVerifierVerdictResponse(
-                accepted=False,
-                dispute_ticket_id=ticket_id,
-                status="rejected",
-                message="invalid_verdict",
-            )
-        with self._he_dispute_lock:
-            rec = self._he_disputes_by_ticket.get(ticket_id)
-            if rec is None:
-                return registry_pb2.HEVerifierVerdictResponse(
-                    accepted=False,
-                    dispute_ticket_id=ticket_id,
-                    status="rejected",
-                    message="unknown_dispute_ticket",
-                )
-            if rec.status != "open":
-                return registry_pb2.HEVerifierVerdictResponse(
-                    accepted=True,
-                    dispute_ticket_id=ticket_id,
-                    status="duplicate",
-                    message=f"already_{rec.status}",
-                )
-
-        rec.verifier_id = (request.verifier_id or "").strip()
-        rec.verdict = verdict
-        rec.updated_at = time.time()
-        rec.reason = (request.reason or "").strip()
-        slash_amount = 0.0
-        status = "confirmed_valid"
-
-        if verdict == "invalid":
+        verdict = "valid"
+        rec.reason = "no_anomaly_detected"
+        if is_anomaly_reason(rec.reason_code):
+            verdict = "invalid"
+            rec.reason = f"inline_integrity_violation:{rec.reason_code}"
             stage = self._he_rollout_stage()
             configured_fraction = float(
                 max(0.0, min(1.0, getattr(self._cluster_config, "he_dispute_slash_fraction", 0.5)))
@@ -1989,70 +1573,50 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 apply_fraction = configured_fraction * 0.25
             elif stage == "enforced":
                 apply_fraction = configured_fraction
-            target = self._resolve_sidecar_stake_identity(
-                request.sidecar_node_id or rec.sidecar_node_id,
-                request.sidecar_stake_identity or rec.sidecar_stake_identity,
-            )
+            target = rec.sidecar_stake_identity
             if apply_fraction > 0.0:
                 if self._onchain_escrow and _is_eth_address(target):
                     try:
                         self._onchain_escrow.slash_node(target)
                     except Exception as e:
-                        print(f"[Registry] WARNING: HE sidecar on-chain slash failed for {target}: {e}")
-                slash_amount = float(
+                        print(f"[Registry] WARNING: HE on-chain slash failed for {target}: {e}")
+                rec.slash_amount = float(
                     self._payment_contract.stakes.slash(target, pool_slash_fraction=apply_fraction)
                 )
-            rec.slash_amount = slash_amount
             rec.status = "invalid"
-            status = "confirmed_invalid"
             self._record_penalty_event({
-                "ts": rec.updated_at,
+                "ts": time.time(),
                 "kind": "he_dispute_invalid",
                 "stage": stage,
-                "dispute_ticket_id": ticket_id,
+                "dispute_ticket_id": dispute_ticket_id,
                 "sidecar_stake_identity": target,
-                "slash_amount": slash_amount,
+                "slash_amount": rec.slash_amount,
                 "slash_fraction_applied": apply_fraction,
                 "reason_code": rec.reason_code,
             })
-        elif verdict == "insufficient_evidence":
+        elif rec.reason_code == SAMPLED_AUDIT_REASON_CODE:
+            verdict = "insufficient_evidence"
             rec.status = "insufficient_evidence"
-            status = "insufficient_evidence"
-            self._record_penalty_event({
-                "ts": rec.updated_at,
-                "kind": "he_dispute_insufficient_evidence",
-                "dispute_ticket_id": ticket_id,
-                "reason_code": rec.reason_code,
-            })
+            rec.reason = "sampled_audit_observed"
         else:
             rec.status = "valid"
-            status = "confirmed_valid"
-            self._record_penalty_event({
-                "ts": rec.updated_at,
-                "kind": "he_dispute_valid",
-                "dispute_ticket_id": ticket_id,
-                "reason_code": rec.reason_code,
-            })
-
-        if rec.verifier_id:
-            with self._infra_work_lock:
-                if verdict == "invalid":
-                    self._verifier_bonus_window[rec.verifier_id] += 1.0
-                else:
-                    self._verifier_ticket_window[rec.verifier_id] += 0.25
-
-        return registry_pb2.HEVerifierVerdictResponse(
+        self._record_penalty_event({
+            "ts": time.time(),
+            "kind": "he_report_adjudicated",
+            "dispute_ticket_id": dispute_ticket_id,
+            "report_id": report_id,
+            "reason_code": rec.reason_code,
+            "verdict": verdict,
+            "sampled_audit": rec.reason_code == SAMPLED_AUDIT_REASON_CODE,
+            "anomaly_escalation": is_anomaly_reason(rec.reason_code),
+        })
+        return registry_pb2.HESuspicionReportResponse(
             accepted=True,
-            dispute_ticket_id=ticket_id,
-            status=status,
-            message=rec.reason or rec.status,
+            report_id=report_id,
+            dispute_ticket_id=dispute_ticket_id,
+            status="accepted",
+            message=f"adjudicated:{verdict}",
         )
-
-    def GetFraudProofs(self, request, context):
-        """Return all known fraud proofs."""
-        with self._fraud_lock:
-            proofs = list(self._fraud_proofs)
-        return registry_pb2.GetFraudProofsResponse(proofs=proofs)
 
     # --- Manifest Distribution RPCs ---
 

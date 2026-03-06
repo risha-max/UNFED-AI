@@ -21,6 +21,7 @@ Roles:
 
 import argparse
 import builtins
+import hashlib
 import logging
 import os
 import queue
@@ -136,9 +137,23 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._max_shares_per_session_node = int(
             os.environ.get("UNFED_MAX_SHARES_PER_SESSION_NODE", "4096")
         )
+        self._max_shares_per_node_window = int(
+            os.environ.get("UNFED_MAX_SHARES_PER_NODE_WINDOW", "2048")
+        )
+        self._share_window_seconds = int(
+            os.environ.get("UNFED_SHARE_WINDOW_SECONDS", "60")
+        )
+        self._tip_anchor_mode = os.environ.get(
+            "UNFED_SHARE_TIP_ANCHOR_MODE", "strict"
+        ).strip().lower()
+        self._tip_max_lag_blocks = int(
+            os.environ.get("UNFED_SHARE_TIP_MAX_LAG_BLOCKS", "2")
+        )
         self._seen_keys: set[tuple[str, str, str, int]] = set()
         self._last_step: dict[tuple[str, str, int], int] = {}
         self._accepted_count: dict[tuple[str, str], int] = defaultdict(int)
+        self._window_count: dict[tuple[str, int], int] = defaultdict(int)
+        self._last_share_hash: dict[tuple[str, str], str] = {}
         self._reason_counters: dict[str, int] = defaultdict(int)
         self._signer_cache: dict[str, bytes] = {}
         self._signer_cache_ts = 0.0
@@ -172,6 +187,8 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
         return inference_pb2.SubmitSharesResponse(
             accepted=len(accepted),
             pending_pool_size=len(self.chain._pending_shares),
+            chain_tip_hash=self.chain.latest_block.block_hash,
+            chain_tip_height=self.chain.get_tip_height(),
         )
 
     def _validate_share(self, share: ComputeShare, submitter_id: str) -> tuple[bool, str]:
@@ -190,9 +207,37 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
             return False, "stale_timestamp"
         if not self._verify_share_signature(share):
             return False, "invalid_signature"
-        replay_key = (share.session_id, share.session_nonce, share.node_id, int(share.step_index))
+        if share.idempotency_key:
+            replay_key = ("idempotency", share.idempotency_key, share.node_id, int(share.step_index))
+        else:
+            replay_key = (share.session_id, share.session_nonce, share.node_id, int(share.step_index))
         if replay_key in self._seen_keys:
             return False, "replay"
+        chain_tip_hash = self.chain.latest_block.block_hash
+        if self._tip_anchor_mode not in ("off", "none", "disabled"):
+            if not share.prev_block_hash:
+                # First share in a chain may omit the anchor; later shares must provide it.
+                if int(share.step_index) > 0:
+                    return False, "missing_prev_block_hash"
+            else:
+                if self._tip_anchor_mode == "strict":
+                    if share.prev_block_hash != chain_tip_hash:
+                        return False, "tip_anchor_mismatch"
+                else:
+                    allowed = {chain_tip_hash}
+                    lag = max(0, int(self._tip_max_lag_blocks))
+                    for b in self.chain.get_blocks_from(max(0, self.chain.get_tip_height() - lag)):
+                        allowed.add(b.block_hash)
+                    if share.prev_block_hash not in allowed:
+                        return False, "tip_anchor_mismatch"
+        seq_key = (share.session_id, share.node_id)
+        expected_prev_share_hash = self._last_share_hash.get(seq_key, "")
+        if expected_prev_share_hash:
+            if share.prev_share_hash != expected_prev_share_hash:
+                return False, "prev_share_hash_mismatch"
+        else:
+            if share.prev_share_hash:
+                return False, "unexpected_prev_share_hash"
         order_key = (share.session_id, share.node_id, int(share.shard_index))
         prev = self._last_step.get(order_key)
         if prev is not None and int(share.step_index) <= prev:
@@ -200,9 +245,15 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
         cap_key = (share.session_id, share.node_id)
         if self._accepted_count[cap_key] >= self._max_shares_per_session_node:
             return False, "cap_exceeded"
+        current_window = int(time.time()) // max(1, self._share_window_seconds)
+        window_key = (share.node_id, current_window)
+        if self._window_count[window_key] >= self._max_shares_per_node_window:
+            return False, "window_cap_exceeded"
         self._seen_keys.add(replay_key)
         self._last_step[order_key] = int(share.step_index)
         self._accepted_count[cap_key] += 1
+        self._window_count[window_key] += 1
+        self._last_share_hash[seq_key] = share.hash()
         return True, "ok"
 
     def _verify_share_signature(self, share: ComputeShare) -> bool:
@@ -223,6 +274,9 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
             share_weight=float(share.share_weight),
             timestamp_ms=int(share.timestamp_ms),
             payload_hash_version=share.payload_hash_version or "v1",
+            prev_block_hash=share.prev_block_hash,
+            prev_share_hash=share.prev_share_hash,
+            idempotency_key=share.idempotency_key,
         )
         return verify_signature(
             public_key,
@@ -378,6 +432,31 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
         msg = block_to_proto(block, proposer_id=self.node_id)
         self._notify_subscribers(msg)
 
+    def submit_share_window_audit(self, block: Block):
+        """Submit a deterministic share-root audit record to the registry."""
+        try:
+            h = hashlib.sha256()
+            for s in block.shares:
+                h.update(s.hash().encode("utf-8"))
+            share_root = h.hexdigest()
+            channel = grpc.insecure_channel(self.registry_address, options=config.GRPC_OPTIONS)
+            stub = registry_pb2_grpc.RegistryStub(channel)
+            stub.SubmitShareWindowAudit(
+                registry_pb2.SubmitShareWindowAuditRequest(
+                    daemon_node_id=self.node_id,
+                    window_id=f"block-{block.index}",
+                    start_block=int(block.index),
+                    end_block=int(block.index),
+                    share_count=len(block.shares),
+                    share_root=share_root,
+                    timestamp=time.time(),
+                ),
+                timeout=5,
+            )
+            channel.close()
+        except grpc.RpcError:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # GossipManager — P2P gossip with other daemons
@@ -448,6 +527,8 @@ class GossipManager:
                         )
                         # Notify subscribers
                         self.servicer.notify_new_block(block)
+                        # Audit root to registry for independent settlement checks
+                        self.servicer.submit_share_window_audit(block)
                         # Gossip to peers
                         self._gossip_block(block)
 

@@ -1,7 +1,7 @@
 """
 Unified Node Entry Point — start any UNFED node type from a single command.
 
-Each role has its own config class (ComputeConfig, VerifierConfig, etc.)
+Each role has its own config class (ComputeConfig, MPCConfig, etc.)
 with only the fields that role needs. The 'role' field in the JSON or CLI
 determines which config type is created.
 
@@ -16,7 +16,6 @@ Usage:
     python -m node.run --role compute --shard-index 0 --port 50051
 
     # Verifier
-    python -m node.run --role verifier --poll-interval 5
 """
 
 import argparse
@@ -26,7 +25,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from node.node_config import (
-    ComputeConfig, MPCConfig, VerifierConfig, DaemonConfig,
+    ComputeConfig, MPCConfig, DaemonConfig,
     load_config, print_config_summary,
 )
 
@@ -40,7 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   python -m node.run --config node_config.json
   python -m node.run --role compute --shard-index 0 --port 50051
-  python -m node.run --role verifier --poll-interval 5
         """,
     )
 
@@ -50,8 +48,8 @@ Examples:
 
     # --- Core ---
     parser.add_argument("--role", type=str, default=None,
-                        choices=["compute", "mpc", "verifier", "daemon"],
-                        help="Node role: compute, mpc, verifier, or daemon")
+                        choices=["compute", "mpc", "daemon"],
+                        help="Node role: compute, mpc, or daemon")
     parser.add_argument("--port", type=int, default=None,
                         help="gRPC listen port")
     parser.add_argument("--host", type=str, default=None,
@@ -117,6 +115,8 @@ Examples:
     parser.add_argument("--require-daemon", type=str, default=None,
                         choices=["true", "false", "1", "0"],
                         help="Require daemon availability for share submission")
+    parser.add_argument("--allowed-prev-node-types", type=str, default=None,
+                        help="Comma-separated allowed previous node types")
     parser.add_argument("--wire-dtype", type=str, default=None,
                         choices=["float32", "float16"],
                         help="Activation wire dtype")
@@ -234,6 +234,7 @@ def cli_to_overrides(args: argparse.Namespace) -> dict:
         "shard_transfer_timeout": "shard_transfer_timeout",
         "shard_chunk_size": "shard_chunk_size",
         "require_daemon": "require_daemon",
+        "allowed_prev_node_types": "allowed_prev_node_types",
         "wire_dtype": "wire_dtype",
         "compress_activations": "compress_activations",
         "compress_threshold": "compress_threshold",
@@ -275,6 +276,8 @@ def cli_to_overrides(args: argparse.Namespace) -> dict:
             if cli_key in ("require_daemon", "compress_activations", "he_full_vocab_sidecar_required"):
                 if isinstance(val, str):
                     val = val.strip().lower() in ("1", "true", "yes", "on")
+            if cli_key == "allowed_prev_node_types" and isinstance(val, str):
+                val = [x.strip() for x in val.split(",") if x.strip()]
             overrides[config_key] = val
 
     return overrides
@@ -311,6 +314,7 @@ def main():
             advertise=cfg.advertise,
             registry_address=cfg.registry,
             require_daemon=cfg.require_daemon,
+            allowed_prev_node_types=cfg.allowed_prev_node_types,
             mpc_dnc_mode=cfg.mpc_dnc_mode,
             mpc_dnc_depth=cfg.mpc_dnc_depth,
             mpc_dnc_split_dim=cfg.mpc_dnc_split_dim,
@@ -335,14 +339,6 @@ def main():
             shards_dir=cfg.shards_dir,
             tls_cert=cfg.tls_cert or None,
             tls_key=cfg.tls_key or None,
-        )
-
-    elif isinstance(cfg, VerifierConfig):
-        from network.verifier_node import run_verifier
-        run_verifier(
-            registry_address=cfg.registry,
-            poll_interval=cfg.poll_interval_seconds,
-            max_tickets_per_poll=cfg.max_tickets_per_poll,
         )
 
     elif isinstance(cfg, DaemonConfig):

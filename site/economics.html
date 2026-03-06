@@ -201,18 +201,17 @@ graph LR
         <div class="flow-item">
           <h4>1. Fraud Detected</h4>
           <p>
-            A verifier re-executes a sampled forward pass and finds the output hash
-            doesn't match the original. It constructs a fraud proof containing
-            shard index, input/output hashes, and the node's identity.
+            A receiving node detects an integrity anomaly (for example MPC auth
+            failure or HE binding mismatch) and submits a signed suspicion report.
           </p>
         </div>
 
         <div class="flow-item">
           <h4>2. Proof Submitted</h4>
           <p>
-            The fraud proof is submitted to the registry via the
-            <code>SubmitFraudProof</code> gRPC. The registry validates the proof
-            and identifies the cheating node.
+            The report is submitted to the registry via
+            <code>SubmitHESuspicionReport</code>. The registry validates signatures,
+            idempotency keys, and evidence bindings.
           </p>
         </div>
 

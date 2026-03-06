@@ -149,12 +149,12 @@ class TestSecureMultiply:
         def party_0():
             return secure_multiply(
                 x * 0.5, y * 0.5, triple.party_0,
-                exchanger, "s1", "op1", is_party_0=True)
+                None, exchanger, "s1", "op1", is_party_0=True)
 
         def party_1():
             return secure_multiply(
                 x * 0.5, y * 0.5, triple.party_1,
-                exchanger, "s1", "op1", is_party_0=False)
+                None, exchanger, "s1", "op1", is_party_0=False)
 
         t0 = [None]
         t1 = [None]

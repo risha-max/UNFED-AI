@@ -63,6 +63,9 @@ def share_to_proto(share: ComputeShare) -> inference_pb2.ShareProto:
         signature=share.signature,
         payload_hash_version=share.payload_hash_version,
         validated=share.validated,
+        prev_block_hash=share.prev_block_hash,
+        prev_share_hash=share.prev_share_hash,
+        idempotency_key=share.idempotency_key,
     )
 
 
@@ -82,6 +85,9 @@ def proto_to_share(proto: inference_pb2.ShareProto) -> ComputeShare:
         signature=bytes(proto.signature),
         payload_hash_version=proto.payload_hash_version or "v1",
         validated=bool(proto.validated),
+        prev_block_hash=proto.prev_block_hash,
+        prev_share_hash=proto.prev_share_hash,
+        idempotency_key=proto.idempotency_key,
     )
 
 

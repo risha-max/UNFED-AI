@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import os
+import hashlib
 import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
@@ -209,6 +210,177 @@ class LocalPeerExchanger(PeerExchanger):
         return peer_eps, peer_del
 
 
+def _mac_digest_tensor(
+    *,
+    session_id: str,
+    op_id: str,
+    epsilon: torch.Tensor,
+    delta: torch.Tensor,
+    direction: str,
+) -> torch.Tensor:
+    """
+    Build a deterministic integrity MAC (digest) for exchanged openings.
+
+    This MAC authenticates the `(epsilon, delta)` payload against accidental
+    corruption/replay mismatches in the MPC exchange channel.
+    """
+    h = hashlib.sha256()
+    h.update(session_id.encode("utf-8"))
+    h.update(b"|")
+    h.update(op_id.encode("utf-8"))
+    h.update(b"|")
+    h.update(direction.encode("utf-8"))
+    h.update(b"|")
+    h.update(np.asarray(epsilon.detach().cpu().contiguous(), dtype=np.float32).tobytes())
+    h.update(b"|")
+    h.update(np.asarray(delta.detach().cpu().contiguous(), dtype=np.float32).tobytes())
+    digest = np.frombuffer(h.digest(), dtype=np.uint8).astype(np.float32)
+    return torch.from_numpy(digest)
+
+
+def _exchange_with_mac(
+    *,
+    exchanger: PeerExchanger,
+    session_id: str,
+    op_id: str,
+    my_epsilon: torch.Tensor,
+    my_delta: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Exchange `(epsilon, delta)` and verify payload integrity via MAC digest.
+    """
+    peer_epsilon, peer_delta = exchanger.exchange(
+        session_id, op_id, my_epsilon, my_delta
+    )
+
+    my_mac = _mac_digest_tensor(
+        session_id=session_id,
+        op_id=op_id,
+        epsilon=my_epsilon,
+        delta=my_delta,
+        direction="open",
+    )
+    peer_mac, _ = exchanger.exchange(
+        session_id, f"{op_id}::mac", my_mac, torch.zeros_like(my_mac)
+    )
+    expected_peer_mac = _mac_digest_tensor(
+        session_id=session_id,
+        op_id=op_id,
+        epsilon=peer_epsilon,
+        delta=peer_delta,
+        direction="open",
+    )
+    if peer_mac.shape != expected_peer_mac.shape or not torch.equal(peer_mac, expected_peer_mac):
+        raise RuntimeError(f"MPC MAC verification failed for op_id={op_id}")
+    return peer_epsilon, peer_delta
+
+
+def _sacrifice_check_elementwise(
+    *,
+    triple: BeaverTripleShares,
+    check_triple: BeaverTripleShares,
+    exchanger: PeerExchanger,
+    session_id: str,
+    op_id: str,
+    is_party_0: bool,
+) -> None:
+    """
+    Deterministically validate Beaver triple correctness using sacrifice.
+
+    Uses two triples (a,b,c) and (a',b',c') and checks:
+      c - c' - (a-a')*b' - (b-b')*a' - (a-a')*(b-b') == 0
+    """
+    d_share = triple.a - check_triple.a
+    e_share = triple.b - check_triple.b
+    peer_d, peer_e = _exchange_with_mac(
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=f"{op_id}::sac-open",
+        my_epsilon=d_share,
+        my_delta=e_share,
+    )
+    d = d_share + peer_d
+    e = e_share + peer_e
+
+    z_share = (
+        triple.c
+        - check_triple.c
+        - (d * check_triple.b)
+        - (e * check_triple.a)
+    )
+    if is_party_0:
+        z_share = z_share - (d * e)
+
+    peer_z, _ = _exchange_with_mac(
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=f"{op_id}::sac-verify",
+        my_epsilon=z_share,
+        my_delta=torch.zeros_like(z_share),
+    )
+    z = z_share + peer_z
+    # Float-share arithmetic accumulates rounding noise at production tensor sizes.
+    if not torch.allclose(z, torch.zeros_like(z), atol=1e-3, rtol=1e-3):
+        raise RuntimeError(f"MPC triple sacrifice failed for op_id={op_id}")
+
+
+def _sacrifice_check_matmul(
+    *,
+    triple: BeaverTripleShares,
+    check_triple: BeaverTripleShares,
+    exchanger: PeerExchanger,
+    session_id: str,
+    op_id: str,
+    is_party_0: bool,
+    transpose_b: bool,
+) -> None:
+    """
+    Deterministically validate matrix Beaver triple correctness using sacrifice.
+    """
+    d_share = triple.a - check_triple.a
+    e_share = triple.b - check_triple.b
+    peer_d, peer_e = _exchange_with_mac(
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=f"{op_id}::sac-open",
+        my_epsilon=d_share,
+        my_delta=e_share,
+    )
+    d = d_share + peer_d
+    e = e_share + peer_e
+
+    if transpose_b:
+        z_share = (
+            triple.c
+            - check_triple.c
+            - torch.matmul(d, check_triple.b.transpose(-2, -1))
+            - torch.matmul(check_triple.a, e.transpose(-2, -1))
+        )
+        if is_party_0:
+            z_share = z_share - torch.matmul(d, e.transpose(-2, -1))
+    else:
+        z_share = (
+            triple.c
+            - check_triple.c
+            - torch.matmul(d, check_triple.b)
+            - torch.matmul(check_triple.a, e)
+        )
+        if is_party_0:
+            z_share = z_share - torch.matmul(d, e)
+
+    peer_z, _ = _exchange_with_mac(
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=f"{op_id}::sac-verify",
+        my_epsilon=z_share,
+        my_delta=torch.zeros_like(z_share),
+    )
+    z = z_share + peer_z
+    # Float-share arithmetic accumulates rounding noise at production tensor sizes.
+    if not torch.allclose(z, torch.zeros_like(z), atol=1e-3, rtol=1e-3):
+        raise RuntimeError(f"MPC triple sacrifice failed for op_id={op_id}")
+
+
 # ---------------------------------------------------------------------------
 # Core secure multiplication (element-wise)
 # ---------------------------------------------------------------------------
@@ -216,6 +388,7 @@ class LocalPeerExchanger(PeerExchanger):
 def secure_multiply(x_share: torch.Tensor,
                     y_share: torch.Tensor,
                     triple: BeaverTripleShares,
+                    check_triple: Optional[BeaverTripleShares],
                     exchanger: PeerExchanger,
                     session_id: str,
                     op_id: str,
@@ -243,6 +416,7 @@ def secure_multiply(x_share: torch.Tensor,
             x_share=x_share,
             y_share=y_share,
             triple=triple,
+            check_triple=check_triple,
             exchanger=exchanger,
             session_id=session_id,
             op_id=op_id,
@@ -255,6 +429,7 @@ def secure_multiply(x_share: torch.Tensor,
         x_share=x_share,
         y_share=y_share,
         triple=triple,
+        check_triple=check_triple,
         exchanger=exchanger,
         session_id=session_id,
         op_id=op_id,
@@ -265,15 +440,30 @@ def secure_multiply(x_share: torch.Tensor,
 def _secure_multiply_core(x_share: torch.Tensor,
                           y_share: torch.Tensor,
                           triple: BeaverTripleShares,
+                          check_triple: Optional[BeaverTripleShares],
                           exchanger: PeerExchanger,
                           session_id: str,
                           op_id: str,
                           is_party_0: bool) -> torch.Tensor:
+    if check_triple is not None:
+        _sacrifice_check_elementwise(
+            triple=triple,
+            check_triple=check_triple,
+            exchanger=exchanger,
+            session_id=session_id,
+            op_id=op_id,
+            is_party_0=is_party_0,
+        )
     my_epsilon = x_share - triple.a
     my_delta = y_share - triple.b
 
-    peer_epsilon, peer_delta = exchanger.exchange(
-        session_id, op_id, my_epsilon, my_delta)
+    peer_epsilon, peer_delta = _exchange_with_mac(
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=op_id,
+        my_epsilon=my_epsilon,
+        my_delta=my_delta,
+    )
 
     epsilon = my_epsilon + peer_epsilon
     delta = my_delta + peer_delta
@@ -289,32 +479,42 @@ def _build_multiply_leaves(
     x_share: torch.Tensor,
     y_share: torch.Tensor,
     triple: BeaverTripleShares,
+    check_triple: Optional[BeaverTripleShares],
     depth: int,
     split_dim: int,
     op_prefix: str,
-) -> list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares]]:
-    leaves: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares]] = []
-    work: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, int]] = [
-        (op_prefix, x_share, y_share, triple, depth)
+) -> list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, Optional[BeaverTripleShares]]]:
+    leaves: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, Optional[BeaverTripleShares]]] = []
+    work: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, Optional[BeaverTripleShares], int]] = [
+        (op_prefix, x_share, y_share, triple, check_triple, depth)
     ]
     while work:
-        prefix, x_chunk, y_chunk, t_chunk, rem = work.pop(0)
+        prefix, x_chunk, y_chunk, t_chunk, ct_chunk, rem = work.pop(0)
         if rem <= 0 or x_chunk.shape[split_dim] < 2:
-            leaves.append((prefix, x_chunk, y_chunk, t_chunk))
+            leaves.append((prefix, x_chunk, y_chunk, t_chunk, ct_chunk))
             continue
         x_l, x_r = torch.tensor_split(x_chunk, 2, dim=split_dim)
         y_l, y_r = torch.tensor_split(y_chunk, 2, dim=split_dim)
         a_l, a_r = torch.tensor_split(t_chunk.a, 2, dim=split_dim)
         b_l, b_r = torch.tensor_split(t_chunk.b, 2, dim=split_dim)
         c_l, c_r = torch.tensor_split(t_chunk.c, 2, dim=split_dim)
-        work.append((f"{prefix}.L", x_l, y_l, BeaverTripleShares(a_l, b_l, c_l), rem - 1))
-        work.append((f"{prefix}.R", x_r, y_r, BeaverTripleShares(a_r, b_r, c_r), rem - 1))
+        ct_l: Optional[BeaverTripleShares] = None
+        ct_r: Optional[BeaverTripleShares] = None
+        if ct_chunk is not None:
+            ca_l, ca_r = torch.tensor_split(ct_chunk.a, 2, dim=split_dim)
+            cb_l, cb_r = torch.tensor_split(ct_chunk.b, 2, dim=split_dim)
+            cc_l, cc_r = torch.tensor_split(ct_chunk.c, 2, dim=split_dim)
+            ct_l = BeaverTripleShares(ca_l, cb_l, cc_l)
+            ct_r = BeaverTripleShares(ca_r, cb_r, cc_r)
+        work.append((f"{prefix}.L", x_l, y_l, BeaverTripleShares(a_l, b_l, c_l), ct_l, rem - 1))
+        work.append((f"{prefix}.R", x_r, y_r, BeaverTripleShares(a_r, b_r, c_r), ct_r, rem - 1))
     return leaves
 
 
 def _secure_multiply_partitioned(x_share: torch.Tensor,
                                  y_share: torch.Tensor,
                                  triple: BeaverTripleShares,
+                                 check_triple: Optional[BeaverTripleShares],
                                  exchanger: PeerExchanger,
                                  session_id: str,
                                  op_id: str,
@@ -322,32 +522,35 @@ def _secure_multiply_partitioned(x_share: torch.Tensor,
                                  depth: int,
                                  split_dim: int,
                                  workers: int) -> torch.Tensor:
-    leaves = _build_multiply_leaves(x_share, y_share, triple, depth, split_dim, op_id)
+    leaves = _build_multiply_leaves(
+        x_share, y_share, triple, check_triple, depth, split_dim, op_id
+    )
     if workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             parts = list(executor.map(
                 lambda leaf: _secure_multiply_core(
-                    leaf[1], leaf[2], leaf[3], exchanger, session_id, leaf[0], is_party_0
+                    leaf[1], leaf[2], leaf[3], leaf[4], exchanger, session_id, leaf[0], is_party_0
                 ),
                 leaves,
             ))
     else:
         parts = [
-            _secure_multiply_core(x_l, y_l, t_l, exchanger, session_id, leaf_op, is_party_0)
-            for leaf_op, x_l, y_l, t_l in leaves
+            _secure_multiply_core(x_l, y_l, t_l, ct_l, exchanger, session_id, leaf_op, is_party_0)
+            for leaf_op, x_l, y_l, t_l, ct_l in leaves
         ]
     return torch.cat(parts, dim=split_dim)
 
 
 def secure_square(x_share: torch.Tensor,
                   triple: BeaverTripleShares,
+                  check_triple: Optional[BeaverTripleShares],
                   exchanger: PeerExchanger,
                   session_id: str,
                   op_id: str,
                   is_party_0: bool) -> torch.Tensor:
     """Securely compute x^2 (optimized: use same value for both operands)."""
     return secure_multiply(
-        x_share, x_share, triple, exchanger,
+        x_share, x_share, triple, check_triple, exchanger,
         session_id, op_id, is_party_0)
 
 
@@ -358,6 +561,7 @@ def secure_square(x_share: torch.Tensor,
 def secure_matmul(x_share: torch.Tensor,
                   y_share: torch.Tensor,
                   triple: BeaverTripleShares,
+                  check_triple: Optional[BeaverTripleShares],
                   exchanger: PeerExchanger,
                   session_id: str,
                   op_id: str,
@@ -397,6 +601,7 @@ def secure_matmul(x_share: torch.Tensor,
             x_share=x_share,
             y_share=y_share,
             triple=triple,
+            check_triple=check_triple,
             exchanger=exchanger,
             session_id=session_id,
             op_id=op_id,
@@ -410,6 +615,7 @@ def secure_matmul(x_share: torch.Tensor,
         x_share=x_share,
         y_share=y_share,
         triple=triple,
+        check_triple=check_triple,
         exchanger=exchanger,
         session_id=session_id,
         op_id=op_id,
@@ -421,16 +627,32 @@ def secure_matmul(x_share: torch.Tensor,
 def _secure_matmul_core(x_share: torch.Tensor,
                         y_share: torch.Tensor,
                         triple: BeaverTripleShares,
+                        check_triple: Optional[BeaverTripleShares],
                         exchanger: PeerExchanger,
                         session_id: str,
                         op_id: str,
                         is_party_0: bool,
                         transpose_b: bool) -> torch.Tensor:
+    if check_triple is not None:
+        _sacrifice_check_matmul(
+            triple=triple,
+            check_triple=check_triple,
+            exchanger=exchanger,
+            session_id=session_id,
+            op_id=op_id,
+            is_party_0=is_party_0,
+            transpose_b=transpose_b,
+        )
     my_epsilon = x_share - triple.a
     my_delta = y_share - triple.b
 
-    peer_epsilon, peer_delta = exchanger.exchange(
-        session_id, op_id, my_epsilon, my_delta)
+    peer_epsilon, peer_delta = _exchange_with_mac(
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=op_id,
+        my_epsilon=my_epsilon,
+        my_delta=my_delta,
+    )
 
     epsilon = my_epsilon + peer_epsilon
     delta = my_delta + peer_delta
@@ -455,32 +677,42 @@ def _build_matmul_leaves(
     x_share: torch.Tensor,
     y_share: torch.Tensor,
     triple: BeaverTripleShares,
+    check_triple: Optional[BeaverTripleShares],
     depth: int,
     split_dim: int,
     op_prefix: str,
-) -> list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares]]:
-    leaves: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares]] = []
-    work: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, int]] = [
-        (op_prefix, x_share, y_share, triple, depth)
+) -> list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, Optional[BeaverTripleShares]]]:
+    leaves: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, Optional[BeaverTripleShares]]] = []
+    work: list[tuple[str, torch.Tensor, torch.Tensor, BeaverTripleShares, Optional[BeaverTripleShares], int]] = [
+        (op_prefix, x_share, y_share, triple, check_triple, depth)
     ]
     while work:
-        prefix, x_chunk, y_chunk, t_chunk, rem = work.pop(0)
+        prefix, x_chunk, y_chunk, t_chunk, ct_chunk, rem = work.pop(0)
         if rem <= 0 or x_chunk.shape[split_dim] < 2:
-            leaves.append((prefix, x_chunk, y_chunk, t_chunk))
+            leaves.append((prefix, x_chunk, y_chunk, t_chunk, ct_chunk))
             continue
         x_l, x_r = torch.tensor_split(x_chunk, 2, dim=split_dim)
         y_l, y_r = torch.tensor_split(y_chunk, 2, dim=split_dim)
         a_l, a_r = torch.tensor_split(t_chunk.a, 2, dim=split_dim)
         b_l, b_r = torch.tensor_split(t_chunk.b, 2, dim=split_dim)
         c_l, c_r = torch.tensor_split(t_chunk.c, 2, dim=split_dim)
-        work.append((f"{prefix}.L", x_l, y_l, BeaverTripleShares(a_l, b_l, c_l), rem - 1))
-        work.append((f"{prefix}.R", x_r, y_r, BeaverTripleShares(a_r, b_r, c_r), rem - 1))
+        ct_l: Optional[BeaverTripleShares] = None
+        ct_r: Optional[BeaverTripleShares] = None
+        if ct_chunk is not None:
+            ca_l, ca_r = torch.tensor_split(ct_chunk.a, 2, dim=split_dim)
+            cb_l, cb_r = torch.tensor_split(ct_chunk.b, 2, dim=split_dim)
+            cc_l, cc_r = torch.tensor_split(ct_chunk.c, 2, dim=split_dim)
+            ct_l = BeaverTripleShares(ca_l, cb_l, cc_l)
+            ct_r = BeaverTripleShares(ca_r, cb_r, cc_r)
+        work.append((f"{prefix}.L", x_l, y_l, BeaverTripleShares(a_l, b_l, c_l), ct_l, rem - 1))
+        work.append((f"{prefix}.R", x_r, y_r, BeaverTripleShares(a_r, b_r, c_r), ct_r, rem - 1))
     return leaves
 
 
 def _secure_matmul_partitioned(x_share: torch.Tensor,
                                y_share: torch.Tensor,
                                triple: BeaverTripleShares,
+                               check_triple: Optional[BeaverTripleShares],
                                exchanger: PeerExchanger,
                                session_id: str,
                                op_id: str,
@@ -489,12 +721,14 @@ def _secure_matmul_partitioned(x_share: torch.Tensor,
                                depth: int,
                                split_dim: int,
                                workers: int) -> torch.Tensor:
-    leaves = _build_matmul_leaves(x_share, y_share, triple, depth, split_dim, op_id)
+    leaves = _build_matmul_leaves(
+        x_share, y_share, triple, check_triple, depth, split_dim, op_id
+    )
     if workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             parts = list(executor.map(
                 lambda leaf: _secure_matmul_core(
-                    leaf[1], leaf[2], leaf[3], exchanger, session_id,
+                    leaf[1], leaf[2], leaf[3], leaf[4], exchanger, session_id,
                     leaf[0], is_party_0, transpose_b
                 ),
                 leaves,
@@ -502,9 +736,9 @@ def _secure_matmul_partitioned(x_share: torch.Tensor,
     else:
         parts = [
             _secure_matmul_core(
-                x_l, y_l, t_l, exchanger, session_id, leaf_op, is_party_0, transpose_b
+                x_l, y_l, t_l, ct_l, exchanger, session_id, leaf_op, is_party_0, transpose_b
             )
-            for leaf_op, x_l, y_l, t_l in leaves
+            for leaf_op, x_l, y_l, t_l, ct_l in leaves
         ]
     return torch.cat(parts, dim=split_dim)
 
@@ -530,6 +764,12 @@ class TripleAllocator:
         if op_id not in self._triples:
             raise KeyError(f"No triple allocated for op_id={op_id}")
         return self._triples[op_id]
+
+    def get_with_check(self, op_id: str) -> tuple[BeaverTripleShares, Optional[BeaverTripleShares]]:
+        """Get `(main_triple, optional_sacrifice_triple)` for an operation."""
+        main = self.get(op_id)
+        check = self._triples.get(f"{op_id}_sac")
+        return main, check
 
     @property
     def op_ids(self) -> list[str]:
@@ -607,9 +847,11 @@ def secure_rmsnorm(x_share: torch.Tensor,
     Returns the party's share of RMSNorm(x).
     """
     # Step 1: secure x^2
+    sq_triple, sq_check = triples.get_with_check(f"{prefix}_sq")
     x_sq_share = secure_square(
         x_share,
-        triples.get(f"{prefix}_sq"),
+        sq_triple,
+        sq_check,
         exchanger, session_id, f"{prefix}_sq",
         is_party_0)
 
@@ -618,9 +860,13 @@ def secure_rmsnorm(x_share: torch.Tensor,
 
     # Step 3: Reveal variance by exchanging shares
     # We use a dedicated exchange with a dummy delta (same shape)
-    peer_var, _ = exchanger.exchange(
-        session_id, f"{prefix}_reveal",
-        variance_share, torch.zeros_like(variance_share))
+    peer_var, _ = _exchange_with_mac(
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id=f"{prefix}_reveal",
+        my_epsilon=variance_share,
+        my_delta=torch.zeros_like(variance_share),
+    )
     variance = variance_share + peer_var + eps
 
     # Step 4: rsqrt in cleartext (public)
@@ -663,9 +909,13 @@ def secure_softmax(x_share: torch.Tensor,
     Returns party's share of softmax(x).
     """
     # Reveal scores by exchanging shares
-    peer_share, _ = exchanger.exchange(
-        session_id, "softmax_reveal",
-        x_share, torch.zeros_like(x_share))
+    peer_share, _ = _exchange_with_mac(
+        exchanger=exchanger,
+        session_id=session_id,
+        op_id="softmax_reveal",
+        my_epsilon=x_share,
+        my_delta=torch.zeros_like(x_share),
+    )
     scores_clear = x_share + peer_share
 
     # Compute softmax in cleartext
@@ -711,30 +961,38 @@ def secure_silu(x_share: torch.Tensor,
     c5 = 0.00011219
 
     # x^2 via secure multiply
+    x2_triple, x2_check = triples.get_with_check("silu_x2")
     x2_share = secure_square(
         x_share,
-        triples.get("silu_x2"),
+        x2_triple,
+        x2_check,
         exchanger, session_id, "silu_x2",
         is_party_0)
 
     # x^3 = x^2 * x via secure multiply
+    x3_triple, x3_check = triples.get_with_check("silu_x3")
     x3_share = secure_multiply(
         x2_share, x_share,
-        triples.get("silu_x3"),
+        x3_triple,
+        x3_check,
         exchanger, session_id, "silu_x3",
         is_party_0)
 
     # x^4 = x^2 * x^2 via secure multiply
+    x4_triple, x4_check = triples.get_with_check("silu_x4")
     x4_share = secure_multiply(
         x2_share, x2_share,
-        triples.get("silu_x4"),
+        x4_triple,
+        x4_check,
         exchanger, session_id, "silu_x4",
         is_party_0)
 
     # x^5 = x^4 * x via secure multiply
+    x5_triple, x5_check = triples.get_with_check("silu_x5")
     x5_share = secure_multiply(
         x4_share, x_share,
-        triples.get("silu_x5"),
+        x5_triple,
+        x5_check,
         exchanger, session_id, "silu_x5",
         is_party_0)
 
@@ -744,9 +1002,11 @@ def secure_silu(x_share: torch.Tensor,
         sig_share = sig_share + 0.5
 
     # SiLU = x * sigmoid(x) via secure multiply
+    silu_apply_triple, silu_apply_check = triples.get_with_check("silu_apply")
     result_share = secure_multiply(
         x_share, sig_share,
-        triples.get("silu_apply"),
+        silu_apply_triple,
+        silu_apply_check,
         exchanger, session_id, "silu_apply",
         is_party_0)
 
@@ -766,9 +1026,11 @@ def secure_gate_up(gate_share: torch.Tensor,
     """
     Compute gate * up for the MLP block, where both are secret-shared.
     """
+    gate_up_triple, gate_up_check = triples.get_with_check("mlp_gate_up")
     return secure_multiply(
         gate_share, up_share,
-        triples.get("mlp_gate_up"),
+        gate_up_triple,
+        gate_up_check,
         exchanger, session_id, "mlp_gate_up",
         is_party_0)
 
@@ -805,10 +1067,13 @@ def allocate_layer0_triples(
 
     def add(name: str, shape: tuple):
         triples[name] = BeaverTriple.generate(shape)
+        triples[f"{name}_sac"] = BeaverTriple.generate(shape)
 
     def add_matmul(name: str, a_shape: tuple, b_shape: tuple,
                    transpose_b: bool = True):
         triples[name] = BeaverTriple.generate_matmul(
+            a_shape, b_shape, transpose_b=transpose_b)
+        triples[f"{name}_sac"] = BeaverTriple.generate_matmul(
             a_shape, b_shape, transpose_b=transpose_b)
 
     # --- Input RMSNorm (variance revealed, only x^2 triple needed) ---

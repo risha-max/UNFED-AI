@@ -166,22 +166,16 @@ graph LR
 sequenceDiagram
   participant N as Compute Node
   participant R as Registry
-  participant V as Verifier
 
-  N->>R: SubmitTicket(shard, input, output_hash)
-  V->>R: PullTickets()
-  R->>V: [ticket_1, ticket_2, ...]
-  V->>V: Re-execute Forward(shard, input)
-  V->>V: Compare output_hash
-  alt Hash matches
-    V->>V: Ticket OK, discard
-  else Hash mismatch
-    V->>R: SubmitFraudProof(node_id, evidence)
-    R->>R: Validate proof
-    R->>R: slashNode() on-chain
+  N->>R: SubmitHESuspicionReport(report)
+  R->>R: Validate signature + bindings
+  alt Anomaly confirmed
+    R->>R: Apply slashing policy
+  else No anomaly
+    R->>R: Record report only
   end
         </div>
-        <p class="diagram-caption">Verification lifecycle: from ticket creation to potential slashing.</p>
+        <p class="diagram-caption">Registry-native adjudication lifecycle for suspicious outputs.</p>
       </div>
 
       <div class="split" style="margin-top: 32px;">

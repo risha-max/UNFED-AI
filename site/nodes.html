@@ -192,40 +192,6 @@
   --eth-address 0xYourAddress</code></pre>
       </div>
 
-      <!-- Verifier Node -->
-      <div class="node-card" id="verifier">
-        <h3>
-          &#128269; Verifier Node
-          <span class="tag">GPU Required</span>
-          <span class="tag">Security</span>
-        </h3>
-        <p>
-          A standalone process that pulls verification tickets from the registry,
-          re-executes the computation with the same shard weights, and compares
-          output hashes. If a mismatch is found, it submits a fraud proof that
-          triggers on-chain slashing of the cheating node.
-        </p>
-        <div class="meta">
-          <div class="meta-item"><strong>GPU:</strong> Required (for re-execution)</div>
-          <div class="meta-item"><strong>Weights:</strong> All shard files (loaded lazily)</div>
-          <div class="meta-item"><strong>Stake:</strong> Not required</div>
-          <div class="meta-item"><strong>Earns:</strong> Not yet (future: bounties)</div>
-        </div>
-        <span class="code-label">Start command</span>
-        <pre><code>python -m network.verifier_node \
-  --registry localhost:50050 \
-  --poll-interval 5 \
-  --shards-dir shards_smolvlm</code></pre>
-        <div class="info-box">
-          <p>
-            <strong>Context-free verification:</strong> The verifier never sees user
-            identity, session ID, or which node computed the original result. It only
-            receives: shard index + input activation + expected output. Privacy is
-            preserved even during fraud detection.
-          </p>
-        </div>
-      </div>
-
     </div>
   </section>
 
@@ -282,13 +248,6 @@
               <td>Shard 0</td>
               <td>A only</td>
               <td><code>network.mpc_shard0</code></td>
-            </tr>
-            <tr>
-              <td><strong>Verifier</strong></td>
-              <td>Yes</td>
-              <td>All shards</td>
-              <td>No</td>
-              <td><code>network.verifier_node</code></td>
             </tr>
           </tbody>
         </table>

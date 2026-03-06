@@ -22,26 +22,8 @@ service Registry {
   // Get pool health: which shards are covered, node counts per shard.
   rpc GetPoolHealth(PoolHealthRequest) returns (PoolHealthResponse);
 
-  // Submit verification tickets collected by nodes.
-  rpc SubmitTickets(SubmitTicketsRequest) returns (SubmitTicketsResponse);
-
-  // Get pending verification tickets (for verifier nodes to process).
-  rpc GetPendingTickets(GetPendingTicketsRequest) returns (GetPendingTicketsResponse);
-
-  // Submit fraud proofs discovered by verifiers.
-  rpc SubmitFraudProof(FraudProofMessage) returns (FraudProofResponse);
-
-  // Submit suspicion reports for HE sidecar responses.
+  // Submit suspicion reports for HE compute responses.
   rpc SubmitHESuspicionReport(HESuspicionReport) returns (HESuspicionReportResponse);
-
-  // Fetch pending HE dispute tickets for verifier adjudication.
-  rpc GetPendingHEDisputes(GetPendingHEDisputesRequest) returns (GetPendingHEDisputesResponse);
-
-  // Submit verifier verdict for an HE dispute ticket.
-  rpc SubmitHEVerifierVerdict(HEVerifierVerdict) returns (HEVerifierVerdictResponse);
-
-  // Get all known fraud proofs.
-  rpc GetFraudProofs(GetFraudProofsRequest) returns (GetFraudProofsResponse);
 
   // Get model manifest (so new nodes can discover shards without out-of-band distribution).
   rpc GetManifest(GetManifestRequest) returns (GetManifestResponse);
@@ -82,76 +64,11 @@ service Registry {
   // Request a role/shard assignment from the registry based on hardware capacity.
   rpc RequestAssignment(RequestAssignmentRequest) returns (RequestAssignmentResponse);
 
-  // Register a verifier process and get effective verifier config.
-  rpc RegisterVerifier(RegisterVerifierRequest) returns (RegisterVerifierResponse);
-
-  // Heartbeat from a verifier process; also returns latest effective config.
-  rpc VerifierHeartbeat(VerifierHeartbeatRequest) returns (VerifierHeartbeatResponse);
-
-  // Fetch effective verifier config directly.
-  rpc GetVerifierConfig(GetVerifierConfigRequest) returns (GetVerifierConfigResponse);
-
-  // Get current verifier health summary for fail-closed gates.
-  rpc GetVerifierHealth(GetVerifierHealthRequest) returns (GetVerifierHealthResponse);
-
-  // Get daemon/verifier routing and payout telemetry for observability.
+  // Get daemon routing and payout telemetry for observability.
   rpc GetInfraTelemetry(GetInfraTelemetryRequest) returns (GetInfraTelemetryResponse);
-}
 
-// --- Verification ---
-
-message VerificationTicketProto {
-  string ticket_id = 1;
-  int32 shard_index = 2;
-  bytes input_data = 3;
-  repeated int32 input_shape = 4;
-  bool input_is_tokens = 5;
-  bytes expected_output_data = 6;
-  repeated int32 expected_output_shape = 7;
-  int32 expected_token = 8;
-  bool has_expected_token = 9;
-  double timestamp = 10;
-}
-
-message SubmitTicketsRequest {
-  string node_id = 1;
-  repeated VerificationTicketProto tickets = 2;
-}
-
-message SubmitTicketsResponse {
-  int32 accepted = 1;
-}
-
-message GetPendingTicketsRequest {
-  int32 max_tickets = 1;  // Max number of tickets to return (0 = no limit)
-  string verifier_id = 2; // Optional verifier identity for work attribution
-}
-
-message GetPendingTicketsResponse {
-  repeated VerificationTicketProto tickets = 1;
-}
-
-message FraudProofMessage {
-  string ticket_id = 1;
-  int32 shard_index = 2;
-  string input_hash = 3;
-  string expected_output_hash = 4;
-  string actual_output_hash = 5;
-  int32 expected_token = 6;
-  int32 actual_token = 7;
-  double timestamp = 8;
-  string verifier_id = 9; // Verifier identity that submitted this proof
-  string claim_id = 10;   // Optional client-generated claim UUID
-  string idempotency_key = 11; // Optional idempotency key for dedupe/rate-limit safety
-  string evidence_session_id = 12; // Session/ticket linkage evidence
-  string evidence_node_id = 13; // Claimed submitting node evidence
-}
-
-message FraudProofResponse {
-  bool accepted = 1;
-  string claim_id = 2;
-  string claim_status = 3; // pending|confirmed|rejected
-  string message = 4;
+  // Submit daemon-computed share window root for external audit.
+  rpc SubmitShareWindowAudit(SubmitShareWindowAuditRequest) returns (SubmitShareWindowAuditResponse);
 }
 
 message HESuspicionReport {
@@ -180,58 +97,6 @@ message HESuspicionReportResponse {
   string dispute_ticket_id = 3;
   string status = 4;   // accepted|rejected|duplicate|rate_limited
   string message = 5;
-}
-
-message HEDisputeTicket {
-  string dispute_ticket_id = 1;
-  string report_id = 2;
-  string sidecar_node_id = 3;
-  string sidecar_stake_identity = 4;
-  string reporter_node_id = 5;
-  string reporter_node_type = 6;
-  string session_id = 7;
-  int32 step = 8;
-  string key_id = 9;
-  string reason_code = 10;
-  string he_compute_format = 11;
-  string request_payload_hash = 12;
-  string response_payload_hash = 13;
-  string evidence_json = 14;
-  double report_timestamp = 15;
-}
-
-message GetPendingHEDisputesRequest {
-  int32 max_tickets = 1;
-  string verifier_id = 2;
-}
-
-message GetPendingHEDisputesResponse {
-  repeated HEDisputeTicket tickets = 1;
-}
-
-message HEVerifierVerdict {
-  string dispute_ticket_id = 1;
-  string verifier_id = 2;
-  string verdict = 3; // valid|invalid|insufficient_evidence
-  string reason = 4;
-  string proof_json = 5;
-  string sidecar_node_id = 6;
-  string sidecar_stake_identity = 7;
-  bytes verifier_signature = 8;
-  double timestamp = 9;
-}
-
-message HEVerifierVerdictResponse {
-  bool accepted = 1;
-  string dispute_ticket_id = 2;
-  string status = 3; // confirmed_invalid|confirmed_valid|insufficient_evidence|duplicate|rejected
-  string message = 4;
-}
-
-message GetFraudProofsRequest {}
-
-message GetFraudProofsResponse {
-  repeated FraudProofMessage proofs = 1;
 }
 
 // --- Registration ---
@@ -495,61 +360,29 @@ message RequestAssignmentResponse {
   Assignment assignment = 3;
 }
 
-// --- Verifier lifecycle/config/health ---
-
-message RegisterVerifierRequest {
-  string verifier_id = 1;
-  string address = 2;
-}
-
-message RegisterVerifierResponse {
-  bool success = 1;
-  string message = 2;
-  string config_json = 3;
-}
-
-message VerifierHeartbeatRequest {
-  string verifier_id = 1;
-}
-
-message VerifierHeartbeatResponse {
-  bool acknowledged = 1;
-  string config_json = 2;
-}
-
-message GetVerifierConfigRequest {
-  string verifier_id = 1;
-}
-
-message GetVerifierConfigResponse {
-  bool success = 1;
-  string message = 2;
-  string config_json = 3;
-}
-
-message GetVerifierHealthRequest {}
-
-message GetVerifierHealthResponse {
-  int32 healthy_verifier_count = 1;
-  int32 required_verifier_count = 2;
-  bool healthy = 3;
-}
-
 message GetInfraTelemetryRequest {}
 
 message GetInfraTelemetryResponse {
   int32 healthy_daemon_count = 1;
   int32 required_daemon_count = 2;
-  int32 healthy_verifier_count = 3;
-  int32 required_verifier_count = 4;
-  string selected_daemon_recipient = 5;
-  string selected_verifier_recipient = 6;
-  string daemon_work_window_json = 7;      // {recipient_or_node_id: work_units}
-  string verifier_work_window_json = 8;    // {verifier_id: ticket_units}
-  string daemon_payout_share_json = 9;     // {recipient: [0..1]}
-  string verifier_payout_share_json = 10;  // {recipient: [0..1]}
-  string verifier_claim_status_json = 11;  // [{claim_id,status,reason,...}]
-  string verifier_penalty_events_json = 12; // [{verifier_id,kind,amount,...}]
+  string selected_daemon_recipient = 3;
+  string daemon_work_window_json = 4;      // {recipient_or_node_id: work_units}
+  string daemon_payout_share_json = 5;     // {recipient: [0..1]}
+}
+
+message SubmitShareWindowAuditRequest {
+  string daemon_node_id = 1;
+  string window_id = 2;
+  int32 start_block = 3;
+  int32 end_block = 4;
+  int32 share_count = 5;
+  string share_root = 6;
+  double timestamp = 7;
+}
+
+message SubmitShareWindowAuditResponse {
+  bool accepted = 1;
+  string message = 2;
 }
 
 message VerifyCapacityRequest {

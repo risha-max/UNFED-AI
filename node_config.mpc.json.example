@@ -9,6 +9,7 @@
   "model_name": "./models/Qwen2.5-Coder-0.5B-Instruct",
   "model_type": "qwen2",
   "require_daemon": true,
+  "allowed_prev_node_types": [],
 
   "mpc_dnc_mode": "auto",
   "mpc_dnc_depth": 2,

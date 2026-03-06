@@ -534,9 +534,11 @@ class MPCNode:
 
         # --- Secure Q @ K^T via matrix Beaver triple ---
         scale = 1.0 / (self.head_dim ** 0.5)
+        qk_triple, qk_check = triples.get_with_check("attn_qk_matmul")
         scores_share = secure_matmul(
             q_share, k_share,
-            triples.get("attn_qk_matmul"),
+            qk_triple,
+            qk_check,
             exchanger, session_id, "attn_qk_matmul",
             is_party_0, transpose_b=True)
         scores_share = scores_share * scale
@@ -554,9 +556,11 @@ class MPCNode:
             scores_share, triples, exchanger, session_id, is_party_0)
 
         # --- Secure attn_weights @ V via matrix Beaver triple ---
+        av_triple, av_check = triples.get_with_check("attn_av_matmul")
         attn_output_share = secure_matmul(
             attn_weights_share, v_share,
-            triples.get("attn_av_matmul"),
+            av_triple,
+            av_check,
             exchanger, session_id, "attn_av_matmul",
             is_party_0, transpose_b=False)
 
@@ -819,7 +823,8 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
     the 2PC protocol with Node B, and forwards results to the next shard.
     """
 
-    def __init__(self, mpc_node: MPCNode, port: int, require_daemon: bool = True):
+    def __init__(self, mpc_node: MPCNode, port: int, require_daemon: bool = True,
+                 allowed_prev_node_types: Optional[list[str]] = None):
         self.mpc = mpc_node
         self.port = port
         self._node_id: str = ""
@@ -832,9 +837,16 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._registration_share_signing_private_key = None
         self._session_nonce_by_session: dict[str, str] = {}
         self._session_step_by_session: dict[str, int] = {}
+        self._session_prev_share_hash: dict[str, str] = {}
+        self._session_prev_block_hash: dict[str, str] = {}
         self._active_inferences = 0
         self._inference_lock = threading.Lock()
         self._require_daemon = bool(require_daemon)
+        self._allowed_prev_node_types = {
+            t.strip().lower()
+            for t in (allowed_prev_node_types or [])
+            if t and t.strip()
+        }
 
     def _connect_peer(self):
         """Connect to Node B's MPCPeer service."""
@@ -899,7 +911,12 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         )
 
         try:
-            self._daemon_stub.SubmitShares(req, timeout=5)
+            resp = self._daemon_stub.SubmitShares(req, timeout=5)
+            if int(getattr(resp, "accepted", 0)) > 0 and shares:
+                lead = shares[0]
+                self._session_prev_share_hash[lead.session_id] = lead.hash()
+                if getattr(resp, "chain_tip_hash", ""):
+                    self._session_prev_block_hash[lead.session_id] = str(resp.chain_tip_hash)
             print(f"[MPC-A] Submitted signed share(s) for session "
                   f"{session_id[:8]}...")
         except Exception:
@@ -908,7 +925,12 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             # Fast failover path: retry once immediately on refreshed daemon.
             if self._daemon_stub is not None:
                 try:
-                    self._daemon_stub.SubmitShares(req, timeout=5)
+                    resp = self._daemon_stub.SubmitShares(req, timeout=5)
+                    if int(getattr(resp, "accepted", 0)) > 0 and shares:
+                        lead = shares[0]
+                        self._session_prev_share_hash[lead.session_id] = lead.hash()
+                        if getattr(resp, "chain_tip_hash", ""):
+                            self._session_prev_block_hash[lead.session_id] = str(resp.chain_tip_hash)
                     print(f"[MPC-A] Submitted signed share(s) after failover "
                           f"for session {session_id[:8]}...")
                     return
@@ -951,6 +973,9 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             share_weight=1.0,
             timestamp_ms=ts_ms,
             payload_hash_version=PAYLOAD_HASH_VERSION,
+            prev_block_hash=self._session_prev_block_hash.get(session_id, ""),
+            prev_share_hash=self._session_prev_share_hash.get(session_id, ""),
+            idempotency_key=f"{node_id}:{nonce}:{step}",
         )
         if not self._registration_share_signing_private_key:
             raise RuntimeError("MPC share signing key not initialized")
@@ -972,6 +997,9 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             signature=signature,
             payload_hash_version=PAYLOAD_HASH_VERSION,
             validated=False,
+            prev_block_hash=payload.prev_block_hash,
+            prev_share_hash=payload.prev_share_hash,
+            idempotency_key=payload.idempotency_key,
         )
 
     def Forward(self, request, context):
@@ -985,10 +1013,21 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 context.set_details("Only Node A accepts Forward requests")
                 context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
                 return inference_pb2.ForwardResponse()
+            if self._daemon_stub is None:
+                # Retry daemon discovery at request time to handle startup races.
+                self._refresh_daemon_stub()
             if self._require_daemon and self._daemon_stub is None:
                 context.set_details("Daemon is required but unavailable.")
                 context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
                 return inference_pb2.ForwardResponse()
+            if self._allowed_prev_node_types:
+                prev_type = (request.route_prev_node_type or "").strip().lower()
+                if prev_type not in self._allowed_prev_node_types:
+                    context.set_details(
+                        f"Previous node type '{prev_type or 'unknown'}' not allowed for MPC-A."
+                    )
+                    context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                    return inference_pb2.ForwardResponse()
 
             self._connect_peer()
 
@@ -1132,6 +1171,8 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     # Set wire_dtype explicitly so downstream shards never
                     # decode using a global float16 default.
                     wire_dtype="float32",
+                    route_prev_node_type="mpc",
+                    route_prev_node_id=self._node_id,
                 )
                 if request.remaining_circuit:
                     remaining = list(request.remaining_circuit)
@@ -1224,6 +1265,7 @@ def serve(role: str, port: int, peer_address: str, host: str = "[::]",
           advertise: str = None, registry_address: str = None,
           shards_dir: str = None, eth_address: str = None,
           require_daemon: bool = True,
+          allowed_prev_node_types: Optional[list[str]] = None,
           mpc_dnc_mode: str = "off",
           mpc_dnc_depth: int = 0,
           mpc_dnc_split_dim: int = -1,
@@ -1261,7 +1303,12 @@ def serve(role: str, port: int, peer_address: str, host: str = "[::]",
     )
 
     if role == "A":
-        servicer = MPCNodeServicer(mpc_node, port, require_daemon=require_daemon)
+        servicer = MPCNodeServicer(
+            mpc_node,
+            port,
+            require_daemon=require_daemon,
+            allowed_prev_node_types=allowed_prev_node_types,
+        )
         servicer._peer_address = peer_address
         inference_pb2_grpc.add_InferenceNodeServicer_to_server(
             servicer, server)
@@ -1348,6 +1395,8 @@ if __name__ == "__main__":
     parser.add_argument("--require-daemon", type=str, default="true",
                         choices=["true", "false", "1", "0"],
                         help="Require daemon availability for share submission")
+    parser.add_argument("--allowed-prev-node-types", type=str, default="",
+                        help="Comma-separated allowed previous node types for MPC-A")
     parser.add_argument("--mpc-dnc-mode", type=str, default="off",
                         choices=["off", "manual", "auto"],
                         help="MPC divide-and-conquer mode")
@@ -1369,9 +1418,13 @@ if __name__ == "__main__":
                         help="Auto mode: max local worker threads")
     args = parser.parse_args()
     require_daemon = str(args.require_daemon).strip().lower() in ("true", "1", "yes", "on")
+    allowed_prev_node_types = [
+        x.strip() for x in str(args.allowed_prev_node_types).split(",") if x.strip()
+    ]
     serve(args.role, args.port, args.peer, args.host, args.advertise,
           args.registry, args.shards_dir, eth_address=args.eth_address,
           require_daemon=require_daemon,
+          allowed_prev_node_types=allowed_prev_node_types,
           mpc_dnc_mode=args.mpc_dnc_mode,
           mpc_dnc_depth=args.mpc_dnc_depth,
           mpc_dnc_split_dim=args.mpc_dnc_split_dim,

@@ -70,6 +70,25 @@ def _split_shares(x: torch.Tensor):
     return x0, x1
 
 
+class _CorruptMacExchanger(LocalPeerExchanger):
+    """Test helper that flips one MAC exchange payload."""
+
+    def __init__(self):
+        super().__init__()
+        self._corrupted = False
+        self._lock_corrupt = threading.Lock()
+
+    def exchange(self, session_id: str, op_id: str,
+                 my_epsilon: torch.Tensor, my_delta: torch.Tensor):
+        peer_eps, peer_del = super().exchange(session_id, op_id, my_epsilon, my_delta)
+        if op_id.endswith("::mac"):
+            with self._lock_corrupt:
+                if not self._corrupted:
+                    self._corrupted = True
+                    return peer_eps + 1.0, peer_del
+        return peer_eps, peer_del
+
+
 @pytest.fixture(autouse=True)
 def _reset_mpc_dnc_config():
     configure_mpc_dnc(MpcDncConfig(mode="off"))
@@ -89,8 +108,8 @@ class TestSecureMultiply:
         exchanger = LocalPeerExchanger()
 
         z0, z1 = _run_two_party(
-            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "op", True),
-            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "op", False),
+            lambda: secure_multiply(x0, y0, triple.party_0, None, exchanger, "s", "op", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, None, exchanger, "s", "op", False),
         )
         result = z0 + z1
         expected = x * y
@@ -106,8 +125,8 @@ class TestSecureMultiply:
         exchanger = LocalPeerExchanger()
 
         z0, z1 = _run_two_party(
-            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "op", True),
-            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "op", False),
+            lambda: secure_multiply(x0, y0, triple.party_0, None, exchanger, "s", "op", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, None, exchanger, "s", "op", False),
         )
         result = z0 + z1
         expected = x * y
@@ -123,8 +142,8 @@ class TestSecureMultiply:
 
         configure_mpc_dnc(MpcDncConfig(mode="off"))
         b0, b1 = _run_two_party(
-            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "mul-base", True),
-            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "mul-base", False),
+            lambda: secure_multiply(x0, y0, triple.party_0, None, exchanger, "s", "mul-base", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, None, exchanger, "s", "mul-base", False),
         )
         baseline = b0 + b1
 
@@ -135,8 +154,8 @@ class TestSecureMultiply:
             parallel_workers=1,
         ))
         p0, p1 = _run_two_party(
-            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "mul-part", True),
-            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "mul-part", False),
+            lambda: secure_multiply(x0, y0, triple.party_0, None, exchanger, "s", "mul-part", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, None, exchanger, "s", "mul-part", False),
         )
         partitioned = p0 + p1
         assert torch.allclose(baseline, partitioned, atol=1e-5), \
@@ -152,8 +171,8 @@ class TestSecureMultiply:
 
         configure_mpc_dnc(MpcDncConfig(mode="off"))
         b0, b1 = _run_two_party(
-            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "mul-auto-base", True),
-            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "mul-auto-base", False),
+            lambda: secure_multiply(x0, y0, triple.party_0, None, exchanger, "s", "mul-auto-base", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, None, exchanger, "s", "mul-auto-base", False),
         )
         baseline = b0 + b1
 
@@ -164,12 +183,47 @@ class TestSecureMultiply:
             auto_max_depth=2,
         ))
         p0, p1 = _run_two_party(
-            lambda: secure_multiply(x0, y0, triple.party_0, exchanger, "s", "mul-auto", True),
-            lambda: secure_multiply(x1, y1, triple.party_1, exchanger, "s", "mul-auto", False),
+            lambda: secure_multiply(x0, y0, triple.party_0, None, exchanger, "s", "mul-auto", True),
+            lambda: secure_multiply(x1, y1, triple.party_1, None, exchanger, "s", "mul-auto", False),
         )
         auto_res = p0 + p1
         assert torch.allclose(baseline, auto_res, atol=1e-5), \
             f"Max gap: {(baseline - auto_res).abs().max()}"
+
+    def test_mac_tamper_fails_closed(self):
+        x = torch.randn(2, 16)
+        y = torch.randn(2, 16)
+        x0, x1 = _split_shares(x)
+        y0, y1 = _split_shares(y)
+        triple = BeaverTriple.generate((2, 16))
+        exchanger = _CorruptMacExchanger()
+
+        with pytest.raises(RuntimeError, match="MAC verification failed"):
+            _run_two_party(
+                lambda: secure_multiply(x0, y0, triple.party_0, None, exchanger, "s", "mul-mac", True),
+                lambda: secure_multiply(x1, y1, triple.party_1, None, exchanger, "s", "mul-mac", False),
+            )
+
+    def test_triple_sacrifice_detects_corrupt_check_triple(self):
+        x = torch.randn(2, 16)
+        y = torch.randn(2, 16)
+        x0, x1 = _split_shares(x)
+        y0, y1 = _split_shares(y)
+        triple = BeaverTriple.generate((2, 16))
+        check = BeaverTriple.generate((2, 16))
+        # Corrupt one party's check triple share => sacrifice must fail.
+        check.party_1.c = check.party_1.c + 1.0
+        exchanger = LocalPeerExchanger()
+
+        with pytest.raises(RuntimeError, match="triple sacrifice failed"):
+            _run_two_party(
+                lambda: secure_multiply(
+                    x0, y0, triple.party_0, check.party_0, exchanger, "s", "mul-sac", True
+                ),
+                lambda: secure_multiply(
+                    x1, y1, triple.party_1, check.party_1, exchanger, "s", "mul-sac", False
+                ),
+            )
 
 
 class TestSecureSquare:
@@ -182,8 +236,8 @@ class TestSecureSquare:
         exchanger = LocalPeerExchanger()
 
         z0, z1 = _run_two_party(
-            lambda: secure_square(x0, triple.party_0, exchanger, "s", "sq", True),
-            lambda: secure_square(x1, triple.party_1, exchanger, "s", "sq", False),
+            lambda: secure_square(x0, triple.party_0, None, exchanger, "s", "sq", True),
+            lambda: secure_square(x1, triple.party_1, None, exchanger, "s", "sq", False),
         )
         result = z0 + z1
         expected = x ** 2
@@ -202,8 +256,8 @@ class TestSecureMatmul:
         exchanger = LocalPeerExchanger()
 
         z0, z1 = _run_two_party(
-            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm", True, True),
-            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm", False, True),
+            lambda: secure_matmul(a0, b0, triple.party_0, None, exchanger, "s", "mm", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, None, exchanger, "s", "mm", False, True),
         )
         result = z0 + z1
         expected = torch.matmul(a, b.transpose(-2, -1))
@@ -219,8 +273,8 @@ class TestSecureMatmul:
         exchanger = LocalPeerExchanger()
 
         z0, z1 = _run_two_party(
-            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm", True, False),
-            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm", False, False),
+            lambda: secure_matmul(a0, b0, triple.party_0, None, exchanger, "s", "mm", True, False),
+            lambda: secure_matmul(a1, b1, triple.party_1, None, exchanger, "s", "mm", False, False),
         )
         result = z0 + z1
         expected = torch.matmul(a, b)
@@ -236,8 +290,8 @@ class TestSecureMatmul:
 
         configure_mpc_dnc(MpcDncConfig(mode="off"))
         base0, base1 = _run_two_party(
-            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm-base", True, True),
-            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm-base", False, True),
+            lambda: secure_matmul(a0, b0, triple.party_0, None, exchanger, "s", "mm-base", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, None, exchanger, "s", "mm-base", False, True),
         )
         base = base0 + base1
 
@@ -248,8 +302,8 @@ class TestSecureMatmul:
             parallel_workers=1,
         ))
         part0, part1 = _run_two_party(
-            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm-part", True, True),
-            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm-part", False, True),
+            lambda: secure_matmul(a0, b0, triple.party_0, None, exchanger, "s", "mm-part", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, None, exchanger, "s", "mm-part", False, True),
         )
         part = part0 + part1
         assert torch.allclose(base, part, atol=1e-5), \
@@ -265,8 +319,8 @@ class TestSecureMatmul:
 
         configure_mpc_dnc(MpcDncConfig(mode="off"))
         base0, base1 = _run_two_party(
-            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm-auto-base", True, True),
-            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm-auto-base", False, True),
+            lambda: secure_matmul(a0, b0, triple.party_0, None, exchanger, "s", "mm-auto-base", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, None, exchanger, "s", "mm-auto-base", False, True),
         )
         base = base0 + base1
 
@@ -277,12 +331,46 @@ class TestSecureMatmul:
             auto_max_depth=2,
         ))
         auto0, auto1 = _run_two_party(
-            lambda: secure_matmul(a0, b0, triple.party_0, exchanger, "s", "mm-auto", True, True),
-            lambda: secure_matmul(a1, b1, triple.party_1, exchanger, "s", "mm-auto", False, True),
+            lambda: secure_matmul(a0, b0, triple.party_0, None, exchanger, "s", "mm-auto", True, True),
+            lambda: secure_matmul(a1, b1, triple.party_1, None, exchanger, "s", "mm-auto", False, True),
         )
         auto_res = auto0 + auto1
         assert torch.allclose(base, auto_res, atol=1e-5), \
             f"Max gap: {(base - auto_res).abs().max()}"
+
+    def test_matmul_mac_tamper_fails_closed(self):
+        a = torch.randn(1, 2, 4, 8)
+        b = torch.randn(1, 2, 4, 8)
+        a0, a1 = _split_shares(a)
+        b0, b1 = _split_shares(b)
+        triple = BeaverTriple.generate_matmul(a.shape, b.shape, transpose_b=True)
+        exchanger = _CorruptMacExchanger()
+
+        with pytest.raises(RuntimeError, match="MAC verification failed"):
+            _run_two_party(
+                lambda: secure_matmul(a0, b0, triple.party_0, None, exchanger, "s", "mm-mac", True, True),
+                lambda: secure_matmul(a1, b1, triple.party_1, None, exchanger, "s", "mm-mac", False, True),
+            )
+
+    def test_matmul_triple_sacrifice_detects_corrupt_check_triple(self):
+        a = torch.randn(1, 2, 4, 8)
+        b = torch.randn(1, 2, 4, 8)
+        a0, a1 = _split_shares(a)
+        b0, b1 = _split_shares(b)
+        triple = BeaverTriple.generate_matmul(a.shape, b.shape, transpose_b=True)
+        check = BeaverTriple.generate_matmul(a.shape, b.shape, transpose_b=True)
+        check.party_0.c = check.party_0.c - 1.0
+        exchanger = LocalPeerExchanger()
+
+        with pytest.raises(RuntimeError, match="triple sacrifice failed"):
+            _run_two_party(
+                lambda: secure_matmul(
+                    a0, b0, triple.party_0, check.party_0, exchanger, "s", "mm-sac", True, True
+                ),
+                lambda: secure_matmul(
+                    a1, b1, triple.party_1, check.party_1, exchanger, "s", "mm-sac", False, True
+                ),
+            )
 
 
 class TestSecureRMSNorm:
