@@ -158,7 +158,7 @@ class ComputeConfig(BaseNodeConfig):
     compress_threshold: int = 16384
 
     # --- HE compute / sidecar / dispute policy ---
-    he_compute_mode: str = "off"                 # off|decode_client_sample|server_sample
+    he_compute_mode: str = "off"                 # off|decode_client_sample|mpc_nminus1_n
     he_compute_top_k: int = 64
     he_compute_temperature: float = 1.0
     he_compute_top_p: float = 1.0
@@ -400,9 +400,9 @@ def _validate(cfg: NodeConfig):
                 f"wire_dtype must be 'float32' or 'float16', got '{cfg.wire_dtype}'")
         if cfg.compress_threshold < 1:
             raise ValueError("compress_threshold must be >= 1")
-        if cfg.he_compute_mode not in ("off", "decode_client_sample", "server_sample"):
+        if cfg.he_compute_mode not in ("off", "decode_client_sample", "mpc_nminus1_n"):
             raise ValueError(
-                "he_compute_mode must be off|decode_client_sample|server_sample"
+                "he_compute_mode must be off|decode_client_sample|mpc_nminus1_n"
             )
         if cfg.he_compute_top_k < 1:
             raise ValueError("he_compute_top_k must be >= 1")

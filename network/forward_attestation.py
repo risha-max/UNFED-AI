@@ -29,6 +29,7 @@ class ForwardAttestationPayload:
     tensor_shape: str
     compressed: bool
     wire_dtype: str
+    output_mpc_payload_hash: str
     proof_format: str
     proof_hash: str
 
@@ -39,6 +40,7 @@ def canonical_forward_attestation_bytes(payload: ForwardAttestationPayload) -> b
         f"{payload.session_id}|{payload.he_step}|{payload.he_key_id}|"
         f"{payload.activation_digest}|{payload.tensor_shape}|"
         f"{1 if payload.compressed else 0}|{payload.wire_dtype}|"
+        f"{payload.output_mpc_payload_hash}|"
         f"{payload.proof_format}|{payload.proof_hash}"
     ).encode("utf-8")
 

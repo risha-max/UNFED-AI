@@ -147,7 +147,7 @@ message ForwardRequest {
 
   // --- HE compute contract (output-layer decode path) ---
   // Mode selector for HE compute rollout.
-  // Supported values: "off", "decode_client_sample", "server_sample".
+  // Supported values: "off", "decode_client_sample", "mpc_nminus1_n".
   string he_compute_mode = 28;
 
   // Optional HE compute payload transported across shard hops.
@@ -181,6 +181,14 @@ message ForwardRequest {
   // Optional proof artifact and format (placeholder for zk proof-carrying path).
   bytes prev_attestation_proof = 41;
   string prev_attestation_proof_format = 42;
+
+  // --- Output MPC payload metadata ---
+  // Operation tag for output MPC handoff (for example: penultimate_share).
+  string output_mpc_op = 43;
+  // Payload semantic type (for example: hidden_last_token).
+  string output_mpc_payload_type = 44;
+  // SHA256 over canonical output payload bytes.
+  string output_mpc_payload_hash = 45;
 }
 
 message ForwardResponse {
@@ -244,6 +252,11 @@ message ForwardResponse {
 
   // Number of candidate tokens included in he_compute_payload.
   int32 he_top_k = 19;
+
+  // --- Output MPC payload metadata ---
+  string output_mpc_op = 20;
+  string output_mpc_payload_type = 21;
+  string output_mpc_payload_hash = 22;
 }
 
 // --- Shard Transfer (P2P weight distribution) ---

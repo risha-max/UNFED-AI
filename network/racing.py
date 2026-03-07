@@ -190,6 +190,14 @@ class RacingCoordinator:
             h.update(response.activation_data)
         if response.has_token:
             h.update(response.token_id.to_bytes(4, 'big', signed=True))
+        if response.he_compute_payload:
+            h.update(bytes(response.he_compute_payload))
+        if response.output_mpc_payload_hash:
+            h.update(str(response.output_mpc_payload_hash).encode("utf-8"))
+        if response.output_mpc_op:
+            h.update(str(response.output_mpc_op).encode("utf-8"))
+        if response.output_mpc_payload_type:
+            h.update(str(response.output_mpc_payload_type).encode("utf-8"))
         return h.hexdigest()
 
     def _verify_responses(self, shard_index: int,

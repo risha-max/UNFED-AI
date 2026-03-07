@@ -49,11 +49,13 @@ from network.onion import (
 from network.he_output import generate_client_keypair, decrypt_token_artifact
 from network.he_compute import (
     HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
+    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
     HE_COMPUTE_MODE_OFF,
     decrypt_topk_artifact,
     generate_client_compute_keypair,
     sample_from_topk_scores,
 )
+from network.mpc_output import parse_output_mpc_response_payload
 from network.voting import VotingCoordinator
 from network.racing import RacingCoordinator
 
@@ -148,7 +150,7 @@ class UnfedClient:
         if self.he_compute_mode not in (
             HE_COMPUTE_MODE_OFF,
             HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-            "server_sample",
+            HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
         ):
             self.he_compute_mode = HE_COMPUTE_MODE_OFF
 
@@ -405,8 +407,11 @@ class UnfedClient:
             public_key_bytes[0] = bytes(mpc_node.public_key)
             using_mpc = True
 
-        if self.use_he_output and self.he_compute_mode == HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE:
-            # Keep deterministic plain routing for first HE-compute rollout.
+        if self.use_he_output and self.he_compute_mode in (
+            HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
+            HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+        ):
+            # Keep deterministic plain routing for output-protected modes.
             routing_mode = "plain"
         elif use_random_routing:
             routing_mode = "random"
@@ -506,7 +511,10 @@ class UnfedClient:
                 request.he_top_k = int(config.HE_COMPUTE_TOP_K)
                 request.he_temperature = float(config.HE_COMPUTE_TEMPERATURE)
                 request.he_top_p = float(config.HE_COMPUTE_TOP_P)
-                if self.he_compute_mode in (HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE, "server_sample"):
+                if self.he_compute_mode in (
+                    HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
+                    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+                ):
                     request.he_disable_plaintext_sampling = True
 
             # Attach routing
@@ -564,25 +572,36 @@ class UnfedClient:
                 if response.he_error:
                     raise RuntimeError(response.he_error)
                 if response.he_compute_payload:
-                    token_ids, scores = decrypt_topk_artifact(
-                        artifact_bytes=bytes(response.he_compute_payload),
-                        client_private_key=he_private_key,
-                        expected_session_id=session_id,
-                        expected_step=step,
-                        expected_key_id=he_key_id,
-                    )
-                    token_id = sample_from_topk_scores(
-                        token_ids=token_ids,
-                        scores=scores,
-                        temperature=float(request.he_temperature or config.HE_COMPUTE_TEMPERATURE or 1.0),
-                        top_p=float(request.he_top_p or config.HE_COMPUTE_TOP_P or 1.0),
-                    )
+                    if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N:
+                        token_id, is_eos = parse_output_mpc_response_payload(
+                            payload_bytes=bytes(response.he_compute_payload),
+                            expected_session_id=session_id,
+                            expected_step=step,
+                            expected_key_id=he_key_id,
+                            expected_payload_hash=response.output_mpc_payload_hash or "",
+                        )
+                    else:
+                        token_ids, scores = decrypt_topk_artifact(
+                            artifact_bytes=bytes(response.he_compute_payload),
+                            client_private_key=he_private_key,
+                            expected_session_id=session_id,
+                            expected_step=step,
+                            expected_key_id=he_key_id,
+                        )
+                        token_id = sample_from_topk_scores(
+                            token_ids=token_ids,
+                            scores=scores,
+                            temperature=float(request.he_temperature or config.HE_COMPUTE_TEMPERATURE or 1.0),
+                            top_p=float(request.he_top_p or config.HE_COMPUTE_TOP_P or 1.0),
+                        )
+                        is_eos = token_id == self.tokenizer.eos_token_id
                     generated_tokens.append(token_id)
                     token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
                     if verbose:
-                        print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} (he-compute)")
+                        mode_label = "mpc-output" if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N else "he-compute"
+                        print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} ({mode_label})")
                     yield token_text
-                    if token_id == self.tokenizer.eos_token_id:
+                    if is_eos:
                         break
                     continue
                 if not response.he_ciphertext:

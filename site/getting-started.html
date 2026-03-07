@@ -400,6 +400,13 @@ python -m scripts.testnet_preflight node \
         If any check fails, treat the result as <strong>NO-GO</strong> and fix the
         reported issue before rollout.
       </p>
+      <div class="info-box">
+        <p>
+          <strong>Output privacy modes:</strong> use <code>he_compute_mode</code> with
+          <code>off</code>, <code>decode_client_sample</code>, or
+          <code>mpc_nminus1_n</code>. The legacy <code>server_sample</code> mode is retired.
+        </p>
+      </div>
     </div>
   </section>
 

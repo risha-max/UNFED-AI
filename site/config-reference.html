@@ -243,15 +243,15 @@ python -m node.run --config mpc_config.json</code></pre>
             <tr><td><code>require_forward_proof</code></td><td><code>false</code></td><td>Require non-empty proof artifact in attestation.</td></tr>
             <tr><td><code>forward_proof_max_bytes</code></td><td><code>8192</code></td><td>Max accepted attestation proof size.</td></tr>
             <tr><td><code>forward_proof_allowed_formats</code></td><td><code>["none"]</code></td><td>Allowed proof format names.</td></tr>
-            <tr><td><code>he_compute_mode</code></td><td><code>"off"</code></td><td>HE mode: off/decode_client_sample/server_sample.</td></tr>
+            <tr><td><code>he_compute_mode</code></td><td><code>"off"</code></td><td>Output mode: <code>off</code>, <code>decode_client_sample</code>, or <code>mpc_nminus1_n</code> for N-1/N output MPC handoff.</td></tr>
             <tr><td><code>he_compute_top_k</code></td><td><code>64</code></td><td>Top-k for HE sampling path.</td></tr>
             <tr><td><code>he_compute_temperature</code></td><td><code>1.0</code></td><td>Sampling temperature for HE path.</td></tr>
             <tr><td><code>he_compute_top_p</code></td><td><code>1.0</code></td><td>Top-p for HE sampling path.</td></tr>
-            <tr><td><code>he_full_vocab_sidecar_url</code></td><td><code>""</code></td><td>HE sidecar endpoint URL.</td></tr>
-            <tr><td><code>he_full_vocab_sidecar_timeout_ms</code></td><td><code>2000</code></td><td>HE sidecar timeout in milliseconds.</td></tr>
-            <tr><td><code>he_full_vocab_sidecar_required</code></td><td><code>false</code></td><td>Fail closed if sidecar unavailable.</td></tr>
-            <tr><td><code>he_sidecar_allowed_formats</code></td><td><code>["paillier_v1"]</code></td><td>Allowed HE sidecar payload formats.</td></tr>
-            <tr><td><code>he_sidecar_max_payload_bytes</code></td><td><code>2097152</code></td><td>Max sidecar payload size.</td></tr>
+            <tr><td><code>he_full_vocab_sidecar_url</code></td><td><code>""</code></td><td>Legacy field (retired path). Keep empty for current deployments.</td></tr>
+            <tr><td><code>he_full_vocab_sidecar_timeout_ms</code></td><td><code>2000</code></td><td>Legacy timeout for retired sidecar path.</td></tr>
+            <tr><td><code>he_full_vocab_sidecar_required</code></td><td><code>false</code></td><td>Legacy fail-closed toggle for retired sidecar path.</td></tr>
+            <tr><td><code>he_sidecar_allowed_formats</code></td><td><code>["paillier_v1"]</code></td><td>Legacy allowlist for retired sidecar disputes.</td></tr>
+            <tr><td><code>he_sidecar_max_payload_bytes</code></td><td><code>2097152</code></td><td>Legacy max payload size for retired sidecar disputes.</td></tr>
             <tr><td><code>he_dispute_sampling_rate</code></td><td><code>0.05</code></td><td>HE dispute sampling fraction.</td></tr>
             <tr><td><code>he_dispute_report_rate_limit_per_window</code></td><td><code>64</code></td><td>HE dispute report rate cap.</td></tr>
             <tr><td><code>he_dispute_window_seconds</code></td><td><code>60</code></td><td>HE dispute rate-limit window.</td></tr>

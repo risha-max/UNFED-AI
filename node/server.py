@@ -51,13 +51,18 @@ from network.resilience import create_resilient_channel, with_retry
 from network.onion import peel_onion, encrypt_response, private_key_to_bytes
 from network.he_output import encrypt_token_artifact
 from network.he_compute import (
-    HE_COMPUTE_FORMAT_PAILLIER_HIDDEN_V1,
     HE_COMPUTE_FORMAT_PAILLIER_V1,
     HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
+    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
     HE_COMPUTE_MODE_OFF,
-    HE_COMPUTE_MODE_SERVER_SAMPLE,
-    build_encrypted_hidden_state_artifact,
     build_encrypted_topk_artifact,
+)
+from network.mpc_output import (
+    MPC_OUTPUT_REQUEST_FORMAT_V1,
+    MPC_OUTPUT_RESPONSE_FORMAT_V1,
+    build_output_mpc_request_payload,
+    build_output_mpc_response_payload,
+    parse_output_mpc_request_payload,
 )
 from network.he_dispute import (
     sign_report_payload,
@@ -729,6 +734,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             tensor_shape=make_tensor_shape_signature(list(request.tensor_shape)),
             compressed=bool(request.compressed),
             wire_dtype=str(request.wire_dtype or ""),
+            output_mpc_payload_hash=str(request.output_mpc_payload_hash or ""),
             proof_format=proof_format,
             proof_hash=proof_bytes_hash(proof),
         )
@@ -786,6 +792,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             tensor_shape=make_tensor_shape_signature(list(request.tensor_shape)),
             compressed=bool(request.compressed),
             wire_dtype=str(request.wire_dtype or ""),
+            output_mpc_payload_hash=str(request.output_mpc_payload_hash or ""),
             proof_format=proof_format,
             proof_hash=proof_bytes_hash(proof),
         )
@@ -927,26 +934,29 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         if he_compute_mode not in (
             HE_COMPUTE_MODE_OFF,
             HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-            HE_COMPUTE_MODE_SERVER_SAMPLE,
+            HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
         ):
             he_compute_mode = HE_COMPUTE_MODE_OFF
-        # Registry now owns HE adjudication path; he_sidecar node role is retired.
-        # Keep compatibility by downgrading server_sample to client-sample artifact mode.
-        if he_compute_mode == HE_COMPUTE_MODE_SERVER_SAMPLE:
-            he_compute_mode = HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE
+        if requested_he_mode and requested_he_mode == "server_sample":
+            context.set_details(
+                "he_compute_mode=server_sample is retired. Use mpc_nminus1_n."
+            )
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            return inference_pb2.ForwardResponse()
         he_decode_client_sample = (
             bool(request.he_output_enabled)
             and he_compute_mode == HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE
             and self.has_lm_head
         )
-        he_disable_plaintext_sampling = (
-            bool(request.he_disable_plaintext_sampling) or he_decode_client_sample
-        )
-        he_server_sidecar_passthrough = (
+        he_mpc_nminus1_n = (
             bool(request.he_output_enabled)
-            and he_compute_mode == HE_COMPUTE_MODE_SERVER_SAMPLE
+            and he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N
             and self.has_lm_head
-            and bool(request.he_compute_payload)
+        )
+        he_disable_plaintext_sampling = (
+            bool(request.he_disable_plaintext_sampling)
+            or he_decode_client_sample
+            or he_mpc_nminus1_n
         )
         if self._require_daemon and self._daemon_stub is None:
             context.set_details("Daemon is required but unavailable.")
@@ -979,92 +989,91 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             wire_dtype = request.wire_dtype or self._wire_dtype_default
             prefix_session_id = request.prefix_session_id or ""
             prefix_length = request.prefix_length or 0
-            if not he_server_sidecar_passthrough:
-                # --- Deserialize image embeddings (VL text pipeline) ---
-                image_embeddings = None
-                if (request.image_embeddings and request.image_embeddings_shape
-                        and self.model_type in ("qwen2_vl", "smolvlm")
-                        and self.has_embedding):
-                    import numpy as np
-                    ie_shape = list(request.image_embeddings_shape)
-                    image_embeddings = torch.from_numpy(
-                        np.frombuffer(request.image_embeddings, dtype=np.float32)
-                        .copy().reshape(ie_shape)
-                    )
+            # --- Deserialize image embeddings (VL text pipeline) ---
+            image_embeddings = None
+            if (request.image_embeddings and request.image_embeddings_shape
+                    and self.model_type in ("qwen2_vl", "smolvlm")
+                    and self.has_embedding):
+                import numpy as np
+                ie_shape = list(request.image_embeddings_shape)
+                image_embeddings = torch.from_numpy(
+                    np.frombuffer(request.image_embeddings, dtype=np.float32)
+                    .copy().reshape(ie_shape)
+                )
 
-                # --- Deserialize M-RoPE position IDs (VL text pipeline) ---
-                mrope_position_ids = None
-                if (request.mrope_position_ids and request.mrope_position_shape
-                        and self.model_type == "qwen2_vl"):
-                    import numpy as np
-                    mp_shape = list(request.mrope_position_shape)
-                    mrope_position_ids = torch.from_numpy(
-                        np.frombuffer(request.mrope_position_ids, dtype=np.int64)
-                        .copy().reshape(mp_shape)
-                    )
+            # --- Deserialize M-RoPE position IDs (VL text pipeline) ---
+            mrope_position_ids = None
+            if (request.mrope_position_ids and request.mrope_position_shape
+                    and self.model_type == "qwen2_vl"):
+                import numpy as np
+                mp_shape = list(request.mrope_position_shape)
+                mrope_position_ids = torch.from_numpy(
+                    np.frombuffer(request.mrope_position_ids, dtype=np.int64)
+                    .copy().reshape(mp_shape)
+                )
 
-                if self.has_embedding and not request.activation_data:
-                    token_ids = torch.tensor([list(request.token_ids)])
-                    input_for_ticket = token_ids
-                    input_is_tokens = True
-                    hidden, sampled_token = self.runner.forward(
-                        token_ids=token_ids,
-                        session_id=session_id,
-                        prefix_session_id=prefix_session_id,
-                        prefix_length=prefix_length,
-                        image_embeddings=image_embeddings,
-                        mrope_position_ids=mrope_position_ids,
-                        sample_token=not he_disable_plaintext_sampling,
-                    )
-                else:
-                    hidden_states = bytes_to_tensor(
-                        request.activation_data,
-                        list(request.tensor_shape),
-                        compressed=request.compressed,
-                        wire_dtype=wire_dtype,
-                    )
-                    input_for_ticket = hidden_states
-                    hidden, sampled_token = self.runner.forward(
-                        hidden_states=hidden_states,
-                        session_id=session_id,
-                        prefix_session_id=prefix_session_id,
-                        prefix_length=prefix_length,
-                        mrope_position_ids=mrope_position_ids,
-                        sample_token=not he_disable_plaintext_sampling,
-                    )
+            if self.has_embedding and not request.activation_data:
+                token_ids = torch.tensor([list(request.token_ids)])
+                input_for_ticket = token_ids
+                input_is_tokens = True
+                hidden, sampled_token = self.runner.forward(
+                    token_ids=token_ids,
+                    session_id=session_id,
+                    prefix_session_id=prefix_session_id,
+                    prefix_length=prefix_length,
+                    image_embeddings=image_embeddings,
+                    mrope_position_ids=mrope_position_ids,
+                    sample_token=not he_disable_plaintext_sampling,
+                )
+            else:
+                hidden_states = bytes_to_tensor(
+                    request.activation_data,
+                    list(request.tensor_shape),
+                    compressed=request.compressed,
+                    wire_dtype=wire_dtype,
+                )
+                input_for_ticket = hidden_states
+                hidden, sampled_token = self.runner.forward(
+                    hidden_states=hidden_states,
+                    session_id=session_id,
+                    prefix_session_id=prefix_session_id,
+                    prefix_length=prefix_length,
+                    mrope_position_ids=mrope_position_ids,
+                    sample_token=not he_disable_plaintext_sampling,
+                )
 
-                # --- Cheat mode: corrupt output BEFORE ticket collection ---
-                # The ticket will contain the corrupted output, so the verifier
-                # will detect the mismatch when it re-computes the correct result.
-                if self._cheat_rate > 0 and random.random() < self._cheat_rate:
-                    noise = torch.randn_like(hidden) * hidden.abs().mean() * 0.5
-                    hidden = hidden + noise
-                    if not hasattr(self, '_cheat_count'):
-                        self._cheat_count = 0
-                    self._cheat_count += 1
-                    print(f"[CHEAT] Shard {self.shard_index}: corrupted output "
-                          f"(cheat #{self._cheat_count})")
+            # --- Cheat mode: corrupt output BEFORE ticket collection ---
+            # The ticket will contain the corrupted output, so the verifier
+            # will detect the mismatch when it re-computes the correct result.
+            if self._cheat_rate > 0 and random.random() < self._cheat_rate:
+                noise = torch.randn_like(hidden) * hidden.abs().mean() * 0.5
+                hidden = hidden + noise
+                if not hasattr(self, '_cheat_count'):
+                    self._cheat_count = 0
+                self._cheat_count += 1
+                print(f"[CHEAT] Shard {self.shard_index}: corrupted output "
+                        f"(cheat #{self._cheat_count})")
 
-                # --- Verification sampling (prefill only) ---
-                is_prefill = session_id not in self._seen_sessions
-                self._seen_sessions.add(session_id)
-                if self._ticket_collector and is_prefill and self._ticket_collector.should_sample():
-                    # Generate ZK commitment for this computation
-                    zk_commit = create_commitment(
-                        shard_index=self.shard_index,
-                        input_tensor=input_for_ticket,
-                        output_tensor=hidden,
-                        shard_weights_hash=self.shard_weights_hash,
-                    )
-                    # Collect full ticket (for spot-check verification)
-                    self._ticket_collector.collect(
-                        shard_index=self.shard_index,
-                        input_tensor=input_for_ticket,
-                        output_tensor=hidden,
-                        input_is_tokens=input_is_tokens,
-                        sampled_token=sampled_token,
-                        is_prefill=True,
-                    )
+            # --- Verification sampling (prefill only) ---
+            is_prefill = session_id not in self._seen_sessions
+            self._seen_sessions.add(session_id)
+            if self._ticket_collector and is_prefill and self._ticket_collector.should_sample():
+                # Generate ZK commitment for this computation
+                zk_commit = create_commitment(
+                    shard_index=self.shard_index,
+                    input_tensor=input_for_ticket,
+                    output_tensor=hidden,
+                    shard_weights_hash=self.shard_weights_hash,
+                )
+                # Collect full ticket (for spot-check verification)
+                self._ticket_collector.collect(
+                    shard_index=self.shard_index,
+                    input_tensor=input_for_ticket,
+                    output_tensor=hidden,
+                    input_is_tokens=input_is_tokens,
+                    sampled_token=sampled_token,
+                    is_prefill=True,
+                )
 
             # --- Determine next hop ---
             next_address = None
@@ -1114,6 +1123,85 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             if next_address is None and self.has_lm_head:
                 # Last node: return the sampled token
                 is_eos = sampled_token == self._eos_token_id if sampled_token is not None else False
+
+                if request.he_output_enabled and he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N:
+                    if not request.he_compute_payload:
+                        context.set_details("MPC output mode requires he_compute_payload.")
+                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                        return inference_pb2.ForwardResponse()
+                    if (request.he_compute_format or "") != MPC_OUTPUT_REQUEST_FORMAT_V1:
+                        context.set_details("Unsupported MPC output request payload format.")
+                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                        return inference_pb2.ForwardResponse()
+                    if self.runner.lm_head is None:
+                        return inference_pb2.ForwardResponse(
+                            has_token=False,
+                            he_error="MPC output mode requires LM head on final shard.",
+                        )
+                    try:
+                        hidden_last_token = parse_output_mpc_request_payload(
+                            payload_bytes=bytes(request.he_compute_payload),
+                            expected_session_id=session_id,
+                            expected_step=int(request.he_step),
+                            expected_key_id=request.he_key_id or "",
+                            expected_payload_hash=request.output_mpc_payload_hash or "",
+                        )
+                        logits = self.runner.lm_head(hidden_last_token.view(1, 1, -1))
+                        last_logits = logits[0, -1].detach().cpu()
+                        top_k = int(request.he_top_k or self._he_compute_top_k or 64)
+                        top_k = max(1, min(top_k, int(last_logits.shape[-1])))
+                        values, indices = torch.topk(last_logits, k=top_k, dim=-1)
+                        temperature = max(
+                            float(request.he_temperature or self._he_compute_temperature or 1.0),
+                            1e-6,
+                        )
+                        top_p = min(
+                            max(float(request.he_top_p or self._he_compute_top_p or 1.0), 1e-6),
+                            1.0,
+                        )
+                        probs = torch.softmax(values / temperature, dim=-1)
+                        sorted_probs, sorted_idx = torch.sort(probs, descending=True)
+                        cumsum = torch.cumsum(sorted_probs, dim=-1)
+                        keep_mask = cumsum <= top_p
+                        keep_mask[0] = True
+                        filtered = torch.zeros_like(probs)
+                        filtered[sorted_idx[keep_mask]] = probs[sorted_idx[keep_mask]]
+                        denom = filtered.sum()
+                        if float(denom.item()) <= 0.0:
+                            selected_idx = int(torch.argmax(probs).item())
+                        else:
+                            filtered = filtered / denom
+                            selected_idx = int(torch.multinomial(filtered, num_samples=1).item())
+                        sampled = int(indices[selected_idx].item())
+                        sampled_is_eos = bool(sampled == self._eos_token_id)
+                        payload, payload_hash = build_output_mpc_response_payload(
+                            token_id=sampled,
+                            is_eos=sampled_is_eos,
+                            session_id=session_id,
+                            step=int(request.he_step),
+                            key_id=request.he_key_id or "",
+                        )
+                        self._record_success_share(
+                            session_id=session_id,
+                            activation_hash=activation_commitment,
+                        )
+                        return inference_pb2.ForwardResponse(
+                            has_token=False,
+                            he_compute_payload=payload,
+                            he_compute_format=MPC_OUTPUT_RESPONSE_FORMAT_V1,
+                            he_top_k=top_k,
+                            he_session_id=session_id,
+                            he_step=int(request.he_step),
+                            he_key_id=request.he_key_id or "",
+                            output_mpc_op="final_sample",
+                            output_mpc_payload_type="token_sample",
+                            output_mpc_payload_hash=payload_hash,
+                        )
+                    except Exception as e:
+                        return inference_pb2.ForwardResponse(
+                            has_token=False,
+                            he_error=f"MPC output sampling failed: {e}",
+                        )
 
                 if request.he_output_enabled and he_compute_mode == HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE:
                     if not request.he_client_pubkey:
@@ -1318,41 +1406,38 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     next_request.he_compute_mode = he_compute_mode
                     is_penultimate_to_last = self.shard_index == (self.num_shards - 2)
                     if (
-                        he_compute_mode == HE_COMPUTE_MODE_SERVER_SAMPLE
+                        he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N
                         and is_penultimate_to_last
                     ):
-                        if not request.he_client_pubkey:
-                            return inference_pb2.ForwardResponse(
-                                has_token=False,
-                                he_error="HE server_sample mode requires he_client_pubkey at penultimate hop.",
-                            )
                         if hidden is None:
                             return inference_pb2.ForwardResponse(
                                 has_token=False,
-                                he_error="HE server_sample penultimate hop missing hidden state.",
+                                he_error="MPC output penultimate hop missing hidden state.",
                             )
                         try:
                             hidden_last_token = hidden[0, -1].detach().cpu()
-                            compute_payload = build_encrypted_hidden_state_artifact(
+                            compute_payload, payload_hash = build_output_mpc_request_payload(
                                 hidden_last_token=hidden_last_token,
-                                client_public_key=bytes(request.he_client_pubkey),
                                 session_id=session_id,
                                 step=int(request.he_step),
                                 key_id=request.he_key_id or "",
                             )
                             next_request.he_compute_payload = compute_payload
-                            next_request.he_compute_format = HE_COMPUTE_FORMAT_PAILLIER_HIDDEN_V1
-                            # Avoid exposing plaintext hidden states to final hop in server_sample mode.
-                            next_request.activation_data = b""
-                            del next_request.tensor_shape[:]
+                            next_request.he_compute_format = MPC_OUTPUT_REQUEST_FORMAT_V1
+                            next_request.output_mpc_op = "penultimate_share"
+                            next_request.output_mpc_payload_type = "hidden_last_token"
+                            next_request.output_mpc_payload_hash = payload_hash
                         except Exception as e:
                             return inference_pb2.ForwardResponse(
                                 has_token=False,
-                                he_error=f"HE server_sample penultimate artifact build failed: {e}",
+                                he_error=f"MPC output penultimate payload build failed: {e}",
                             )
                     else:
                         next_request.he_compute_payload = request.he_compute_payload
                         next_request.he_compute_format = request.he_compute_format
+                        next_request.output_mpc_op = request.output_mpc_op
+                        next_request.output_mpc_payload_type = request.output_mpc_payload_type
+                        next_request.output_mpc_payload_hash = request.output_mpc_payload_hash
                     next_request.he_top_k = request.he_top_k
                     next_request.he_temperature = request.he_temperature
                     next_request.he_top_p = request.he_top_p
@@ -1361,7 +1446,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         or (
                             he_compute_mode in (
                                 HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-                                HE_COMPUTE_MODE_SERVER_SAMPLE,
+                                HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
                             )
                             and is_penultimate_to_last
                         )
@@ -1405,6 +1490,20 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         has_token=response.has_token,
                         is_eos=response.is_eos,
                         activation_commitment=response.activation_commitment,
+                        he_ciphertext=response.he_ciphertext,
+                        he_nonce=response.he_nonce,
+                        he_algo=response.he_algo,
+                        he_session_id=response.he_session_id,
+                        he_step=response.he_step,
+                        he_key_id=response.he_key_id,
+                        he_sender_pubkey=response.he_sender_pubkey,
+                        he_error=response.he_error,
+                        he_compute_payload=response.he_compute_payload,
+                        he_compute_format=response.he_compute_format,
+                        he_top_k=response.he_top_k,
+                        output_mpc_op=response.output_mpc_op,
+                        output_mpc_payload_type=response.output_mpc_payload_type,
+                        output_mpc_payload_hash=response.output_mpc_payload_hash,
                     )
 
                 forward_ok = True

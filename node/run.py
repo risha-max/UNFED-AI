@@ -129,7 +129,7 @@ Examples:
     parser.add_argument("--compress-threshold", type=int, default=None,
                         help="Compression threshold in bytes")
     parser.add_argument("--he-compute-mode", type=str, default=None,
-                        choices=["off", "decode_client_sample", "server_sample"],
+                        choices=["off", "decode_client_sample", "mpc_nminus1_n"],
                         help="HE compute mode")
     parser.add_argument("--he-compute-top-k", type=int, default=None,
                         help="Default HE top-k")

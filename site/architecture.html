@@ -95,7 +95,7 @@ flowchart LR
   A -->|"attested activations"| S1
   SN -->|"response tokens"| C
         </div>
-        <p class="diagram-caption">Text inference path: client request enters the MPC pair (shard 0), traverses compute shards, then sampled tokens return to the client.</p>
+        <p class="diagram-caption">Text inference path: client request enters the MPC pair (shard 0), traverses compute shards, then output returns to client (plaintext by default, or payload-contract path in <code>mpc_nminus1_n</code> mode).</p>
       </div>
 
       <div class="info-box">

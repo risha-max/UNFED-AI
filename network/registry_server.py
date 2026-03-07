@@ -1230,38 +1230,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     success=False,
                     message="invalid share_signing_pop signature",
                 )
-        if node_type == "he_sidecar":
-            if not (request.capability_json or "").strip():
-                return registry_pb2.RegisterResponse(
-                    success=False,
-                    message="he_sidecar requires capability_json",
-                )
-            stake_identity = (request.stake_identity or "").strip()
-            if not stake_identity:
-                stake_identity = (request.node_id or "").strip()
-            if not _is_eth_address(stake_identity):
-                return registry_pb2.RegisterResponse(
-                    success=False,
-                    message="he_sidecar requires EVM stake_identity (or node_id as EVM address)",
-                )
-            if self._onchain_escrow:
-                try:
-                    if not self._onchain_escrow.is_eligible(stake_identity):
-                        min_stake = self._onchain_escrow.min_stake()
-                        return registry_pb2.RegisterResponse(
-                            success=False,
-                            message=f"he_sidecar stake too low. Minimum: {min_stake} wei",
-                        )
-                except Exception as e:
-                    return registry_pb2.RegisterResponse(
-                        success=False,
-                        message=f"he_sidecar stake check failed: {e}",
-                    )
-
         with self._lock:
             effective_stake_identity = (request.stake_identity or "").strip()
-            if not effective_stake_identity and node_type == "he_sidecar":
-                effective_stake_identity = (request.node_id or "").strip()
             record = NodeRecord(
                 node_id=request.node_id,
                 address=request.address,

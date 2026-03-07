@@ -182,8 +182,59 @@ graph LR
     </div>
   </section>
 
+  <!-- Output Privacy -->
+  <section class="section" id="output-privacy">
+    <div class="container">
+      <div class="section-header">
+        <h2>Output <span class="accent">Privacy</span></h2>
+        <p>N-1/N MPC output handoff replaces the retired server-side sidecar path.</p>
+      </div>
+
+      <div class="diagram-wrap diagram-wrap--wide">
+        <div class="mermaid mermaid-large">
+flowchart LR
+  C["Client"]
+  N1["Penultimate Shard (N-1)"]
+  N["Final Shard (N)"]
+  P1["MPC Output Payload<br/>request: session/step/key/hash"]
+  P2["MPC Output Payload<br/>response: token/sample/hash"]
+
+  C -->|"ForwardRequest (he_compute_mode=mpc_nminus1_n)"| N1
+  N1 -->|"he_compute_payload + output_mpc_* metadata"| N
+  N -->|"sampled-token payload contract"| C
+  N1 --> P1
+  N --> P2
+        </div>
+        <p class="diagram-caption">Output privacy contract: N-1 emits payload metadata, N validates bindings and returns sampled-token payload metadata.</p>
+      </div>
+
+      <div class="split" style="margin-top: 32px;">
+        <div class="split-item">
+          <h3>Mode semantics</h3>
+          <ul>
+            <li><code>off</code>: plaintext token path</li>
+            <li><code>decode_client_sample</code>: encrypted top-k for client sampling</li>
+            <li><code>mpc_nminus1_n</code>: N-1/N payload-contract path</li>
+            <li><code>server_sample</code> is retired and rejected at runtime</li>
+          </ul>
+        </div>
+        <div class="split-item">
+          <h3>Leakage hardening</h3>
+          <ul>
+            <li>Session/step/key binding checks on request and response payloads</li>
+            <li>Payload hash is bound into forward attestation and racing checks</li>
+            <li>Adversarial tests cover replay, substitution, and payload mutation</li>
+          </ul>
+          <pre><code>source .venv/bin/activate
+python -m pytest tests/test_mpc_output_adversarial.py \
+  tests/test_mpc_output_leakage.py -q</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- Fraud Proofs -->
-  <section class="section" id="fraud-proofs">
+  <section class="section section--alt" id="fraud-proofs">
     <div class="container">
       <div class="section-header">
         <h2>Fraud <span class="accent">Proofs</span></h2>

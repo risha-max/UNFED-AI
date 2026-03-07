@@ -98,7 +98,7 @@ PREFILL_PIPELINE_MIN_TOKENS = int(os.environ.get("UNFED_PREFILL_MIN", "64"))
 PREFILL_CHUNK_SIZE = 64            # tokens per chunk in pipelined prefill
 
 # --- HE compute rollout ---
-# off | decode_client_sample | server_sample
+# off | decode_client_sample | mpc_nminus1_n
 HE_COMPUTE_MODE = os.environ.get("UNFED_HE_COMPUTE_MODE", "off")
 HE_COMPUTE_TOP_K = int(os.environ.get("UNFED_HE_TOP_K", "64"))
 HE_COMPUTE_TEMPERATURE = float(os.environ.get("UNFED_HE_TEMPERATURE", "1.0"))

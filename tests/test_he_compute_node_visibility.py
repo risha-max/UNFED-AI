@@ -14,6 +14,11 @@ from network.he_compute import (
     decrypt_topk_artifact,
     generate_client_compute_keypair,
 )
+from network.mpc_output import (
+    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+    build_output_mpc_request_payload,
+    parse_output_mpc_response_payload,
+)
 from node.server import InferenceNodeServicer
 
 
@@ -144,24 +149,41 @@ def test_he_compute_mode_disables_plaintext_sampling_and_token_fields():
     assert len(scores) == 3
 
 
-def test_server_sample_mode_downgrades_to_client_sample_artifact():
+def test_mpc_nminus1_n_mode_returns_output_payload_without_plaintext_token():
     servicer = _build_light_servicer()
     context = _DummyContext()
-    _, pub = generate_client_compute_keypair()
+    hidden = torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+    payload, payload_hash = build_output_mpc_request_payload(
+        hidden_last_token=hidden,
+        session_id="sess-mpc-output",
+        step=1,
+        key_id="kid-mpc-output",
+    )
     req = inference_pb2.ForwardRequest(
-        session_id="sess-he-sidecar-pass",
+        session_id="sess-mpc-output",
         activation_data=torch.zeros(1, 1, 4, dtype=torch.float32).numpy().tobytes(),
         tensor_shape=[1, 1, 4],
         he_output_enabled=True,
-        he_client_pubkey=pub,
-        he_key_id="kid-sidecar-pass",
+        he_key_id="kid-mpc-output",
         he_step=1,
-        he_compute_mode="server_sample",
+        he_compute_mode=HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
         he_top_k=1,
         he_disable_plaintext_sampling=True,
+        he_compute_payload=payload,
+        he_compute_format="mpc-output-request-v1",
+        output_mpc_payload_hash=payload_hash,
     )
     resp = servicer.Forward(req, context)
     assert servicer.runner.sample_token_flags == [False]
     assert resp.has_token is False
     assert not resp.he_error
     assert resp.he_compute_payload
+    token_id, is_eos = parse_output_mpc_response_payload(
+        payload_bytes=bytes(resp.he_compute_payload),
+        expected_session_id="sess-mpc-output",
+        expected_step=1,
+        expected_key_id="kid-mpc-output",
+        expected_payload_hash=resp.output_mpc_payload_hash,
+    )
+    assert isinstance(token_id, int)
+    assert isinstance(is_eos, bool)
