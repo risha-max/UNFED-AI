@@ -251,11 +251,11 @@ sequenceDiagram
         </div>
 
         <div class="flow-item">
-          <h4>2. Post On-Chain + Dispute Period</h4>
+          <h4>2. Post On-Chain + Challenge Window</h4>
           <p>
             With escrow enabled (default path), the registry posts the payout map via
             <code>postSettlement(hash, nodes, amounts)</code>. This opens the
-            configurable dispute window (<code>challenge_window_seconds</code>,
+            configurable challenge window (<code>challenge_window_seconds</code>,
             default: 60s). During this period, settlements can be challenged and
             fraudulent nodes can be slashed.
           </p>
@@ -264,7 +264,7 @@ sequenceDiagram
         <div class="flow-item">
           <h4>3. Finalize When Safe</h4>
           <p>
-            After the dispute window expires, the registry finalizes using
+            After the challenge window expires, the registry finalizes using
             <code>finalizeSettlement(hash)</code> when verifier/daemon safety gates are
             healthy. Rewards are allocated from measured token usage according to
             weighted shares, and become claimable from escrow.

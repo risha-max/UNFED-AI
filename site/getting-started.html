@@ -171,6 +171,14 @@ pip install web3  # for on-chain staking (optional)</code></pre>
 
       <div class="info-box">
         <p>
+          <strong>Important:</strong> this starts only the registry service (gRPC). If you
+          also want the browser UI for easier querying, start the web server separately:
+        </p>
+        <pre><code>python -m web.server --port 8080 --registry localhost:50050</code></pre>
+      </div>
+
+      <div class="info-box">
+        <p>
           <strong>Policy scope:</strong> <code>cluster_config.json</code> is loaded by
           the registry process at startup. Quorum knobs like
           <code>daemon_required_count</code> are registry-local policy.
@@ -224,7 +232,7 @@ pip install web3  # for on-chain staking (optional)</code></pre>
           <pre><code>python -m network.registry_server \
   --port 50050 \
   --cluster-config cluster_config.json</code></pre>
-          <p><strong>Tutorial:</strong> start this first, then start daemon and workers.</p>
+          <p><strong>Tutorial:</strong> start this first, then start daemon and workers. If you want a convenient client UI, also run <code>web.server</code> in a separate process.</p>
         </div>
 
         <div class="card">

@@ -223,6 +223,13 @@ Then start the registry:
 python -m network.registry_server --port 50050 --cluster-config cluster_config.json
 ```
 
+If you also want the browser UI for easier querying, start the web server
+separately (registry does not launch it automatically):
+
+```bash
+python -m web.server --port 8080 --registry localhost:50050
+```
+
 The registry will verify node stake eligibility on-chain, post settlements, and handle slashing.
 
 ## Docs Site
