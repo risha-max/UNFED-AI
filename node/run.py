@@ -58,6 +58,9 @@ Examples:
                         help="Address to advertise to registry")
     parser.add_argument("--registry", type=str, default=None,
                         help="Registry server address")
+    parser.add_argument("--require-tls-for-public", type=str, default=None,
+                        choices=["true", "false", "1", "0"],
+                        help="Require TLS when advertising non-local addresses")
 
     # --- gRPC ---
     parser.add_argument("--grpc-max-workers", type=int, default=None,
@@ -210,6 +213,7 @@ def cli_to_overrides(args: argparse.Namespace) -> dict:
         "host": "host",
         "advertise": "advertise",
         "registry": "registry",
+        "require_tls_for_public": "require_tls_for_public",
         "grpc_max_workers": "grpc_max_workers",
         "grpc_max_message_mb": "grpc_max_message_mb",
         "heartbeat_interval_seconds": "heartbeat_interval_seconds",
@@ -273,7 +277,12 @@ def cli_to_overrides(args: argparse.Namespace) -> dict:
     for cli_key, config_key in mapping.items():
         val = args_dict.get(cli_key)
         if val is not None:
-            if cli_key in ("require_daemon", "compress_activations", "he_full_vocab_sidecar_required"):
+            if cli_key in (
+                "require_daemon",
+                "compress_activations",
+                "he_full_vocab_sidecar_required",
+                "require_tls_for_public",
+            ):
                 if isinstance(val, str):
                     val = val.strip().lower() in ("1", "true", "yes", "on")
             if cli_key == "allowed_prev_node_types" and isinstance(val, str):

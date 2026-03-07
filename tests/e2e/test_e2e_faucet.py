@@ -151,7 +151,15 @@ class TestFaucetEndpoint:
              "--port", str(WEB_PORT),
              "--registry", f"localhost:{REGISTRY_PORT}"],
             cwd=PROJECT_ROOT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env={
+                **os.environ,
+                "PYTHONUNBUFFERED": "1",
+                "UNFED_FAUCET_ENABLED": "1",
+                "UNFED_FAUCET_REQUIRE_AUTH": "0",
+                "UNFED_FAUCET_STATE_DB": os.path.join(
+                    PROJECT_ROOT, ".tmp-faucet-state-e2e.db"
+                ),
+            },
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         if not _wait_for_port(WEB_PORT, timeout=15):
@@ -169,6 +177,10 @@ class TestFaucetEndpoint:
 
         try:
             os.remove(env_file)
+        except OSError:
+            pass
+        try:
+            os.remove(os.path.join(PROJECT_ROOT, ".tmp-faucet-state-e2e.db"))
         except OSError:
             pass
 
@@ -243,7 +255,15 @@ class TestFaucetEndpoint:
              "--port", str(WEB_PORT + 1),
              "--registry", f"localhost:{REGISTRY_PORT}"],
             cwd=PROJECT_ROOT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env={
+                **os.environ,
+                "PYTHONUNBUFFERED": "1",
+                "UNFED_FAUCET_ENABLED": "1",
+                "UNFED_FAUCET_REQUIRE_AUTH": "0",
+                "UNFED_FAUCET_STATE_DB": os.path.join(
+                    PROJECT_ROOT, ".tmp-faucet-state-e2e-no-escrow.db"
+                ),
+            },
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         try:
@@ -266,3 +286,7 @@ class TestFaucetEndpoint:
                 proc.wait()
             if had_env:
                 os.rename(backup, env_file)
+            try:
+                os.remove(os.path.join(PROJECT_ROOT, ".tmp-faucet-state-e2e-no-escrow.db"))
+            except OSError:
+                pass

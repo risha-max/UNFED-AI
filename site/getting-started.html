@@ -25,6 +25,9 @@
         <li><a href="economics.html">Economics</a></li>
         <li><a href="protocol.html">Protocol</a></li>
         <li><a href="getting-started.html">Get Started</a></li>
+        <li><a href="config-reference.html">Configs</a></li>
+        <li><a href="https://github.com/risha-max/UNFED-AI" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+        <li><a href="https://discord.gg/7N73crmnbu" target="_blank" rel="noopener noreferrer">Discord</a></li>
       </ul>
     </div>
   </nav>
@@ -153,6 +156,14 @@ pip install web3  # for on-chain staking (optional)</code></pre>
   "daemon_required_count": 1
 }</code></pre>
 
+      <div class="info-box">
+        <p>
+          <strong>Token name is not required:</strong> you only provide
+          <code>staking_token_address</code>. The registry/escrow reads token metadata
+          (like symbol/name) directly from the ERC-20 contract on-chain.
+        </p>
+      </div>
+
       <span class="code-label">Start the registry</span>
       <pre><code>python -m network.registry_server \
   --port 50050 \
@@ -197,54 +208,80 @@ pip install web3  # for on-chain staking (optional)</code></pre>
     </div>
   </section>
 
-  <!-- Step 4: Start Compute Nodes -->
+  <!-- Step 4: Node Type Tutorials -->
   <section class="section">
     <div class="container">
       <div class="section-header">
-        <h2>Step 4: Start <span class="accent">Compute</span> Nodes</h2>
-        <p>One node per shard. Each loads its weights and registers with the cluster.</p>
+        <h2>Step 4: Node-Type <span class="accent">Startup Tutorials</span></h2>
+        <p>Pick the node type you want to run and follow its exact startup flow.</p>
       </div>
 
-      <span class="code-label">Shard 0 (has embedding layer)</span>
-      <pre><code>python -m node.server \
+      <div class="card-grid">
+        <div class="card">
+          <h3>Registry Node</h3>
+          <p>Use this for cluster coordination, admission, and adjudication.</p>
+          <span class="code-label">Start command</span>
+          <pre><code>python -m network.registry_server \
+  --port 50050 \
+  --cluster-config cluster_config.json</code></pre>
+          <p><strong>Tutorial:</strong> start this first, then start daemon and workers.</p>
+        </div>
+
+        <div class="card">
+          <h3>Daemon Node</h3>
+          <p>Use this for sharechain persistence, block production, and fee telemetry.</p>
+          <span class="code-label">Start command</span>
+          <pre><code>python -m network.daemon_node \
+  --port 50070 \
+  --registry localhost:50050 \
+  --db ~/.unfed/chain.db</code></pre>
+          <p><strong>Tutorial:</strong> start after registry, before compute/MPC nodes.</p>
+        </div>
+      </div>
+
+      <div class="card-grid" style="margin-top: 20px;">
+        <div class="card">
+          <h3>Compute Node (Text Shard)</h3>
+          <p>Use this for normal text shard execution. Run one process per shard index.</p>
+          <span class="code-label">Shard 0 example</span>
+          <pre><code>python -m node.server \
   --shard-index 0 \
   --port 50051 \
   --model-type smolvlm \
   --shards-dir shards_smolvlm \
   --registry localhost:50050 \
   --eth-address 0xNodeAddress1</code></pre>
-
-      <span class="code-label">Shard 1 (has LM head)</span>
-      <pre><code>python -m node.server \
+          <span class="code-label">Shard 1 example</span>
+          <pre><code>python -m node.server \
   --shard-index 1 \
   --port 50052 \
   --model-type smolvlm \
   --shards-dir shards_smolvlm \
   --registry localhost:50050 \
   --eth-address 0xNodeAddress2</code></pre>
+          <p><strong>Tutorial:</strong> start all required shard indices for your model.</p>
+        </div>
 
-      <div class="info-box">
-        <p>
-          <strong>Note:</strong> If on-chain staking is enabled, each node must have
-          staked at least <code>min_stake</code> tokens before the registry will
-          accept its registration.
-        </p>
-      </div>
-    </div>
-  </section>
-
-  <!-- Step 5: Optional Components -->
-  <section class="section section--alt">
-    <div class="container">
-      <div class="section-header">
-        <h2>Step 5: <span class="accent">Optional</span> Components</h2>
-        <p>Add privacy and security layers to your cluster.</p>
-      </div>
-
-      <div class="card-grid">
         <div class="card">
-          <h3>MPC Pair</h3>
-          <p>Replace shard 0 with a privacy-preserving MPC pair.</p>
+          <h3>Vision Node (Multimodal)</h3>
+          <p>Use this only for multimodal pipelines that require a vision encoder path.</p>
+          <span class="code-label">Vision shard example</span>
+          <pre><code>python -m node.server \
+  --shard-index 0 \
+  --port 50060 \
+  --model-type smolvlm_vision \
+  --shards-dir shards_smolvlm \
+  --registry localhost:50050 \
+  --eth-address 0xVisionNodeAddress</code></pre>
+          <p><strong>Tutorial:</strong> run alongside text compute nodes for image + text requests.</p>
+        </div>
+      </div>
+
+      <div class="card-grid" style="margin-top: 20px;">
+        <div class="card">
+          <h3>MPC Pair (Node B then Node A)</h3>
+          <p>Use this when you want shard-0 privacy via secret sharing.</p>
+          <span class="code-label">Start Node B first</span>
           <pre><code># Start MPC Node B first
 python -m network.mpc_shard0 \
   --role B --port 50063 \
@@ -258,14 +295,37 @@ python -m network.mpc_shard0 \
   --registry localhost:50050 \
   --shards-dir shards_smolvlm \
   --eth-address 0xMPCAddress</code></pre>
+          <p><strong>Tutorial:</strong> once MPC is running, route shard-0 traffic to MPC A.</p>
         </div>
 
         <div class="card">
-          <h3>Registry Adjudication</h3>
-          <p>The registry now handles suspicion intake, adjudication, slashing, and payments.</p>
-          <pre><code># No standalone verifier node required.
-# Start registry + daemon + compute/mpc nodes only.</code></pre>
+          <h3>Public Node Hardening (All Node Types)</h3>
+          <p>Before exposing any node publicly, run preflight and enforce TLS.</p>
+          <pre><code>python -m scripts.testnet_preflight node \
+  --advertise 203.0.113.42:50051 \
+  --tls-cert /path/to/server.crt \
+  --tls-key /path/to/server.key</code></pre>
+          <p><strong>Tutorial:</strong> treat preflight failures as NO-GO for rollout.</p>
         </div>
+      </div>
+
+      <div class="info-box" style="margin-top: 28px;">
+        <p>
+          <strong>Detailed config docs moved:</strong> to keep this page focused on startup,
+          full per-node config documentation now lives in a dedicated route with
+          value-by-value explanations.
+        </p>
+        <p>
+          Open <a href="config-reference.html"><strong>Config Reference &rarr;</strong></a>
+          for registry, daemon, compute, vision, and MPC config fields.
+        </p>
+      </div>
+
+      <div class="info-box">
+        <p>
+          <strong>Staking note:</strong> if on-chain staking is enabled, each compute/vision/MPC
+          node must meet <code>min_stake</code> before registration is accepted.
+        </p>
       </div>
 
       <div class="info-box warning">
@@ -279,11 +339,11 @@ python -m network.mpc_shard0 \
     </div>
   </section>
 
-  <!-- Step 6: Dashboard -->
+  <!-- Step 5: Dashboard -->
   <section class="section">
     <div class="container">
       <div class="section-header">
-        <h2>Step 6: Open the <span class="accent">Dashboard</span></h2>
+        <h2>Step 5: Open the <span class="accent">Dashboard</span></h2>
         <p>The web UI for sending prompts and monitoring the network.</p>
       </div>
 
@@ -296,6 +356,95 @@ python -m network.mpc_shard0 \
         attach images (for multimodal models), and watch tokens stream in real-time.
         The dashboard shows per-request cost based on the cluster's token pricing.
       </p>
+      <div class="info-box">
+        <p>
+          <strong>Security defaults:</strong> the dashboard now binds to
+          <code>127.0.0.1</code> by default (not <code>0.0.0.0</code>), demo auth is
+          disabled by default, and wallet auth is expected for chat/faucet flows.
+        </p>
+      </div>
+      <div class="info-box warning">
+        <p>
+          <strong>Faucet default:</strong> faucet is disabled unless
+          <code>UNFED_FAUCET_ENABLED=1</code>. When enabled, it requires an authenticated
+          wallet session by default (<code>UNFED_FAUCET_REQUIRE_AUTH=1</code>).
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Step 6: Preflight -->
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Step 6: Run <span class="accent">Preflight</span></h2>
+        <p>Use Go/No-Go checks before exposing services.</p>
+      </div>
+      <pre><code># Web service checks
+python -m scripts.testnet_preflight web --host 127.0.0.1
+
+# Public node checks (TLS required for public advertise)
+python -m scripts.testnet_preflight node \
+  --advertise 203.0.113.42:50051 \
+  --tls-cert /path/to/server.crt \
+  --tls-key /path/to/server.key</code></pre>
+      <p>
+        If any check fails, treat the result as <strong>NO-GO</strong> and fix the
+        reported issue before rollout.
+      </p>
+    </div>
+  </section>
+
+  <!-- Trust + Penalty Model -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Cheating + <span class="accent">Staking</span> Model</h2>
+        <p>What happens when nodes cheat, and why staking is required for operators.</p>
+      </div>
+
+      <div class="card-grid">
+        <div class="card">
+          <h3>Common cheating cases</h3>
+          <ul>
+            <li>Skipping layers to save compute</li>
+            <li>Returning corrupted activations or biased logits</li>
+            <li>Sending invalid HE/MPC-bound artifacts</li>
+            <li>Trying to pass forged forward-attestation metadata</li>
+          </ul>
+          <p>
+            Detection and dispute intake are handled by registry-native adjudication
+            and evidence-bound report paths.
+          </p>
+          <a href="protocol.html#fraud-proofs" class="btn btn-secondary" style="margin-top: 12px;">Fraud Proof Details &rarr;</a>
+        </div>
+
+        <div class="card">
+          <h3>Economic consequence flow</h3>
+          <ul>
+            <li>Node stakes to become eligible</li>
+            <li>Suspicion report is submitted and validated</li>
+            <li>Registry applies slashing policy when confirmed</li>
+            <li>Node below <code>min_stake</code> is excluded until re-staked</li>
+          </ul>
+          <p>
+            This is the core incentive design: honest compute remains profitable,
+            cheating becomes expensive.
+          </p>
+          <a href="economics.html#staking" class="btn btn-secondary" style="margin-top: 12px;">Staking Model &rarr;</a>
+          <a href="economics.html#slashing" class="btn btn-secondary" style="margin-top: 12px;">Slashing Flow &rarr;</a>
+        </div>
+      </div>
+
+      <div class="info-box warning">
+        <p>
+          <strong>Operator checklist:</strong> before public rollout, confirm your
+          <code>cluster_config.json</code> sets sensible values for
+          <code>default_min_stake</code>, <code>default_slash_fraction</code>,
+          <code>challenge_window_seconds</code>, and
+          <code>he_dispute_rollout_stage</code>.
+        </p>
+      </div>
     </div>
   </section>
 
@@ -415,6 +564,9 @@ cast send $ESCROW_ADDRESS \
         <a href="economics.html">Economics</a>
         <a href="protocol.html">Protocol</a>
         <a href="getting-started.html">Get Started</a>
+        <a href="config-reference.html">Configs</a>
+        <a href="https://github.com/risha-max/UNFED-AI" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="https://discord.gg/7N73crmnbu" target="_blank" rel="noopener noreferrer">Discord</a>
       </div>
       <p>UNFED AI is open-source software. No single entity controls the network.</p>
     </div>

@@ -37,6 +37,16 @@ python -m client.client --prompt "Hello, world"
 python -m web.server --port 8080
 ```
 
+By default, the dashboard binds to `127.0.0.1`. Use `--host 0.0.0.0` only when you
+intend to expose it behind network controls.
+
+Run preflight before exposing services:
+
+```bash
+python -m scripts.testnet_preflight web --host 127.0.0.1
+python -m scripts.testnet_preflight node --advertise "203.0.113.42:50051" --tls-cert /path/to/server.crt --tls-key /path/to/server.key
+```
+
 ## Using GGUF / Ollama Models
 
 UNFED helper scripts now support GGUF inspection and conversion. This is useful
@@ -148,6 +158,9 @@ python -m node.server \
   --registry "registry.unfed.ai:50050"
 ```
 
+Publicly advertised compute nodes now require TLS by default. If a node advertises
+a non-local endpoint and no TLS cert/key is provided, startup fails closed.
+
 Clients connect with:
 ```bash
 python -m client.client --tls-ca /path/to/ca.crt
@@ -201,6 +214,9 @@ Create a `cluster_config.json`:
 }
 ```
 
+You do not need to provide a token name in config; the registry resolves token
+metadata from the ERC-20 contract at `staking_token_address`.
+
 Then start the registry:
 
 ```bash
@@ -208,6 +224,20 @@ python -m network.registry_server --port 50050 --cluster-config cluster_config.j
 ```
 
 The registry will verify node stake eligibility on-chain, post settlements, and handle slashing.
+
+## Docs Site
+
+The static docs are in `site/` and include:
+
+- Getting started: `site/getting-started.html`
+- Architecture and protocol flow: `site/architecture.html`, `site/protocol.html`
+- Economics and staking/slashing model: `site/economics.html`
+- Full config reference by node type: `site/config-reference.html`
+
+Community links:
+
+- GitHub: [https://github.com/risha-max/UNFED-AI](https://github.com/risha-max/UNFED-AI)
+- Discord: [https://discord.gg/7N73crmnbu](https://discord.gg/7N73crmnbu)
 
 ### Using your own ERC-20 token
 
@@ -222,7 +252,7 @@ The deploy script creates a test `UnfedToken`, but the escrow contract accepts a
 - Nodes call `stake()` on the escrow contract with the required minimum (default: 100 tokens)
 - The registry checks `isEligible()` on-chain before accepting a node
 - Clients deposit tokens into escrow; inference fees are deducted per-request
-- The operator posts settlement batches from the share-chain; after a challenge window, payouts are finalized
+- The operator posts settlement batches via `postSettlement()`; after the challenge window, `finalizeSettlement()` unlocks claimable payouts
 - Misbehaving nodes can be slashed (50% of stake, configurable)
 
 ### Test token faucet
@@ -240,7 +270,17 @@ Rate limit: one drip (100 tokens) per address per hour. The amount and cooldown
 are configurable via `OnChainEscrow.FAUCET_DRIP_AMOUNT` and
 `OnChainEscrow.FAUCET_COOLDOWN`.
 
-API: `POST /api/faucet` with body `{"address": "0x..."}`. Returns
+Faucet is disabled by default and must be explicitly enabled with:
+
+```bash
+export UNFED_FAUCET_ENABLED=1
+```
+
+By default, faucet requests also require a wallet-authenticated session
+(`UNFED_FAUCET_REQUIRE_AUTH=1`). For local test-only automation, you can disable
+that check with `UNFED_FAUCET_REQUIRE_AUTH=0`.
+
+API: `POST /api/faucet` with body `{"address": "0x...", "session_token": "<optional when auth disabled>"}`. Returns
 `{"success": true, "amount": 100, "tx_hash": "0x...", "balance": 200.0}` on
 success, or an error with the appropriate HTTP status.
 

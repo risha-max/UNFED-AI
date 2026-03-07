@@ -14,10 +14,12 @@ Usage:
 import asyncio
 import base64
 from functools import lru_cache
+import ipaddress
 import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import time
@@ -28,7 +30,7 @@ logger = logging.getLogger("unfed.web")
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Header
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -89,6 +91,68 @@ _ALLOWED_CLUSTER_ENDPOINTS = {
     for ep in os.environ.get("UNFED_ALLOWED_CLUSTER_ENDPOINTS", "").split(",")
     if ep.strip()
 }
+_FAUCET_ENABLED = (
+    os.environ.get("UNFED_FAUCET_ENABLED", "0").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+_FAUCET_REQUIRE_AUTH = (
+    os.environ.get("UNFED_FAUCET_REQUIRE_AUTH", "1").strip().lower()
+    not in ("0", "false", "no", "off")
+)
+_FAUCET_STATE_DB_PATH = os.path.expanduser(
+    os.environ.get("UNFED_FAUCET_STATE_DB", "~/.unfed/faucet_state.db")
+)
+
+
+def _is_loopback_host(value: str) -> bool:
+    raw = (value or "").strip().lower()
+    if raw in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(raw).is_loopback
+    except ValueError:
+        return False
+
+
+def _faucet_db_conn() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(_FAUCET_STATE_DB_PATH), exist_ok=True)
+    return sqlite3.connect(_FAUCET_STATE_DB_PATH)
+
+
+def _faucet_state_init() -> None:
+    with _faucet_db_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS faucet_drips (
+                address TEXT PRIMARY KEY,
+                last_drip_ts REAL NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+def _faucet_get_last_drip(address: str) -> float:
+    with _faucet_db_conn() as conn:
+        row = conn.execute(
+            "SELECT last_drip_ts FROM faucet_drips WHERE address = ?",
+            (address,),
+        ).fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def _faucet_set_last_drip(address: str, ts: float) -> None:
+    with _faucet_db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO faucet_drips(address, last_drip_ts)
+            VALUES(?, ?)
+            ON CONFLICT(address)
+            DO UPDATE SET last_drip_ts = excluded.last_drip_ts
+            """,
+            (address, float(ts)),
+        )
+        conn.commit()
 
 
 def get_discovery() -> RegistryPool:
@@ -762,6 +826,11 @@ async def get_client_balance(address: str = ""):
     """Get a client's escrow balance."""
     if not address:
         address = _wallet_auth.default_address
+    if not address:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "address is required when demo auth is disabled."},
+        )
     try:
         address = _normalize_eth_address(address)
     except ValueError as exc:
@@ -820,7 +889,7 @@ async def security_modes():
     return {
         "he_output_enabled": _HE_OUTPUT_ENABLED,
         "he_output_strict": _HE_OUTPUT_STRICT,
-        "he_compute_mode": config.HE_COMPUTE_MODE,
+        "he_compute_mode": app_config.HE_COMPUTE_MODE,
         "he_sidecar_configured": False,
         "registry_adjudication_enabled": True,
         "return_path_encryption_supported": True,
@@ -870,15 +939,18 @@ async def client_auth_verify(body: ClientAuthVerifyRequest):
 # ---------------------------------------------------------------------------
 # Faucet (testnet token distribution)
 # ---------------------------------------------------------------------------
-_faucet_last_drip: dict[str, float] = {}
-
-
 class FaucetRequest(BaseModel):
     address: str
+    session_token: str = ""
 
 @app.post("/api/faucet")
-async def faucet_drip(body: FaucetRequest):
+async def faucet_drip(body: FaucetRequest, authorization: str = Header(default="")):
     """Drip test tokens into a client's escrow balance."""
+    if not _FAUCET_ENABLED:
+        return JSONResponse(status_code=403, content={
+            "error": "Faucet is disabled. Set UNFED_FAUCET_ENABLED=1 to enable."
+        })
+
     escrow = _get_escrow()
     if escrow is None:
         return JSONResponse(status_code=503, content={
@@ -895,9 +967,31 @@ async def faucet_drip(body: FaucetRequest):
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
+    if _FAUCET_REQUIRE_AUTH:
+        bearer = ""
+        auth_header = (authorization or "").strip()
+        if auth_header.lower().startswith("bearer "):
+            bearer = auth_header[7:].strip()
+        session_token = (body.session_token or "").strip() or bearer
+        session_addr = _wallet_auth.get_session_address(session_token)
+        if not session_addr:
+            return JSONResponse(status_code=401, content={
+                "error": "Authenticated session required for faucet."
+            })
+        try:
+            session_addr = _normalize_eth_address(session_addr)
+        except ValueError:
+            return JSONResponse(status_code=401, content={
+                "error": "Invalid session identity."
+            })
+        if session_addr != address:
+            return JSONResponse(status_code=403, content={
+                "error": "Faucet requests must target the authenticated wallet."
+            })
+
     now = time.time()
     cooldown = escrow.FAUCET_COOLDOWN
-    last = _faucet_last_drip.get(address, 0)
+    last = _faucet_get_last_drip(address)
     remaining = cooldown - (now - last)
     if remaining > 0:
         return JSONResponse(status_code=429, content={
@@ -907,7 +1001,7 @@ async def faucet_drip(body: FaucetRequest):
 
     try:
         tx_hash = escrow.faucet_drip(address)
-        _faucet_last_drip[address] = time.time()
+        _faucet_set_last_drip(address, time.time())
         _, balance = _check_client_balance(address)
         return {
             "success": True,
@@ -973,6 +1067,17 @@ async def ws_chat(websocket: WebSocket):
     await websocket.accept()
 
     if _DEV_AUTH_BYPASS:
+        remote_host = (websocket.client.host if websocket.client else "") or ""
+        if not _is_loopback_host(remote_host):
+            await websocket.send_json({
+                "type": "error",
+                "message": (
+                    "Dev auth bypass is restricted to loopback clients. "
+                    "Disable UNFED_DEV_AUTH_BYPASS for public deployments."
+                ),
+            })
+            await websocket.close(code=1008)
+            return
         wallet_param = (websocket.query_params.get("wallet", "") or "").strip()
         if not wallet_param:
             await websocket.send_json({
@@ -1528,8 +1633,8 @@ def main():
     parser = argparse.ArgumentParser(description="UNFED AI Web Dashboard")
     parser.add_argument("--port", type=int, default=8080,
                         help="HTTP port (default: 8080)")
-    parser.add_argument("--host", type=str, default="0.0.0.0",
-                        help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--host", type=str, default="127.0.0.1",
+                        help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--registry", type=str,
                         default=app_config.REGISTRY_ADDRESS,
                         help="Registry address (default: localhost:50050)")
@@ -1537,6 +1642,13 @@ def main():
 
     global _registry_address
     _registry_address = args.registry
+
+    if _DEV_AUTH_BYPASS and not _is_loopback_host(args.host):
+        raise RuntimeError(
+            "Refusing startup: UNFED_DEV_AUTH_BYPASS=1 requires --host to be loopback "
+            "(127.0.0.1/localhost/::1)."
+        )
+    _faucet_state_init()
 
     print(f"UNFED AI Dashboard starting on http://{args.host}:{args.port}")
     print(f"Registry: {_registry_address}")

@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Config Reference — UNFED AI</title>
+  <meta name="description" content="Detailed configuration reference for UNFED AI registry, daemon, compute, vision, and MPC node types.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="img/logo.svg" type="image/svg+xml">
+</head>
+<body>
+  <nav class="nav">
+    <div class="container">
+      <a href="index.html" class="nav-logo">
+        <img src="img/logo.svg" alt="UNFED AI" width="28" height="28">
+        UNFED AI
+      </a>
+      <button class="nav-toggle" aria-label="Menu">&#9776;</button>
+      <ul class="nav-links">
+        <li><a href="about.html">About</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="nodes.html">Nodes</a></li>
+        <li><a href="economics.html">Economics</a></li>
+        <li><a href="protocol.html">Protocol</a></li>
+        <li><a href="getting-started.html">Get Started</a></li>
+        <li><a href="config-reference.html">Configs</a></li>
+        <li><a href="https://github.com/risha-max/UNFED-AI" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+        <li><a href="https://discord.gg/7N73crmnbu" target="_blank" rel="noopener noreferrer">Discord</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <section class="page-header">
+    <div class="container">
+      <h1>Config <span class="accent">Reference</span></h1>
+      <p>Detailed value-by-value docs for each node type: Registry, Daemon, Compute, Vision, and MPC.</p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="info-box">
+        <p><strong>How to use this page:</strong> Registry uses <code>cluster_config.json</code>. Daemon/Compute/MPC use <code>node.run --config</code> JSON files. Vision uses the compute schema with vision model settings.</p>
+      </div>
+      <pre><code># Registry
+python -m network.registry_server --port 50050 --cluster-config cluster_config.json
+
+# Node roles
+python -m node.run --config daemon_config.json
+python -m node.run --config compute_config.json
+python -m node.run --config mpc_config.json</code></pre>
+    </div>
+  </section>
+
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Registry (<span class="accent">cluster_config.json</span>)</h2>
+        <p>Loaded by <code>network.registry_server --cluster-config</code>.</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Field</th><th>Default</th><th>What it does</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>cluster_id</code></td><td><code>""</code> (auto)</td><td>Cluster UUID. Auto-generated if omitted.</td></tr>
+            <tr><td><code>name</code></td><td><code>""</code></td><td>Human-readable cluster name shown to clients/operators.</td></tr>
+            <tr><td><code>description</code></td><td><code>""</code></td><td>Optional operator description of cluster purpose/region.</td></tr>
+            <tr><td><code>operator</code></td><td><code>""</code></td><td>Operator contact/name metadata.</td></tr>
+            <tr><td><code>public_endpoint</code></td><td><code>""</code></td><td>Public registry endpoint advertised to peers.</td></tr>
+            <tr><td><code>default_min_stake</code></td><td><code>100.0</code></td><td>Default minimum stake for worker eligibility.</td></tr>
+            <tr><td><code>default_slash_fraction</code></td><td><code>0.5</code></td><td>Default penalty share applied when slashing.</td></tr>
+            <tr><td><code>default_reward_scheme</code></td><td><code>"proportional"</code></td><td>Default reward distribution model.</td></tr>
+            <tr><td><code>default_base_rate</code></td><td><code>0.001</code></td><td>Base reward rate fallback.</td></tr>
+            <tr><td><code>default_price_per_input_token</code></td><td><code>0.0001</code></td><td>Client price per input token.</td></tr>
+            <tr><td><code>default_price_per_output_token</code></td><td><code>0.001</code></td><td>Client price per output token.</td></tr>
+            <tr><td><code>default_pplns_window</code></td><td><code>1000</code></td><td>PPLNS accounting window size.</td></tr>
+            <tr><td><code>default_pps_rate</code></td><td><code>0.0</code></td><td>PPS mode payout rate (if used).</td></tr>
+            <tr><td><code>default_max_payout_multiplier</code></td><td><code>5.0</code></td><td>Upper bound safety for payouts.</td></tr>
+            <tr><td><code>default_fee_base</code></td><td><code>0.001</code></td><td>EIP-1559 base fee starting value.</td></tr>
+            <tr><td><code>default_fee_min</code></td><td><code>0.0001</code></td><td>Minimum base fee floor.</td></tr>
+            <tr><td><code>default_fee_max</code></td><td><code>0.1</code></td><td>Maximum base fee cap.</td></tr>
+            <tr><td><code>default_fee_adjustment_factor</code></td><td><code>0.125</code></td><td>How aggressively fee changes per window.</td></tr>
+            <tr><td><code>default_fee_target_utilization</code></td><td><code>0.7</code></td><td>Target utilization for fee control loop.</td></tr>
+            <tr><td><code>default_fee_window_blocks</code></td><td><code>10</code></td><td>Utilization averaging window length.</td></tr>
+            <tr><td><code>default_fee_target_capacity</code></td><td><code>40</code></td><td>Shares/block expected at 100% utilization.</td></tr>
+            <tr><td><code>chain_rpc_url</code></td><td><code>""</code></td><td>RPC endpoint for on-chain escrow and staking.</td></tr>
+            <tr><td><code>escrow_contract_address</code></td><td><code>""</code></td><td>UnfedEscrow contract address.</td></tr>
+            <tr><td><code>staking_token_address</code></td><td><code>""</code></td><td>ERC-20 staking token contract address.</td></tr>
+            <tr><td><code>operator_private_key</code></td><td><code>""</code></td><td>Operator signing key used for on-chain actions.</td></tr>
+            <tr><td><code>cooldown_seconds</code></td><td><code>3600</code></td><td>Unbonding/cooldown delay.</td></tr>
+            <tr><td><code>challenge_window_seconds</code></td><td><code>60</code></td><td>Settlement challenge window duration.</td></tr>
+            <tr><td><code>daemon_required_count</code></td><td><code>1</code></td><td>Minimum healthy daemons required to serve.</td></tr>
+            <tr><td><code>daemon_heartbeat_timeout_seconds</code></td><td><code>30</code></td><td>Daemon considered stale after this timeout.</td></tr>
+            <tr><td><code>daemon_fee_bps</code></td><td><code>200</code></td><td>Daemon infra allocation in basis points.</td></tr>
+            <tr><td><code>he_dispute_sampling_rate</code></td><td><code>0.05</code></td><td>Fraction of HE outputs sampled for dispute checks.</td></tr>
+            <tr><td><code>he_dispute_report_rate_limit_per_window</code></td><td><code>64</code></td><td>Max HE dispute reports per time window.</td></tr>
+            <tr><td><code>he_dispute_window_seconds</code></td><td><code>60</code></td><td>Window size for HE dispute rate-limits.</td></tr>
+            <tr><td><code>he_dispute_slash_fraction</code></td><td><code>0.5</code></td><td>Slash fraction for confirmed HE fraud.</td></tr>
+            <tr><td><code>he_dispute_rollout_stage</code></td><td><code>"shadow"</code></td><td>Enforcement stage: <code>shadow|soft|enforced</code>.</td></tr>
+            <tr><td><code>created_at</code>, <code>updated_at</code></td><td><code>0.0</code></td><td>Metadata timestamps (typically managed automatically).</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Shared Base Fields (<span class="accent">daemon/compute/mpc</span>)</h2>
+        <p>Defined by <code>BaseNodeConfig</code> and inherited by node roles.</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Field</th><th>Default</th><th>What it does</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>role</code></td><td><code>"compute"</code></td><td>Role selector: <code>compute</code>, <code>daemon</code>, or <code>mpc</code>.</td></tr>
+            <tr><td><code>port</code></td><td><code>0</code></td><td>Listen port. <code>0</code> means role default.</td></tr>
+            <tr><td><code>host</code></td><td><code>"[::]"</code></td><td>Bind host/interface.</td></tr>
+            <tr><td><code>advertise</code></td><td><code>null</code></td><td>Address advertised to registry (defaults to localhost:port).</td></tr>
+            <tr><td><code>registry</code></td><td><code>null</code></td><td>Registry endpoint used for registration/discovery.</td></tr>
+            <tr><td><code>grpc_max_workers</code></td><td><code>0</code></td><td>Worker pool size; <code>0</code> uses role defaults.</td></tr>
+            <tr><td><code>grpc_max_message_mb</code></td><td><code>256</code></td><td>Max gRPC message size in MB.</td></tr>
+            <tr><td><code>heartbeat_interval_seconds</code></td><td><code>10</code></td><td>Heartbeat interval to registry.</td></tr>
+            <tr><td><code>connect_timeout</code></td><td><code>10.0</code></td><td>Peer connect timeout.</td></tr>
+            <tr><td><code>forward_timeout</code></td><td><code>60.0</code></td><td>Forward RPC timeout.</td></tr>
+            <tr><td><code>max_retries</code></td><td><code>3</code></td><td>Retry count for resilient RPC calls.</td></tr>
+            <tr><td><code>retry_backoff_base</code></td><td><code>1.0</code></td><td>Base retry backoff (seconds).</td></tr>
+            <tr><td><code>retry_backoff_max</code></td><td><code>10.0</code></td><td>Max retry backoff (seconds).</td></tr>
+            <tr><td><code>keepalive_time_ms</code></td><td><code>30000</code></td><td>gRPC keepalive ping interval.</td></tr>
+            <tr><td><code>keepalive_timeout_ms</code></td><td><code>10000</code></td><td>Keepalive ping timeout.</td></tr>
+            <tr><td><code>tls_cert</code></td><td><code>""</code></td><td>TLS certificate file path (optional for local).</td></tr>
+            <tr><td><code>tls_key</code></td><td><code>""</code></td><td>TLS private key file path.</td></tr>
+            <tr><td><code>require_tls_for_public</code></td><td><code>true</code></td><td>Fail startup if public advertise lacks TLS.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Daemon Node (<span class="accent">role=daemon</span>)</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Field</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>db_path</code></td><td><code>"~/.unfed/chain.db"</code></td><td>SQLite path for sharechain persistence.</td></tr>
+            <tr><td><code>chain_prune_keep</code></td><td><code>10000</code></td><td>Keep last N blocks (0 disables pruning).</td></tr>
+            <tr><td><code>block_interval_seconds</code></td><td><code>10.0</code></td><td>Target block production interval.</td></tr>
+            <tr><td><code>settlement_blocks</code></td><td><code>6</code></td><td>Blocks per settlement window.</td></tr>
+            <tr><td><code>collection_window_seconds</code></td><td><code>4.0</code></td><td>Wait period before producing block.</td></tr>
+            <tr><td><code>peer_refresh_interval_seconds</code></td><td><code>30.0</code></td><td>How often daemon refreshes peer list.</td></tr>
+            <tr><td><code>gossip_timeout_seconds</code></td><td><code>5.0</code></td><td>Timeout for daemon gossip RPCs.</td></tr>
+            <tr><td><code>sync_timeout_seconds</code></td><td><code>30.0</code></td><td>Timeout for initial chain sync.</td></tr>
+            <tr><td><code>fee_enabled</code></td><td><code>true</code></td><td>Enable dynamic fee oracle.</td></tr>
+            <tr><td><code>fee_base</code></td><td><code>0.001</code></td><td>Initial base fee.</td></tr>
+            <tr><td><code>fee_min</code></td><td><code>0.0001</code></td><td>Base fee lower bound.</td></tr>
+            <tr><td><code>fee_max</code></td><td><code>0.1</code></td><td>Base fee upper bound.</td></tr>
+            <tr><td><code>fee_adjustment_factor</code></td><td><code>0.125</code></td><td>Per-window base fee adjustment magnitude.</td></tr>
+            <tr><td><code>fee_target_utilization</code></td><td><code>0.7</code></td><td>Target utilization for fee balancing.</td></tr>
+            <tr><td><code>fee_window_blocks</code></td><td><code>10</code></td><td>Rolling fee utilization window size.</td></tr>
+            <tr><td><code>fee_target_capacity</code></td><td><code>40</code></td><td>Expected shares per block at target utilization.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Compute Node (<span class="accent">role=compute</span>)</h2>
+        <p>Includes model/shard runtime, transfer policy, and HE/attestation controls.</p>
+      </div>
+
+      <h3>Model + Runtime</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Field</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>shard_index</code></td><td><code>null</code></td><td>Required shard index this node serves.</td></tr>
+            <tr><td><code>model_name</code></td><td><code>"Qwen/Qwen2.5-0.5B"</code></td><td>Model identifier metadata.</td></tr>
+            <tr><td><code>model_type</code></td><td><code>"qwen2"</code></td><td>Runtime type (<code>qwen2</code>, <code>qwen2_vl</code>, <code>smolvlm</code>).</td></tr>
+            <tr><td><code>shards_dir</code></td><td><code>"shards"</code></td><td>Directory containing split shard files.</td></tr>
+            <tr><td><code>manifest_path</code></td><td><code>"shards/manifest.json"</code></td><td>Manifest path used for layer metadata.</td></tr>
+            <tr><td><code>max_memory_gb</code></td><td><code>null</code></td><td>Optional memory budget hint.</td></tr>
+            <tr><td><code>session_timeout_seconds</code></td><td><code>300</code></td><td>KV session cleanup timeout.</td></tr>
+            <tr><td><code>eos_token_id</code></td><td><code>151643</code></td><td>EOS token override for model-specific termination.</td></tr>
+            <tr><td><code>device</code></td><td><code>"cpu"</code></td><td>Execution device (<code>cpu</code>, <code>cuda</code>, etc.).</td></tr>
+            <tr><td><code>verification_sampling_rate</code></td><td><code>0.05</code></td><td>Fraction of forwards sampled for verification logic.</td></tr>
+            <tr><td><code>ticket_submit_interval_seconds</code></td><td><code>10</code></td><td>Interval for verification ticket submission.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Transfer + Session Policy</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Field</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>shard_transfer_timeout</code></td><td><code>600.0</code></td><td>Timeout for shard transfer operations.</td></tr>
+            <tr><td><code>shard_chunk_size</code></td><td><code>1048576</code></td><td>Chunk size for shard streaming.</td></tr>
+            <tr><td><code>serve_shards_enabled</code></td><td><code>true</code></td><td>Whether this node serves shards to peers.</td></tr>
+            <tr><td><code>max_upload_rate_mbps</code></td><td><code>0.0</code></td><td>Upload throttle (0 = unlimited).</td></tr>
+            <tr><td><code>max_concurrent_transfers</code></td><td><code>0</code></td><td>Transfer concurrency cap (0 = unlimited).</td></tr>
+            <tr><td><code>inference_priority</code></td><td><code>true</code></td><td>Prioritize inference traffic over transfers.</td></tr>
+            <tr><td><code>require_daemon</code></td><td><code>true</code></td><td>Fail request if daemon is unavailable.</td></tr>
+            <tr><td><code>allowed_prev_node_types</code></td><td><code>[]</code></td><td>Optional upstream node type allowlist.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>KV / Wire / Compression</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Field</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>kv_quantize</code></td><td><code>"none"</code></td><td>KV quantization mode (<code>none</code> or <code>int8</code>).</td></tr>
+            <tr><td><code>kv_offload_enabled</code></td><td><code>false</code></td><td>Enable KV offload under pressure.</td></tr>
+            <tr><td><code>kv_offload_after_seconds</code></td><td><code>30.0</code></td><td>Idle age before offload.</td></tr>
+            <tr><td><code>max_kv_memory_gb</code></td><td><code>0.0</code></td><td>KV memory cap (0 = unlimited).</td></tr>
+            <tr><td><code>prefill_chunk_size</code></td><td><code>0</code></td><td>Prefill chunking size (0 disables).</td></tr>
+            <tr><td><code>wire_dtype</code></td><td><code>"float32"</code></td><td>Activation wire precision.</td></tr>
+            <tr><td><code>compress_activations</code></td><td><code>true</code></td><td>Enable activation compression for wire hops.</td></tr>
+            <tr><td><code>compress_threshold</code></td><td><code>16384</code></td><td>Min payload bytes before compression.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Forward Attestation + HE Policy</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Field</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>require_forward_attestation</code></td><td><code>true</code></td><td>Require signed attestation from previous hop.</td></tr>
+            <tr><td><code>require_forward_proof</code></td><td><code>false</code></td><td>Require non-empty proof artifact in attestation.</td></tr>
+            <tr><td><code>forward_proof_max_bytes</code></td><td><code>8192</code></td><td>Max accepted attestation proof size.</td></tr>
+            <tr><td><code>forward_proof_allowed_formats</code></td><td><code>["none"]</code></td><td>Allowed proof format names.</td></tr>
+            <tr><td><code>he_compute_mode</code></td><td><code>"off"</code></td><td>HE mode: off/decode_client_sample/server_sample.</td></tr>
+            <tr><td><code>he_compute_top_k</code></td><td><code>64</code></td><td>Top-k for HE sampling path.</td></tr>
+            <tr><td><code>he_compute_temperature</code></td><td><code>1.0</code></td><td>Sampling temperature for HE path.</td></tr>
+            <tr><td><code>he_compute_top_p</code></td><td><code>1.0</code></td><td>Top-p for HE sampling path.</td></tr>
+            <tr><td><code>he_full_vocab_sidecar_url</code></td><td><code>""</code></td><td>HE sidecar endpoint URL.</td></tr>
+            <tr><td><code>he_full_vocab_sidecar_timeout_ms</code></td><td><code>2000</code></td><td>HE sidecar timeout in milliseconds.</td></tr>
+            <tr><td><code>he_full_vocab_sidecar_required</code></td><td><code>false</code></td><td>Fail closed if sidecar unavailable.</td></tr>
+            <tr><td><code>he_sidecar_allowed_formats</code></td><td><code>["paillier_v1"]</code></td><td>Allowed HE sidecar payload formats.</td></tr>
+            <tr><td><code>he_sidecar_max_payload_bytes</code></td><td><code>2097152</code></td><td>Max sidecar payload size.</td></tr>
+            <tr><td><code>he_dispute_sampling_rate</code></td><td><code>0.05</code></td><td>HE dispute sampling fraction.</td></tr>
+            <tr><td><code>he_dispute_report_rate_limit_per_window</code></td><td><code>64</code></td><td>HE dispute report rate cap.</td></tr>
+            <tr><td><code>he_dispute_window_seconds</code></td><td><code>60</code></td><td>HE dispute rate-limit window.</td></tr>
+            <tr><td><code>he_dispute_rollout_stage</code></td><td><code>"shadow"</code></td><td>Rollout stage: <code>shadow|soft|enforced</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>Vision Node Profile</h2>
+      </div>
+      <div class="info-box">
+        <p>Vision nodes use <strong>the same compute schema</strong>. Main differences are operational values: set <code>model_type</code> to your vision pipeline, use the vision shard index/paths from your manifest, and run alongside text compute nodes.</p>
+      </div>
+      <pre><code>{
+  "role": "compute",
+  "shard_index": 0,
+  "model_type": "smolvlm_vision",
+  "shards_dir": "shards_smolvlm",
+  "manifest_path": "shards_smolvlm/manifest.json"
+}</code></pre>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>MPC Node (<span class="accent">role=mpc</span>)</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Field</th><th>Default</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>mpc_role</code></td><td><code>"A"</code></td><td>MPC role: entry node A or peer node B.</td></tr>
+            <tr><td><code>peer_address</code></td><td><code>""</code></td><td>Required address of the other MPC node.</td></tr>
+            <tr><td><code>shard_index</code></td><td><code>0</code></td><td>MPC always serves shard 0.</td></tr>
+            <tr><td><code>mpc_dnc_mode</code></td><td><code>"off"</code></td><td>DNC mode: off/manual/auto.</td></tr>
+            <tr><td><code>mpc_dnc_depth</code></td><td><code>0</code></td><td>Manual DNC recursion depth.</td></tr>
+            <tr><td><code>mpc_dnc_split_dim</code></td><td><code>-1</code></td><td>Manual split dimension for element-wise ops.</td></tr>
+            <tr><td><code>mpc_dnc_matmul_split_dim</code></td><td><code>-3</code></td><td>Manual split dimension for matmul paths.</td></tr>
+            <tr><td><code>mpc_dnc_parallel_workers</code></td><td><code>1</code></td><td>Worker count in manual DNC mode.</td></tr>
+            <tr><td><code>mpc_dnc_auto_min_elems</code></td><td><code>65536</code></td><td>Auto mode threshold for enabling DNC.</td></tr>
+            <tr><td><code>mpc_dnc_auto_chunk_min_elems</code></td><td><code>16384</code></td><td>Auto mode minimum chunk size.</td></tr>
+            <tr><td><code>mpc_dnc_auto_max_depth</code></td><td><code>3</code></td><td>Auto mode recursion cap.</td></tr>
+            <tr><td><code>mpc_dnc_auto_max_workers</code></td><td><code>4</code></td><td>Auto mode worker cap.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="info-box">
+        <p>MPC inherits all compute + base fields too (timeouts, attestation, HE policy, TLS/public rules).</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--alt">
+    <div class="container">
+      <div class="section-header">
+        <h2>CLI Override Map</h2>
+      </div>
+      <p>Common CLI flags that override JSON values in <code>node.run</code>:</p>
+      <pre><code>--config --role --port --host --advertise --registry
+--require-tls-for-public
+--shard-index --model-type --shards-dir
+--peer --db
+</code></pre>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="nodes.html">Nodes</a>
+        <a href="economics.html">Economics</a>
+        <a href="protocol.html">Protocol</a>
+        <a href="getting-started.html">Get Started</a>
+        <a href="config-reference.html">Configs</a>
+        <a href="https://github.com/risha-max/UNFED-AI" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="https://discord.gg/7N73crmnbu" target="_blank" rel="noopener noreferrer">Discord</a>
+      </div>
+      <p>UNFED AI is open-source software. No single entity controls the network.</p>
+    </div>
+  </footer>
+
+  <script src="js/nav.js"></script>
+</body>
+</html>

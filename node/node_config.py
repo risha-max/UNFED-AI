@@ -79,6 +79,7 @@ class BaseNodeConfig:
     # --- TLS ---
     tls_cert: str = ""
     tls_key: str = ""
+    require_tls_for_public: bool = True
 
     def resolve_defaults(self):
         """Fill in role-dependent defaults for fields left at sentinel values."""
@@ -347,6 +348,8 @@ def _validate(cfg: NodeConfig):
     if cfg.grpc_max_workers != 0 and cfg.grpc_max_workers < 1:
         raise ValueError(
             f"grpc_max_workers must be >= 1, got {cfg.grpc_max_workers}")
+    if not isinstance(cfg.require_tls_for_public, bool):
+        raise ValueError("require_tls_for_public must be true/false")
 
     if isinstance(cfg, MPCConfig):
         # MPC-specific validation (before ComputeConfig check since MPC is a subclass)
@@ -612,6 +615,7 @@ def print_config_summary(cfg: NodeConfig, config_path: Optional[str]):
           f"{cfg.retry_backoff_max}s max")
     print(f"  Keepalive:       {cfg.keepalive_time_ms}ms / "
           f"{cfg.keepalive_timeout_ms}ms")
+    print(f"  TLS public req:  {'yes' if cfg.require_tls_for_public else 'no'}")
     print(div)
     print(f"  Config file:     {src}")
     print(sep)

@@ -8,7 +8,34 @@
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="img/logo.svg" type="image/svg+xml">
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-  <script>mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { primaryColor: '#1c2128', primaryTextColor: '#e6edf3', lineColor: '#00d4aa', secondaryColor: '#161b22' } });</script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      flowchart: {
+        useMaxWidth: false,
+        nodeSpacing: 55,
+        rankSpacing: 65,
+      },
+      sequence: {
+        useMaxWidth: false,
+        actorFontSize: 18,
+        messageFontSize: 16,
+        noteFontSize: 15,
+      },
+      themeVariables: {
+        textColor: '#e6edf3',
+        primaryColor: '#1c2128',
+        primaryTextColor: '#e6edf3',
+        secondaryTextColor: '#e6edf3',
+        tertiaryTextColor: '#e6edf3',
+        lineColor: '#00d4aa',
+        secondaryColor: '#161b22',
+        edgeLabelBackground: '#0d1117',
+        fontSize: '17px',
+      }
+    });
+  </script>
 </head>
 <body>
 
@@ -27,6 +54,8 @@
         <li><a href="economics.html">Economics</a></li>
         <li><a href="protocol.html">Protocol</a></li>
         <li><a href="getting-started.html">Get Started</a></li>
+        <li><a href="https://github.com/risha-max/UNFED-AI" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+        <li><a href="https://discord.gg/7N73crmnbu" target="_blank" rel="noopener noreferrer">Discord</a></li>
       </ul>
     </div>
   </nav>
@@ -47,16 +76,26 @@
         <p>A text prompt flows through the network from client to response.</p>
       </div>
 
-      <div class="diagram-wrap">
-        <div class="mermaid">
-graph LR
-  Client["Client"] -->|"onion-encrypted"| MPC_A["MPC Node A"]
-  MPC_A <-->|"secret shares"| MPC_B["MPC Node B"]
-  MPC_A -->|"activations"| Shard1["Shard 1"]
-  Shard1 -->|"activations"| ShardN["Shard N"]
-  ShardN -->|"tokens"| Client
+      <div class="diagram-wrap diagram-wrap--wide">
+        <div class="mermaid mermaid-large">
+flowchart LR
+  C["Client"]
+  subgraph M["Shard 0 Privacy Layer (MPC Pair)"]
+    A["MPC Node A (entry)"]
+    B["MPC Node B (peer)"]
+    A <--> |"secret shares"| B
+  end
+  subgraph T["Text Compute Pipeline"]
+    S1["Compute Shard 1"]
+    S2["Compute Shard 2..N-1"]
+    SN["Compute Shard N (sampling)"]
+    S1 -->|"activations"| S2 -->|"activations"| SN
+  end
+  C -->|"onion-encrypted request"| A
+  A -->|"attested activations"| S1
+  SN -->|"response tokens"| C
         </div>
-        <p class="diagram-caption">Text inference: client request flows through MPC pair and compute shards.</p>
+        <p class="diagram-caption">Text inference path: client request enters the MPC pair (shard 0), traverses compute shards, then sampled tokens return to the client.</p>
       </div>
 
       <div class="info-box">
@@ -131,8 +170,8 @@ graph TB
         </div>
       </div>
 
-      <div class="diagram-wrap" style="margin-top:32px;">
-        <div class="mermaid">
+      <div class="diagram-wrap diagram-wrap--wide" style="margin-top:32px;">
+        <div class="mermaid mermaid-large">
 sequenceDiagram
   participant C as Client
   participant A as MPC_Node_A
@@ -272,6 +311,8 @@ graph LR
         <a href="economics.html">Economics</a>
         <a href="protocol.html">Protocol</a>
         <a href="getting-started.html">Get Started</a>
+        <a href="https://github.com/risha-max/UNFED-AI" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="https://discord.gg/7N73crmnbu" target="_blank" rel="noopener noreferrer">Discord</a>
       </div>
       <p>UNFED AI is open-source software. No single entity controls the network.</p>
     </div>

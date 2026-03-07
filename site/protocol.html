@@ -4,11 +4,38 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Protocol — UNFED AI</title>
-  <meta name="description" content="UNFED AI protocol: P2Pool share chain, verification tickets, fraud proofs, optimistic rollup settlements, and gossip discovery.">
+  <meta name="description" content="UNFED AI protocol: P2Pool share chain, verification tickets, fraud proofs, on-chain settlement finalization, and gossip discovery.">
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="img/logo.svg" type="image/svg+xml">
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-  <script>mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { primaryColor: '#1c2128', primaryTextColor: '#e6edf3', lineColor: '#00d4aa', secondaryColor: '#161b22' } });</script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      flowchart: {
+        useMaxWidth: false,
+        nodeSpacing: 55,
+        rankSpacing: 65,
+      },
+      sequence: {
+        useMaxWidth: false,
+        actorFontSize: 18,
+        messageFontSize: 16,
+        noteFontSize: 15,
+      },
+      themeVariables: {
+        textColor: '#e6edf3',
+        primaryColor: '#1c2128',
+        primaryTextColor: '#e6edf3',
+        secondaryTextColor: '#e6edf3',
+        tertiaryTextColor: '#e6edf3',
+        lineColor: '#00d4aa',
+        secondaryColor: '#161b22',
+        edgeLabelBackground: '#0d1117',
+        fontSize: '17px',
+      }
+    });
+  </script>
 </head>
 <body>
 
@@ -27,6 +54,8 @@
         <li><a href="economics.html">Economics</a></li>
         <li><a href="protocol.html">Protocol</a></li>
         <li><a href="getting-started.html">Get Started</a></li>
+        <li><a href="https://github.com/risha-max/UNFED-AI" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+        <li><a href="https://discord.gg/7N73crmnbu" target="_blank" rel="noopener noreferrer">Discord</a></li>
       </ul>
     </div>
   </nav>
@@ -79,15 +108,15 @@
         </div>
       </div>
 
-      <div class="diagram-wrap" style="margin-top: 32px;">
-        <div class="mermaid">
+      <div class="diagram-wrap diagram-wrap--wide" style="margin-top: 32px;">
+        <div class="mermaid mermaid-large">
 graph LR
-  B1["Block N-2"] --> B2["Block N-1"] --> B3["Block N"]
+  B1["Block N-2"] --> B2["Block N-1"] --> B3["Block N (tip)"]
   B3 --> B4["Block N+1 (pending)"]
   subgraph B3_detail ["Block N"]
-    S1["Share: Node A, shard 0, w=1.0"]
-    S2["Share: Node B, shard 1, w=1.0"]
-    S3["Share: Node C, shard 1, w=1.0"]
+    S1["Share: Node A | shard 0 | w=1.0"]
+    S2["Share: Node B | shard 1 | w=1.0"]
+    S3["Share: Node C | shard 1 | w=1.0"]
   end
         </div>
         <p class="diagram-caption">Share chain blocks contain compute shares from all active nodes.</p>
@@ -154,17 +183,17 @@ graph LR
   </section>
 
   <!-- Fraud Proofs -->
-  <section class="section">
+  <section class="section" id="fraud-proofs">
     <div class="container">
       <div class="section-header">
         <h2>Fraud <span class="accent">Proofs</span></h2>
         <p>How the verifier detects and reports cheating.</p>
       </div>
 
-      <div class="diagram-wrap">
-        <div class="mermaid">
+      <div class="diagram-wrap diagram-wrap--wide">
+        <div class="mermaid mermaid-large">
 sequenceDiagram
-  participant N as Compute Node
+  participant N as Compute_Node
   participant R as Registry
 
   N->>R: SubmitHESuspicionReport(report)
@@ -203,49 +232,51 @@ sequenceDiagram
   </section>
 
   <!-- Settlement -->
-  <section class="section section--alt">
+  <section class="section section--alt" id="optimistic-settlement">
     <div class="container">
       <div class="section-header">
-        <h2>Optimistic <span class="accent">Settlement</span></h2>
-        <p>An optimistic rollup approach: post first, challenge later.</p>
+        <h2>On-Chain <span class="accent">Settlement</span></h2>
+        <p>Share windows are posted, disputed if needed, then finalized with safety gates.</p>
       </div>
 
       <div class="flow">
         <div class="flow-item">
-          <h4>1. Post Settlement</h4>
+          <h4>1. Build a Settlement Window</h4>
           <p>
-            The daemon produces a <code>SettlementSummary</code> periodically, containing:
-            total weighted shares per node, total tokens processed, block range, and a
-            settlement hash. The payment contract posts this as a pending settlement.
+            The share-chain emits a <code>SettlementSummary</code> for each window
+            (weighted shares per node, token usage, block range, settlement hash).
+            The registry only accepts windows with validated shares and required
+            audits, then computes payout splits for that settlement.
           </p>
         </div>
 
         <div class="flow-item">
-          <h4>2. Challenge Window</h4>
+          <h4>2. Post On-Chain + Dispute Period</h4>
           <p>
-            A configurable window (default: 60 seconds) during which any participant
-            can challenge the settlement. If a fraud proof is submitted during this
-            window, the settlement can be invalidated and the cheating node slashed.
+            With escrow enabled (default path), the registry posts the payout map via
+            <code>postSettlement(hash, nodes, amounts)</code>. This opens the
+            configurable dispute window (<code>challenge_window_seconds</code>,
+            default: 60s). During this period, settlements can be challenged and
+            fraudulent nodes can be slashed.
           </p>
         </div>
 
         <div class="flow-item">
-          <h4>3. Finalize and Pay</h4>
+          <h4>3. Finalize When Safe</h4>
           <p>
-            After the challenge window closes with no disputes, the settlement is
-            finalized. Revenue is calculated from accumulated token usage, then
-            distributed proportionally to nodes based on their weighted shares.
-            On-chain <code>settleJob()</code> transfers tokens from escrow to nodes.
+            After the dispute window expires, the registry finalizes using
+            <code>finalizeSettlement(hash)</code> when verifier/daemon safety gates are
+            healthy. Rewards are allocated from measured token usage according to
+            weighted shares, and become claimable from escrow.
           </p>
         </div>
       </div>
 
       <div class="info-box">
         <p>
-          <strong>Why optimistic?</strong> Instead of verifying every computation
-          before payment (expensive), settlements are assumed correct and only
-          challenged if fraud is detected. This keeps throughput high while
-          maintaining security guarantees.
+          <strong>Why this flow?</strong> The registry avoids per-request on-chain
+          overhead by batching work into settlement windows, while still preserving
+          accountability through disputes, slashing, and delayed finalization.
         </p>
       </div>
     </div>
@@ -298,6 +329,8 @@ Registry B &lt;--gossip--&gt; Registry C
         <a href="economics.html">Economics</a>
         <a href="protocol.html">Protocol</a>
         <a href="getting-started.html">Get Started</a>
+        <a href="https://github.com/risha-max/UNFED-AI" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="https://discord.gg/7N73crmnbu" target="_blank" rel="noopener noreferrer">Discord</a>
       </div>
       <p>UNFED AI is open-source software. No single entity controls the network.</p>
     </div>

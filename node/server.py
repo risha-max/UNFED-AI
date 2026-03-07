@@ -19,6 +19,7 @@ Usage:
 import argparse
 import builtins
 import hashlib
+import ipaddress
 import io
 import json
 import os
@@ -91,6 +92,27 @@ _COLOR_ENABLED = (
     and "NO_COLOR" not in os.environ
     and sys.stdout.isatty()
 )
+
+
+def _is_local_advertise_address(address: str) -> bool:
+    """Best-effort check whether an advertised endpoint is loopback/local-only."""
+    raw = (address or "").strip()
+    if not raw:
+        return True
+    host = raw
+    if host.startswith("[") and "]" in host:
+        host = host[1:host.index("]")]
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    host_lower = host.strip().lower()
+    if host_lower in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "::"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host_lower)
+        return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
+    except ValueError:
+        # Hostnames are treated as non-local to avoid accidental insecure exposure.
+        return False
 
 
 def _colorize_tagged_line(line: str) -> str:
@@ -1731,6 +1753,27 @@ def serve(shard_index: int, port: int, host: str = "[::]",
                                      sampling_rate=sampling_rate)
     inference_pb2_grpc.add_InferenceNodeServicer_to_server(servicer, server)
     from network.tls import configure_server_port
+    allow_insecure_public = (
+        os.environ.get("UNFED_ALLOW_INSECURE_PUBLIC", "0").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+    require_tls_for_public = (
+        getattr(node_config, "require_tls_for_public", True)
+        if node_config is not None else True
+    )
+    is_public_advertise = not _is_local_advertise_address(public_address)
+    if (
+        is_public_advertise
+        and require_tls_for_public
+        and not allow_insecure_public
+        and not (tls_cert and tls_key)
+    ):
+        raise ValueError(
+            "Refusing insecure public node startup: advertise address is non-local "
+            f"({public_address}) but TLS cert/key are missing. "
+            "Provide --tls-cert/--tls-key, advertise a local address, or set "
+            "UNFED_ALLOW_INSECURE_PUBLIC=1 to override."
+        )
     bind_address = f"{host}:{port}"
     configure_server_port(server, host, port, tls_cert, tls_key)
     server.start()

@@ -59,10 +59,14 @@ class WalletAuth:
 
     def __init__(self, default_address: str = DEFAULT_CLIENT_ADDRESS):
         self._default_address = default_address
+        self._allow_demo_auth = (
+            os.environ.get("UNFED_ALLOW_DEMO_AUTH", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
         # API key -> client address mapping
-        self._api_keys: dict[str, str] = {
-            "demo": default_address,
-        }
+        self._api_keys: dict[str, str] = {}
+        if self._allow_demo_auth:
+            self._api_keys["demo"] = default_address
         # Active sessions (session_id -> AuthSession)
         self._sessions: dict[str, AuthSession] = {}
         # Single-use auth challenges (challenge -> expiry epoch seconds)
@@ -96,9 +100,8 @@ class WalletAuth:
         if api_key and api_key in self._api_keys:
             return self._api_keys[api_key]
 
-        # Default: return the demo address (allows unauthenticated access
-        # in demo mode, but escrow balance still checked)
-        return self._default_address
+        # In hardened mode we do not silently authenticate unauthenticated users.
+        return self._default_address if self._allow_demo_auth else ""
 
     def create_session(self, client_address: str,
                        api_key: str = "") -> str:
@@ -132,7 +135,7 @@ class WalletAuth:
 
     @property
     def default_address(self) -> str:
-        return self._default_address
+        return self._default_address if self._allow_demo_auth else ""
 
     def generate_challenge(self) -> str:
         """Generate and persist a single-use challenge string."""

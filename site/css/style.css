@@ -592,6 +592,56 @@ tr:hover td {
   display: inline-block;
 }
 
+/* Improve Mermaid readability on dark theme and prevent tiny renders */
+.diagram-wrap .mermaid svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: none;
+}
+
+/* Force readable Mermaid text on dark backgrounds */
+.diagram-wrap .mermaid svg text {
+  fill: var(--text-primary) !important;
+}
+
+.diagram-wrap .mermaid svg .nodeLabel,
+.diagram-wrap .mermaid svg .cluster-label text,
+.diagram-wrap .mermaid svg .edgeLabel text {
+  fill: var(--text-primary) !important;
+}
+
+.diagram-wrap .mermaid svg .actor text,
+.diagram-wrap .mermaid svg .actor-label,
+.diagram-wrap .mermaid svg .messageText,
+.diagram-wrap .mermaid svg .noteText,
+.diagram-wrap .mermaid svg .labelText {
+  fill: var(--text-primary) !important;
+  font-size: 15px !important;
+  font-weight: 500 !important;
+}
+
+.diagram-wrap .mermaid svg .edgeLabel,
+.diagram-wrap .mermaid svg .labelBkg {
+  background: rgba(13, 17, 23, 0.9) !important;
+}
+
+.diagram-wrap .mermaid .label,
+.diagram-wrap .mermaid .edgeLabel,
+.diagram-wrap .mermaid .edgeLabel p,
+.diagram-wrap .mermaid .edgeLabel span,
+.diagram-wrap .mermaid .cluster-label {
+  color: var(--text-primary) !important;
+}
+
+.diagram-wrap--wide {
+  overflow-x: auto;
+}
+
+.diagram-wrap--wide .mermaid-large {
+  min-width: 980px;
+}
+
 .diagram-caption {
   text-align: center;
   font-size: 0.85rem;
@@ -764,6 +814,10 @@ tr:hover td {
   .node-card .meta {
     flex-direction: column;
     gap: 8px;
+  }
+
+  .diagram-wrap--wide .mermaid-large {
+    min-width: 760px;
   }
 }
 
