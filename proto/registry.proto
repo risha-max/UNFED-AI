@@ -116,6 +116,9 @@ message RegisterRequest {
   bytes share_signing_pop = 12;         // Signature proving ownership of share_signing_public_key
   string capability_json = 13;          // Optional capabilities (e.g. HE sidecar schema/version)
   string stake_identity = 14;           // Optional stake identity (EVM addr) for slashing linkage
+  int64 stake_auth_timestamp_ms = 15;   // UTC ms timestamp used for anti-replay validation
+  string stake_auth_nonce = 16;         // Unique nonce used once per registration
+  bytes stake_auth_signature = 17;      // EVM signature over canonical registration payload
 }
 
 message RegisterResponse {
@@ -127,6 +130,9 @@ message RegisterResponse {
 
 message HeartbeatRequest {
   string node_id = 1;
+  int64 auth_timestamp_ms = 2;
+  string auth_nonce = 3;
+  bytes auth_signature = 4;
 }
 
 message HeartbeatResponse {
@@ -137,6 +143,9 @@ message HeartbeatResponse {
 
 message UnregisterRequest {
   string node_id = 1;
+  int64 auth_timestamp_ms = 2;
+  string auth_nonce = 3;
+  bytes auth_signature = 4;
 }
 
 message UnregisterResponse {

@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import grpc
 import registry_pb2
 import registry_pb2_grpc
+from network.share_auth import generate_signing_keypair, registration_pop_payload, sign_bytes
 import config
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -110,9 +111,11 @@ def register_fake_node(registry_port, node_id, model_id, shard_index,
     """Register a fake node with a registry (no real node needed)."""
     ch = grpc.insecure_channel(f"localhost:{registry_port}")
     stub = registry_pb2_grpc.RegistryStub(ch)
+    priv, pub = generate_signing_keypair()
+    address = f"localhost:{50100 + shard_index}"
     resp = stub.Register(registry_pb2.RegisterRequest(
         node_id=node_id,
-        address=f"localhost:{50100 + shard_index}",
+        address=address,
         model_id=model_id,
         shard_index=shard_index,
         layer_start=layer_start,
@@ -121,6 +124,17 @@ def register_fake_node(registry_port, node_id, model_id, shard_index,
         has_lm_head=(shard_index == total_shards - 1),
         public_key=b"\x00" * 32,
         node_type="compute",
+        share_signing_public_key=pub,
+        share_signing_pop=sign_bytes(
+            priv,
+            registration_pop_payload(
+                node_id=node_id,
+                address=address,
+                model_id=model_id,
+                shard_index=shard_index,
+                node_type="compute",
+            ),
+        ),
     ))
     ch.close()
     return resp.success

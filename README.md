@@ -5,7 +5,7 @@ How to run, join, and operate on the UNFED AI test network.
 ## Prerequisites
 
 - Python 3.12+
-- ~2 GB RAM per shard (Qwen2.5-0.5B, 4 shards)
+- `tmux` (recommended for multi-process startup on VPS)
 - Model weights: run `python -m tools.cli split Qwen/Qwen2.5-0.5B -o shards --text-shards 4` or download pre-split shards
 
 Install dependencies:
@@ -16,29 +16,161 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## System Requirements by Node Type
+
+Suggested minimums for public testnet reliability:
+
+| Node Type | CPU | RAM | GPU | Storage | Notes |
+|----------|-----|-----|-----|---------|-------|
+| Registry | 1 vCPU | 1 GB | No | 10 GB SSD | Budget profile; for higher node counts use 2 vCPU / 2-4 GB |
+| Daemon | 2 vCPU | 4 GB | No | 20 GB SSD | SQLite share-chain + telemetry; use persistent disk |
+| MPC Node A | 4 vCPU | 8-16 GB | Recommended | 30 GB SSD | Entry MPC node; should be the stronger of the pair |
+| MPC Node B | 4 vCPU | 8-16 GB | Recommended | 30 GB SSD | MPC peer; keep network latency low to Node A |
+| Compute (text shard) | 4+ vCPU | 8-16 GB | Recommended | 40+ GB SSD | One process per shard index |
+| Vision shard | 4+ vCPU | 12-24 GB | Yes (preferred) | 40+ GB SSD | Needed for multimodal image paths |
+| Web UI | 1 vCPU | 1 GB | No | 10 GB SSD | Usually co-located with registry; bind to 127.0.0.1 |
+
 ## Quick Start (Local)
 
-Start a full local stack:
+Start a full local stack with on-chain admission + MPC-required policy:
 
 ```bash
-# Terminal 1: Registry
-python -m network.registry_server --port 50050
+# 0) Prepare local chain + contracts (writes deployed.env)
+export OPERATOR_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+export OPERATOR_ADDRESS=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+./scripts/start_local_chain.sh
+source deployed.env
 
-# Terminals 2-5: Compute nodes (one per shard)
-python -m node.server --shard-index 0 --port 50051 --shards-dir shards
-python -m node.server --shard-index 1 --port 50052 --shards-dir shards
-python -m node.server --shard-index 2 --port 50053 --shards-dir shards
-python -m node.server --shard-index 3 --port 50054 --shards-dir shards
+# 1) Create cluster config from deployed addresses
+cat > cluster_config.json <<EOF
+{
+  "name": "Local UNFED Pool",
+  "chain_rpc_url": "${CHAIN_RPC_URL}",
+  "escrow_contract_address": "${ESCROW_ADDRESS}",
+  "staking_token_address": "${TOKEN_ADDRESS}",
+  "operator_private_key": "${OPERATOR_PRIVATE_KEY}",
+  "daemon_required_count": 1
+}
+EOF
 
-# Terminal 6: Client
-python -m client.client --prompt "Hello, world"
+# 2) Fund + stake daemon/MPC/compute identities (required in on-chain mode)
+FUND_WEI=200000000000000000000
+STAKE_WEI=100000000000000000000
+for A in \
+  0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc \
+  0x976EA74026E726554dB657fA54763abd0C3a0aa9 \
+  0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65 \
+  0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 \
+  0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+  0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
+  0x90F79bf6EB2c4f870365E785982E1f101E93b906; do
+  cast send "$TOKEN_ADDRESS" "transfer(address,uint256)" "$A" "$FUND_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key "$OPERATOR_PRIVATE_KEY"
+done
 
-# Terminal 7 (optional): Web dashboard
-python -m web.server --port 8080
+# approve + stake (daemon, MPC-B, MPC-A, shard0-3)
+cast send "$TOKEN_ADDRESS" "approve(address,uint256)" "$ESCROW_ADDRESS" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba && cast send "$ESCROW_ADDRESS" "stake(uint256)" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba
+cast send "$TOKEN_ADDRESS" "approve(address,uint256)" "$ESCROW_ADDRESS" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e && cast send "$ESCROW_ADDRESS" "stake(uint256)" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e
+cast send "$TOKEN_ADDRESS" "approve(address,uint256)" "$ESCROW_ADDRESS" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a && cast send "$ESCROW_ADDRESS" "stake(uint256)" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a
+cast send "$TOKEN_ADDRESS" "approve(address,uint256)" "$ESCROW_ADDRESS" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 && cast send "$ESCROW_ADDRESS" "stake(uint256)" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+cast send "$TOKEN_ADDRESS" "approve(address,uint256)" "$ESCROW_ADDRESS" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d && cast send "$ESCROW_ADDRESS" "stake(uint256)" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+cast send "$TOKEN_ADDRESS" "approve(address,uint256)" "$ESCROW_ADDRESS" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a && cast send "$ESCROW_ADDRESS" "stake(uint256)" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+cast send "$TOKEN_ADDRESS" "approve(address,uint256)" "$ESCROW_ADDRESS" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6 && cast send "$ESCROW_ADDRESS" "stake(uint256)" "$STAKE_WEI" --rpc-url "$CHAIN_RPC_URL" --private-key 0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6
+
+# 3) Start services in strict order (one shell each, or use tmux)
+# 3a Registry
+python -m network.registry_server --port 50050 --cluster-config cluster_config.json
+
+# 3b Daemon (staked identity)
+export UNFED_STAKE_EVM_PRIVATE_KEY=0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba
+python -m network.daemon_node --port 50070 --registry localhost:50050 --eth-address 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc
+
+# 3c MPC B first, then MPC A
+export UNFED_STAKE_EVM_PRIVATE_KEY=0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e
+python -m network.mpc_shard0 --role B --port 50063 --peer localhost:50061 --registry localhost:50050 --eth-address 0x976EA74026E726554dB657fA54763abd0C3a0aa9 --shards-dir shards
+
+export UNFED_STAKE_EVM_PRIVATE_KEY=0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a
+python -m network.mpc_shard0 --role A --port 50061 --peer localhost:50063 --registry localhost:50050 --eth-address 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65 --shards-dir shards
+
+# 3d Compute shards
+export UNFED_STAKE_EVM_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+python -m node.server --shard-index 0 --port 50051 --shards-dir shards --registry localhost:50050 --eth-address 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+
+export UNFED_STAKE_EVM_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+python -m node.server --shard-index 1 --port 50052 --shards-dir shards --registry localhost:50050 --eth-address 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+
+export UNFED_STAKE_EVM_PRIVATE_KEY=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+python -m node.server --shard-index 2 --port 50053 --shards-dir shards --registry localhost:50050 --eth-address 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+
+export UNFED_STAKE_EVM_PRIVATE_KEY=0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6
+python -m node.server --shard-index 3 --port 50054 --shards-dir shards --registry localhost:50050 --eth-address 0x90F79bf6EB2c4f870365E785982E1f101E93b906
+
+# 4) Verify model readiness
+python -m client.client --list-models --registry localhost:50050
+
+# 5) Run client query
+python -m client.client --registry localhost:50050 --prompt "Hello, world"
+
+# 6) Optional web dashboard
+python -m web.server --host 127.0.0.1 --port 8080 --registry localhost:50050
 ```
 
 By default, the dashboard binds to `127.0.0.1`. Use `--host 0.0.0.0` only when you
 intend to expose it behind network controls.
+
+### One-shot tmux launcher (same startup order)
+
+If you prefer a single copy/paste launch path, run this after chain deploy + staking:
+
+```bash
+# from repo root
+source .venv/bin/activate
+
+# clean old sessions (safe if missing)
+tmux kill-session -t registry 2>/dev/null || true
+tmux kill-session -t daemon 2>/dev/null || true
+tmux kill-session -t mpcb 2>/dev/null || true
+tmux kill-session -t mpca 2>/dev/null || true
+tmux kill-session -t node0 2>/dev/null || true
+tmux kill-session -t node1 2>/dev/null || true
+tmux kill-session -t node2 2>/dev/null || true
+tmux kill-session -t node3 2>/dev/null || true
+tmux kill-session -t web 2>/dev/null || true
+
+# 1) registry
+tmux new -s registry -d 'cd '"$PWD"' && source .venv/bin/activate && python -m network.registry_server --port 50050 --cluster-config cluster_config.json'
+
+# 2) daemon
+tmux new -s daemon -d 'cd '"$PWD"' && source .venv/bin/activate && UNFED_STAKE_EVM_PRIVATE_KEY=0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba python -m network.daemon_node --port 50070 --registry localhost:50050 --eth-address 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc'
+
+# 3) MPC B then MPC A
+tmux new -s mpcb -d 'cd '"$PWD"' && source .venv/bin/activate && UNFED_STAKE_EVM_PRIVATE_KEY=0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e python -m network.mpc_shard0 --role B --port 50063 --peer localhost:50061 --registry localhost:50050 --eth-address 0x976EA74026E726554dB657fA54763abd0C3a0aa9 --shards-dir shards'
+tmux new -s mpca -d 'cd '"$PWD"' && source .venv/bin/activate && UNFED_STAKE_EVM_PRIVATE_KEY=0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a python -m network.mpc_shard0 --role A --port 50061 --peer localhost:50063 --registry localhost:50050 --eth-address 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65 --shards-dir shards'
+
+# 4) compute shards
+tmux new -s node0 -d 'cd '"$PWD"' && source .venv/bin/activate && UNFED_STAKE_EVM_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 python -m node.server --shard-index 0 --port 50051 --shards-dir shards --registry localhost:50050 --eth-address 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+tmux new -s node1 -d 'cd '"$PWD"' && source .venv/bin/activate && UNFED_STAKE_EVM_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d python -m node.server --shard-index 1 --port 50052 --shards-dir shards --registry localhost:50050 --eth-address 0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
+tmux new -s node2 -d 'cd '"$PWD"' && source .venv/bin/activate && UNFED_STAKE_EVM_PRIVATE_KEY=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a python -m node.server --shard-index 2 --port 50053 --shards-dir shards --registry localhost:50050 --eth-address 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
+tmux new -s node3 -d 'cd '"$PWD"' && source .venv/bin/activate && UNFED_STAKE_EVM_PRIVATE_KEY=0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6 python -m node.server --shard-index 3 --port 50054 --shards-dir shards --registry localhost:50050 --eth-address 0x90F79bf6EB2c4f870365E785982E1f101E93b906'
+
+# optional web
+tmux new -s web -d 'cd '"$PWD"' && source .venv/bin/activate && python -m web.server --host 127.0.0.1 --port 8080 --registry localhost:50050'
+
+# check sessions
+tmux ls
+```
+
+Useful follow-ups:
+
+```bash
+# verify readiness
+python -m client.client --list-models --registry localhost:50050
+
+# tail one service
+tmux attach -t mpca
+
+# stop all local sessions
+tmux kill-session -t registry; tmux kill-session -t daemon; tmux kill-session -t mpcb; tmux kill-session -t mpca; tmux kill-session -t node0; tmux kill-session -t node1; tmux kill-session -t node2; tmux kill-session -t node3; tmux kill-session -t web
+```
 
 Run preflight before exposing services:
 
@@ -103,7 +235,7 @@ Each service needs its port accessible from the internet:
 | Registry | 50050       | TCP/gRPC |
 | Node     | 50051+      | TCP/gRPC |
 | Web UI   | 8080        | TCP/HTTP |
-| Daemon   | 50080       | TCP/gRPC |
+| Daemon   | 50070       | TCP/gRPC |
 
 Example (ufw):
 ```bash
@@ -342,12 +474,26 @@ Strict mode behavior:
 | `UNFED_COMPRESS_THRESHOLD` | Compression threshold (bytes) | `16384` |
 | `UNFED_PREFILL_MIN` | Min tokens for pipelined prefill | `64` |
 | `UNFED_REQUIRE_MPC` | Require MPC shard-0 for admission | `1` |
+| `UNFED_STAKE_EVM_PRIVATE_KEY` | Staked node wallet key (direct env) | — |
+| `UNFED_STAKE_EVM_PRIVATE_KEY_FILE` | File path containing staked node wallet key | — |
+| `UNFED_AUTH_MAX_SKEW_MS` | Max timestamp skew for signed control/auth payloads | `300000` |
+| `UNFED_AUTH_NONCE_MAX_ENTRIES` | Max nonce cache entries before LRU-style eviction | `200000` |
+| `UNFED_AUTH_RATE_LIMIT_PER_MINUTE` | Per-node/per-peer auth RPC rate cap | `120` |
+| `UNFED_STAKE_REVALIDATE_TTL_SECONDS` | Eligibility cache TTL before on-chain recheck | `30` |
 | `CHAIN_RPC_URL` | Ethereum RPC endpoint | — |
 | `OPERATOR_PRIVATE_KEY` | Operator wallet key (deploy/settlement) | — |
 | `OPERATOR_ADDRESS` | Operator wallet address | — |
 
 `UNFED_REQUIRE_MPC=1` is the default fail-closed policy across web, client,
 and pipeline entrypoints. Set `UNFED_REQUIRE_MPC=0` only for local debugging.
+
+For OPSEC, prefer file-based secret loading for staked node keys:
+
+```bash
+umask 077
+printf '%s' "0xYOUR_STAKED_NODE_PRIVATE_KEY" > ~/.unfed/node_stake.key
+export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/node_stake.key
+```
 
 ## Manual MPC Local Setup Script
 
@@ -395,7 +541,7 @@ share-chain — no separate client install needed.
 The registry operator starts the dashboard with:
 
 ```bash
-python -m web.server --host 0.0.0.0 --port 8080 --registry "localhost:50050"
+python -m web.server --host 127.0.0.1 --port 8080 --registry "localhost:50050"
 ```
 
 Open `http://<registry-ip>:8080` — tabs for Chat, Network topology, and Chain
@@ -428,7 +574,7 @@ Troubleshooting:
 
 ## Known Limitations
 
-- **Partial persistent identity**: compute nodes use their Ethereum address as ID (`--eth-address`, required when escrow is active), but daemon nodes still generate a random ID per session
+- **Persistent identity required in on-chain mode**: compute/vision/MPC/daemon should use a staked EVM identity (`--eth-address`) and authenticated registration/control-plane signatures
 - **Testnet economics**: on-chain escrow works but uses test tokens — no real value at stake
 - **Single model**: the testnet runs one model (Qwen2.5-0.5B); multi-model pools are implemented but untested at scale
 - **No NAT traversal**: nodes behind NAT must configure port forwarding manually

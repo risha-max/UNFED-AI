@@ -91,6 +91,16 @@ p {
   margin-bottom: 1rem;
 }
 
+ul,
+ol {
+  margin: 0 0 1rem 1.25rem;
+  color: var(--text-secondary);
+}
+
+li {
+  margin: 0.35rem 0;
+}
+
 a {
   color: var(--accent);
   text-decoration: none;
@@ -703,6 +713,15 @@ tr:hover td {
 .info-box p {
   margin-bottom: 0;
   font-size: 0.95rem;
+}
+
+.info-box p + p {
+  margin-top: 10px;
+}
+
+.info-box pre {
+  margin-top: 12px;
+  margin-bottom: 0;
 }
 
 .info-box.warning {

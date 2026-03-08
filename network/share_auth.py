@@ -59,6 +59,32 @@ def registration_pop_payload(
     ).encode("utf-8")
 
 
+def registration_stake_auth_payload(
+    *,
+    node_id: str,
+    address: str,
+    model_id: str,
+    shard_index: int,
+    node_type: str,
+    share_signing_public_key: bytes,
+    timestamp_ms: int,
+    nonce: str,
+) -> str:
+    pub_hex = bytes(share_signing_public_key or b"").hex()
+    return (
+        f"unfed-stake-auth|{node_id}|{address}|{model_id}|{shard_index}|"
+        f"{node_type or 'compute'}|{pub_hex}|{int(timestamp_ms)}|{nonce}"
+    )
+
+
+def heartbeat_auth_payload(*, node_id: str, timestamp_ms: int, nonce: str) -> bytes:
+    return f"unfed-heartbeat|{node_id}|{int(timestamp_ms)}|{nonce}".encode("utf-8")
+
+
+def unregister_auth_payload(*, node_id: str, timestamp_ms: int, nonce: str) -> bytes:
+    return f"unfed-unregister|{node_id}|{int(timestamp_ms)}|{nonce}".encode("utf-8")
+
+
 def generate_signing_keypair() -> tuple[bytes, bytes]:
     private_key = Ed25519PrivateKey.generate()
     private_bytes = private_key.private_bytes(

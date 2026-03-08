@@ -84,14 +84,23 @@
         <div class="meta">
           <div class="meta-item"><strong>GPU:</strong> Not required</div>
           <div class="meta-item"><strong>Weights:</strong> Not required</div>
-          <div class="meta-item"><strong>Stake:</strong> Not required</div>
-          <div class="meta-item"><strong>Earns:</strong> Nothing (infrastructure)</div>
+          <div class="meta-item"><strong>Stake:</strong> min_stake (on-chain mode)</div>
+          <div class="meta-item"><strong>Earns:</strong> Infra allocation (daemon fee share)</div>
         </div>
         <span class="code-label">Start command</span>
-        <pre><code>python -m network.daemon_node \
+        <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/daemon_stake.key
+python -m network.daemon_node \
   --port 50070 \
   --registry localhost:50050 \
+  --eth-address 0xYourDaemonAddress \
   --db ~/.unfed/chain.db</code></pre>
+        <div class="info-box">
+          <p>
+            <strong>New auth requirement:</strong> daemon registration now uses the same signed
+            admission and signed lifecycle control-plane flow as other staked roles
+            (share-key proof + EVM stake signature + signed heartbeat/unregister with nonce/timestamp).
+          </p>
+        </div>
       </div>
 
       <!-- Compute Node -->
@@ -113,7 +122,8 @@
           <div class="meta-item"><strong>Earns:</strong> 1.0 share weight per forward pass</div>
         </div>
         <span class="code-label">Start command</span>
-        <pre><code>python -m node.server \
+        <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/node_stake.key
+python -m node.server \
   --shard-index 1 \
   --port 50052 \
   --model-type smolvlm \
@@ -157,7 +167,8 @@
           <div class="meta-item"><strong>Earns:</strong> Compute shares per image processed</div>
         </div>
         <span class="code-label">Start command</span>
-        <pre><code>python -m node.server \
+        <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/vision_stake.key
+python -m node.server \
   --shard-index 0 \
   --port 50060 \
   --model-type smolvlm_vision \
@@ -186,13 +197,16 @@
           <div class="meta-item"><strong>Earns:</strong> 1.0 share weight (split between A and B)</div>
         </div>
         <span class="code-label">Start Node B (peer) first</span>
-        <pre><code>python -m network.mpc_shard0 \
+        <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/mpcb_stake.key
+python -m network.mpc_shard0 \
   --role B \
   --port 50063 \
   --peer localhost:50061 \
-  --shards-dir shards_smolvlm</code></pre>
+  --shards-dir shards_smolvlm \
+  --eth-address 0xYourPeerAddress</code></pre>
         <span class="code-label">Then start Node A (entry, registers)</span>
-        <pre><code>python -m network.mpc_shard0 \
+        <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/mpca_stake.key
+python -m network.mpc_shard0 \
   --role A \
   --port 50061 \
   --peer localhost:50063 \
@@ -234,7 +248,7 @@
               <td><strong>Daemon</strong></td>
               <td>No</td>
               <td>No</td>
-              <td>No</td>
+              <td>Required (on-chain mode)</td>
               <td><code>network.daemon_node</code></td>
             </tr>
             <tr>
@@ -260,6 +274,39 @@
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <h2>Suggested <span class="accent">System Requirements</span></h2>
+        <p>Planning guidance for stable operation per node type.</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Node Type</th>
+              <th>CPU</th>
+              <th>RAM</th>
+              <th>GPU</th>
+              <th>Storage</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Registry</strong></td><td>1 vCPU</td><td>1-2 GB</td><td>No</td><td>10 GB SSD</td></tr>
+            <tr><td><strong>Daemon</strong></td><td>2 vCPU</td><td>4 GB</td><td>No</td><td>20 GB SSD</td></tr>
+            <tr><td><strong>Compute (text)</strong></td><td>4+ vCPU</td><td>8-16 GB</td><td>Recommended</td><td>40+ GB SSD</td></tr>
+            <tr><td><strong>Vision</strong></td><td>4+ vCPU</td><td>12-24 GB</td><td>Preferred</td><td>40+ GB SSD</td></tr>
+            <tr><td><strong>MPC Node A</strong></td><td>4 vCPU</td><td>8-16 GB</td><td>Recommended</td><td>30 GB SSD</td></tr>
+            <tr><td><strong>MPC Node B</strong></td><td>4 vCPU</td><td>8-16 GB</td><td>Recommended</td><td>30 GB SSD</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="info-box">
+        <p><strong>Budget note:</strong> registry-only hosting can run on 1 vCPU / 1 GB, but compute/vision/MPC nodes should run on separate higher-resource hosts.</p>
       </div>
     </div>
   </section>

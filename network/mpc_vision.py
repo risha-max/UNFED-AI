@@ -54,8 +54,6 @@ import inference_pb2_grpc
 
 from network.mpc_shard0 import (
     create_additive_shares,
-    reconstruct_from_shares,
-    MPCProtocol,
     _tensor_to_bytes,
 )
 from network.resilience import create_resilient_channel

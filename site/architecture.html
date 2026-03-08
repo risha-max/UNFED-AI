@@ -104,6 +104,11 @@ flowchart LR
           the original prompt <em>and</em> the final output. The MPC pair protects
           the embedding; subsequent shards only see intermediate hidden states.
         </p>
+        <p>
+          <strong>Admission boundary:</strong> registry discovery feeds this pipeline only
+          after identity + stake checks pass (including signed registration and ongoing
+          eligibility revalidation in on-chain mode).
+        </p>
       </div>
     </div>
   </section>
@@ -246,7 +251,7 @@ graph LR
   MPC -->|"merged activations"| S1["Text Shard 1"]
   S1 -->|"tokens"| Client["Client"]
         </div>
-        <p class="diagram-caption">Multimodal pipeline: vision embeddings are merged with text at shard 0.</p>
+        <p class="diagram-caption">Multimodal pipeline: vision embeddings are merged with text at shard 0, then token generation follows the same output-privacy modes (<code>off</code>, <code>decode_client_sample</code>, <code>mpc_nminus1_n</code>).</p>
       </div>
 
       <p style="max-width:800px; margin:0 auto;">
@@ -255,6 +260,13 @@ graph LR
         are injected at shard 0 alongside the text tokens. From there, the pipeline is identical
         to text-only inference.
       </p>
+      <div class="info-box" style="margin-top: 20px;">
+        <p>
+          <strong>Privacy scope note:</strong> output-token privacy protections apply to both
+          text-only and multimodal generation once the request reaches the final text shard.
+          Vision-side MPC coverage continues to evolve in parallel.
+        </p>
+      </div>
     </div>
   </section>
 

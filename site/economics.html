@@ -162,7 +162,7 @@ graph LR
           <div class="card-icon">&#128176;</div>
           <h3>Stake Requirement</h3>
           <p>
-            Every compute, vision, and MPC node must stake at least <code>min_stake</code>
+            Every compute, vision, MPC, and daemon node must stake at least <code>min_stake</code>
             (default: 100 UNFED) in the <code>UnfedEscrow.sol</code> contract before
             the registry will accept their registration.
           </p>
@@ -173,7 +173,7 @@ graph LR
           <h3>UnfedEscrow.sol</h3>
           <p>
             A Solidity smart contract that manages staking, escrow, and slashing.
-            Functions: <code>stakeNode()</code>, <code>depositClient()</code>,
+            Functions: <code>stake()</code>, <code>depositClient()</code>,
             <code>postSettlement()</code>, <code>finalizeSettlement()</code>,
             <code>challengeSettlement()</code>, <code>slashNode()</code>.
           </p>
@@ -188,6 +188,18 @@ graph LR
             is deployed on Anvil.
           </p>
         </div>
+      </div>
+      <div class="info-box" style="margin-top: 20px;">
+        <p>
+          <strong>Admission hardening:</strong> for on-chain pools, compute/vision/MPC nodes
+          must prove stake-wallet ownership at registration using a signed canonical payload
+          (with timestamp + nonce replay guards). This blocks stake-identity spoofing.
+        </p>
+        <p>
+          <strong>Continuous eligibility:</strong> stake checks are revalidated during live
+          operation. Nodes that fall below eligibility are excluded from discovery until they
+          re-stake.
+        </p>
       </div>
     </div>
   </section>

@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "proto"))
 
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,6 +40,8 @@ VL_MODEL_PATH = os.path.expanduser("~/models/Qwen2-VL-2B-Instruct")
 
 passed = 0
 failed = 0
+RAISE_ON_FAIL = "PYTEST_CURRENT_TEST" in os.environ
+RUN_VISION_E2E = os.environ.get("RUN_VISION_E2E", "0").strip() == "1"
 
 
 def test(name, condition, detail=""):
@@ -47,8 +50,15 @@ def test(name, condition, detail=""):
         print(f"  [PASS] {name}")
         passed += 1
     else:
-        print(f"  [FAIL] {name}" + (f" — {detail}" if detail else ""))
+        message = f"{name}" + (f" — {detail}" if detail else "")
+        print(f"  [FAIL] {message}")
         failed += 1
+        if RAISE_ON_FAIL:
+            raise AssertionError(message)
+
+
+# Helper only; do not let pytest collect this as a test function.
+test.__test__ = False
 
 
 def has_vl_shards():
@@ -56,6 +66,11 @@ def has_vl_shards():
     return (os.path.exists(os.path.join(VL_SHARDS_DIR, "vision_shard_0.pt")) and
             os.path.exists(os.path.join(VL_SHARDS_DIR, "text_shard_0.pt")) and
             os.path.exists(os.path.join(VL_SHARDS_DIR, "manifest.json")))
+
+
+def has_vl_model():
+    """Check if local VL model files are available for config/tokenizer loads."""
+    return os.path.exists(VL_MODEL_PATH)
 
 
 # ============================================================================
@@ -162,6 +177,9 @@ def test_mrope_positions():
     """Test M-RoPE 3D position ID computation for mixed image+text sequences."""
     print("\n=== Unit Test: M-RoPE position IDs ===")
 
+    if not has_vl_model():
+        pytest.skip(f"VL model path not found: {VL_MODEL_PATH}")
+
     from client.client import UnfedClient
 
     # Create a mock client with the method
@@ -219,6 +237,11 @@ def test_mrope_positions():
 def test_e2e_multimodal():
     """E2E test with registry + MPC vision + vision shard + 4 text shards."""
     print("\n=== E2E Test: Full Multimodal Pipeline ===")
+
+    if not RUN_VISION_E2E:
+        pytest.skip("Set RUN_VISION_E2E=1 to run heavy vision E2E test.")
+    if not has_vl_model():
+        pytest.skip(f"VL model path not found: {VL_MODEL_PATH}")
 
     if not has_vl_shards():
         print("  [SKIP] VL shards not found — run shard.vision_splitter first")

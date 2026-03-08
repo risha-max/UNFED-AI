@@ -24,7 +24,7 @@ import os
 import time
 import threading
 import uuid
-from collections import defaultdict
+from collections import defaultdict, OrderedDict, deque
 
 logger = logging.getLogger("unfed.registry")
 from concurrent import futures
@@ -46,6 +46,12 @@ from network.he_dispute import (
     verify_report_signature,
 )
 from network.share_auth import registration_pop_payload, verify_signature
+from network.share_auth import (
+    registration_stake_auth_payload,
+    heartbeat_auth_payload,
+    unregister_auth_payload,
+)
+from network.evm_auth import recover_evm_signer
 from economics.share_chain import ShareChain
 from economics.payments import StakeManager, PaymentContract, SettlementProcessor
 from economics.model_pools import PoolRegistry, PoolManifest
@@ -413,12 +419,113 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._mpc_waiting_queue: list[dict] = []  # nodes waiting for MPC partner
         self._assignment_history: dict[str, dict] = {}  # node_id -> assignment
         self._orphaned_shards: list[dict] = []  # shards that lost their last node
+        self._auth_max_skew_ms = int(os.getenv("UNFED_AUTH_MAX_SKEW_MS", "300000"))
+        self._auth_nonce_max_entries = int(
+            os.getenv("UNFED_AUTH_NONCE_MAX_ENTRIES", "200000")
+        )
+        self._auth_rate_limit_per_minute = int(
+            os.getenv("UNFED_AUTH_RATE_LIMIT_PER_MINUTE", "120")
+        )
+        self._used_register_nonces: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._used_control_nonces: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._auth_rate_windows: dict[tuple[str, str], deque[float]] = {}
+        self._stake_revalidate_ttl_seconds = float(
+            os.getenv("UNFED_STAKE_REVALIDATE_TTL_SECONDS", "30")
+        )
+        self._stake_eligibility_cache: dict[str, tuple[bool, float]] = {}
+        self._auth_lock = threading.Lock()
 
     def _cleanup_loop(self):
         """Periodically remove nodes that haven't sent a heartbeat."""
         while True:
             time.sleep(config.HEARTBEAT_INTERVAL_SECONDS)
             self._remove_stale_nodes()
+
+    def _timestamp_is_fresh(self, timestamp_ms: int) -> bool:
+        if timestamp_ms <= 0:
+            return False
+        now_ms = int(time.time() * 1000)
+        return abs(now_ms - int(timestamp_ms)) <= self._auth_max_skew_ms
+
+    def _consume_nonce(
+        self,
+        nonce_store: OrderedDict[tuple[str, str], float],
+        *,
+        node_id: str,
+        nonce: str,
+    ) -> bool:
+        if not nonce:
+            return False
+        with self._auth_lock:
+            now = time.time()
+            ttl = max(float(self._auth_max_skew_ms) / 1000.0, 1.0)
+            key = (node_id, nonce)
+            if key in nonce_store:
+                return False
+            while nonce_store:
+                first_key = next(iter(nonce_store))
+                if nonce_store[first_key] >= now:
+                    break
+                nonce_store.popitem(last=False)
+            while len(nonce_store) >= self._auth_nonce_max_entries:
+                nonce_store.popitem(last=False)
+            nonce_store[key] = now + ttl
+            return True
+
+    def _peer_fingerprint(self, context) -> str:
+        if context is None:
+            return "unknown"
+        try:
+            peer = str(context.peer() or "")
+        except Exception:
+            return "unknown"
+        if not peer:
+            return "unknown"
+        if ":" not in peer:
+            return peer
+        # Drop ephemeral port: scheme:host:port -> scheme:host
+        return peer.rsplit(":", 1)[0]
+
+    def _rate_limit_allow(self, context, *, action: str, node_id: str) -> bool:
+        limit = max(1, int(self._auth_rate_limit_per_minute))
+        now = time.time()
+        window_start = now - 60.0
+        caller = self._peer_fingerprint(context)
+        key = (action, f"{caller}|{node_id or '-'}")
+        with self._auth_lock:
+            q = self._auth_rate_windows.get(key)
+            if q is None:
+                q = deque()
+                self._auth_rate_windows[key] = q
+            while q and q[0] < window_start:
+                q.popleft()
+            if len(q) >= limit:
+                return False
+            q.append(now)
+            if len(self._auth_rate_windows) > 20000:
+                stale = [
+                    k for k, dq in self._auth_rate_windows.items()
+                    if not dq or dq[-1] < window_start
+                ]
+                for k in stale[:5000]:
+                    self._auth_rate_windows.pop(k, None)
+            return True
+
+    def _node_is_eligible_now(self, node_id: str) -> bool:
+        if not self._onchain_escrow:
+            return True
+        if not _is_eth_address(node_id):
+            return False
+        now = time.time()
+        cached = self._stake_eligibility_cache.get(node_id)
+        if cached and now - cached[1] <= self._stake_revalidate_ttl_seconds:
+            return cached[0]
+        try:
+            eligible = bool(self._onchain_escrow.is_eligible(node_id))
+        except Exception:
+            eligible = False
+        self._stake_eligibility_cache[node_id] = (eligible, now)
+        return eligible
 
     def _settlement_loop(self):
         """Monitor share-chain for new settlements and post them to payments.
@@ -1177,33 +1284,21 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         is treated as an Ethereum address for stake lookups.
         """
         node_type = (request.node_type or "compute").strip().lower()
+        if not self._rate_limit_allow(
+            context, action="register", node_id=request.node_id
+        ):
+            return registry_pb2.RegisterResponse(
+                success=False,
+                message="rate limit exceeded",
+            )
         if node_type in ("verifier", "he_sidecar"):
             return registry_pb2.RegisterResponse(
                 success=False,
                 message=f"{node_type} role is retired; registry now owns this responsibility",
             )
 
-        # --- On-chain stake gate ---
-        if self._onchain_escrow:
-            try:
-                if not self._onchain_escrow.is_eligible(request.node_id):
-                    min_stake = self._onchain_escrow.min_stake()
-                    msg = (f"Insufficient on-chain stake. "
-                           f"Minimum: {min_stake} wei")
-                    print(f"[Registry] Rejected {request.node_id[:8]}...: "
-                          f"{msg}")
-                    return registry_pb2.RegisterResponse(
-                        success=False, message=msg)
-            except Exception as e:
-                msg = (f"On-chain stake check failed: {e}. "
-                       f"Registration denied (fail-closed).")
-                print(f"[Registry] REJECTED {request.node_id[:8]}...: "
-                      f"{msg}")
-                return registry_pb2.RegisterResponse(
-                    success=False, message=msg)
-
         # --- Share signing key proof-of-possession gate ---
-        if node_type in ("compute", "mpc"):
+        if node_type in ("compute", "mpc", "vision", "daemon"):
             if len(request.share_signing_public_key) != 32:
                 return registry_pb2.RegisterResponse(
                     success=False,
@@ -1230,6 +1325,73 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     success=False,
                     message="invalid share_signing_pop signature",
                 )
+
+        # --- On-chain stake gate + ownership proof ---
+        if self._onchain_escrow and node_type in ("compute", "mpc", "vision", "daemon"):
+            if not _is_eth_address(request.node_id):
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="node_id must be an EVM address when on-chain escrow is enabled",
+                )
+            if not self._timestamp_is_fresh(int(request.stake_auth_timestamp_ms)):
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="stale or missing stake_auth_timestamp_ms",
+                )
+            if not self._consume_nonce(
+                self._used_register_nonces,
+                node_id=request.node_id,
+                nonce=(request.stake_auth_nonce or "").strip(),
+            ):
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="stake_auth_nonce replayed or missing",
+                )
+            if not request.stake_auth_signature:
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="stake_auth_signature is required for on-chain admission",
+                )
+            expected_payload = registration_stake_auth_payload(
+                node_id=request.node_id,
+                address=request.address,
+                model_id=request.model_id,
+                shard_index=request.shard_index,
+                node_type=node_type,
+                share_signing_public_key=bytes(request.share_signing_public_key),
+                timestamp_ms=int(request.stake_auth_timestamp_ms),
+                nonce=(request.stake_auth_nonce or "").strip(),
+            )
+            try:
+                recovered = recover_evm_signer(
+                    expected_payload, bytes(request.stake_auth_signature)
+                )
+            except Exception as e:
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message=f"invalid stake_auth_signature: {e}",
+                )
+            if recovered.lower() != request.node_id.lower():
+                return registry_pb2.RegisterResponse(
+                    success=False,
+                    message="stake_auth_signature does not match node_id",
+                )
+            try:
+                if not self._node_is_eligible_now(request.node_id):
+                    min_stake = self._onchain_escrow.min_stake()
+                    msg = (f"Insufficient on-chain stake. "
+                           f"Minimum: {min_stake} wei")
+                    print(f"[Registry] Rejected {request.node_id[:8]}...: "
+                          f"{msg}")
+                    return registry_pb2.RegisterResponse(
+                        success=False, message=msg)
+            except Exception as e:
+                msg = (f"On-chain stake check failed: {e}. "
+                       f"Registration denied (fail-closed).")
+                print(f"[Registry] REJECTED {request.node_id[:8]}...: "
+                      f"{msg}")
+                return registry_pb2.RegisterResponse(
+                    success=False, message=msg)
         with self._lock:
             effective_stake_identity = (request.stake_identity or "").strip()
             record = NodeRecord(
@@ -1272,10 +1434,43 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
     def Heartbeat(self, request, context):
         """Update heartbeat timestamp for a node."""
+        if not self._rate_limit_allow(
+            context, action="heartbeat", node_id=request.node_id
+        ):
+            return registry_pb2.HeartbeatResponse(acknowledged=False)
         with self._lock:
-            if request.node_id in self._nodes:
-                self._nodes[request.node_id].last_heartbeat = time.time()
-                return registry_pb2.HeartbeatResponse(acknowledged=True)
+            record = self._nodes.get(request.node_id)
+            if record is None:
+                return registry_pb2.HeartbeatResponse(acknowledged=False)
+            if len(record.share_signing_public_key) == 32:
+                if not self._timestamp_is_fresh(int(request.auth_timestamp_ms)):
+                    return registry_pb2.HeartbeatResponse(acknowledged=False)
+                if not self._consume_nonce(
+                    self._used_control_nonces,
+                    node_id=request.node_id,
+                    nonce=(request.auth_nonce or "").strip(),
+                ):
+                    return registry_pb2.HeartbeatResponse(acknowledged=False)
+                payload = heartbeat_auth_payload(
+                    node_id=request.node_id,
+                    timestamp_ms=int(request.auth_timestamp_ms),
+                    nonce=(request.auth_nonce or "").strip(),
+                )
+                if not verify_signature(
+                    bytes(record.share_signing_public_key),
+                    payload,
+                    bytes(request.auth_signature),
+                ):
+                    return registry_pb2.HeartbeatResponse(acknowledged=False)
+            if (
+                self._onchain_escrow
+                and record.node_type in ("compute", "mpc", "vision")
+                and not self._node_is_eligible_now(record.node_id)
+            ):
+                self._nodes.pop(request.node_id, None)
+                return registry_pb2.HeartbeatResponse(acknowledged=False)
+            record.last_heartbeat = time.time()
+            return registry_pb2.HeartbeatResponse(acknowledged=True)
 
         return registry_pb2.HeartbeatResponse(acknowledged=False)
 
@@ -1321,7 +1516,34 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
     def Unregister(self, request, context):
         """Remove a node from the registry."""
+        if not self._rate_limit_allow(
+            context, action="unregister", node_id=request.node_id
+        ):
+            return registry_pb2.UnregisterResponse(success=False)
         with self._lock:
+            record = self._nodes.get(request.node_id)
+            if record is None:
+                return registry_pb2.UnregisterResponse(success=False)
+            if len(record.share_signing_public_key) == 32:
+                if not self._timestamp_is_fresh(int(request.auth_timestamp_ms)):
+                    return registry_pb2.UnregisterResponse(success=False)
+                if not self._consume_nonce(
+                    self._used_control_nonces,
+                    node_id=request.node_id,
+                    nonce=(request.auth_nonce or "").strip(),
+                ):
+                    return registry_pb2.UnregisterResponse(success=False)
+                payload = unregister_auth_payload(
+                    node_id=request.node_id,
+                    timestamp_ms=int(request.auth_timestamp_ms),
+                    nonce=(request.auth_nonce or "").strip(),
+                )
+                if not verify_signature(
+                    bytes(record.share_signing_public_key),
+                    payload,
+                    bytes(request.auth_signature),
+                ):
+                    return registry_pb2.UnregisterResponse(success=False)
             record = self._nodes.pop(request.node_id, None)
 
         if record:
@@ -1338,6 +1560,12 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
         if request.model_id:
             nodes = [n for n in nodes if n.model_id == request.model_id]
+        if self._onchain_escrow:
+            nodes = [
+                n for n in nodes
+                if n.node_type not in ("compute", "mpc", "vision")
+                or self._node_is_eligible_now(n.node_id)
+            ]
 
         return registry_pb2.DiscoverResponse(
             nodes=[n.to_proto() for n in nodes]
@@ -1347,6 +1575,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         """Return all models known to this registry with health summaries."""
         with self._lock:
             nodes = list(self._nodes.values())
+        if self._onchain_escrow:
+            nodes = [n for n in nodes if self._node_is_eligible_now(n.node_id)]
 
         mpc_required = resolve_mpc_required_flag()
 
@@ -1387,6 +1617,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         """Return health status of a model pool."""
         with self._lock:
             nodes = [n for n in self._nodes.values() if n.model_id == request.model_id]
+        if self._onchain_escrow:
+            nodes = [n for n in nodes if self._node_is_eligible_now(n.node_id)]
 
         # Group nodes by shard
         shard_map: dict[int, list[NodeRecord]] = {}

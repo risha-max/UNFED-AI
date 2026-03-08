@@ -27,6 +27,7 @@ import os
 import queue
 import random
 import re
+import secrets
 import signal
 import sys
 import threading
@@ -54,7 +55,20 @@ from economics.share_chain import ShareChain, ComputeShare, Block
 from economics.distributed_chain import (
     share_to_proto, proto_to_share, block_to_proto, proto_to_block,
 )
-from network.share_auth import SharePayload, canonical_share_payload_bytes, verify_signature
+from network.share_auth import (
+    SharePayload,
+    canonical_share_payload_bytes,
+    verify_signature,
+    generate_signing_keypair,
+    key_file_paths,
+    public_key_from_private,
+    registration_pop_payload,
+    registration_stake_auth_payload,
+    heartbeat_auth_payload,
+    unregister_auth_payload,
+    sign_bytes,
+)
+from network.secret_loader import load_secret_from_env
 
 _SIMPLE_LOGS_ENABLED = True
 _COLOR_ENABLED = (
@@ -616,6 +630,12 @@ class DaemonRegistration:
         self.address = address
         self.registry_address = registry_address
         self._running = False
+        self.stake_evm_private_key = load_secret_from_env(
+            "UNFED_STAKE_EVM_PRIVATE_KEY",
+            file_env_var="UNFED_STAKE_EVM_PRIVATE_KEY_FILE",
+        )
+        self.share_signing_private_key = self._load_or_create_share_signing_key()
+        self.share_signing_public_key = public_key_from_private(self.share_signing_private_key)
 
     def start(self):
         """Register and start heartbeat loop."""
@@ -623,6 +643,19 @@ class DaemonRegistration:
             channel = grpc.insecure_channel(
                 self.registry_address, options=config.GRPC_OPTIONS)
             stub = registry_pb2_grpc.RegistryStub(channel)
+            ts_ms = int(time.time() * 1000)
+            nonce = secrets.token_hex(16)
+            pop = sign_bytes(
+                self.share_signing_private_key,
+                registration_pop_payload(
+                    node_id=self.node_id,
+                    address=self.address,
+                    model_id="",
+                    shard_index=-1,
+                    node_type="daemon",
+                ),
+            )
+            stake_sig = self._sign_stake_registration(ts_ms, nonce)
             stub.Register(registry_pb2.RegisterRequest(
                 node_id=self.node_id,
                 address=self.address,
@@ -632,6 +665,11 @@ class DaemonRegistration:
                 layer_end=-1,
                 node_type="daemon",
                 public_key=b"",  # daemon doesn't do onion routing
+                share_signing_public_key=self.share_signing_public_key,
+                share_signing_pop=pop,
+                stake_auth_timestamp_ms=ts_ms,
+                stake_auth_nonce=nonce,
+                stake_auth_signature=stake_sig,
             ), timeout=10)
             channel.close()
             print(f"[Daemon] Registered as node_type='daemon' at {self.address}")
@@ -651,12 +689,38 @@ class DaemonRegistration:
                 channel = grpc.insecure_channel(
                     self.registry_address, options=config.GRPC_OPTIONS)
                 stub = registry_pb2_grpc.RegistryStub(channel)
+                ts_ms = int(time.time() * 1000)
+                nonce = secrets.token_hex(16)
                 resp = stub.Heartbeat(
-                    registry_pb2.HeartbeatRequest(node_id=self.node_id),
+                    registry_pb2.HeartbeatRequest(
+                        node_id=self.node_id,
+                        auth_timestamp_ms=ts_ms,
+                        auth_nonce=nonce,
+                        auth_signature=sign_bytes(
+                            self.share_signing_private_key,
+                            heartbeat_auth_payload(
+                                node_id=self.node_id,
+                                timestamp_ms=ts_ms,
+                                nonce=nonce,
+                            ),
+                        ),
+                    ),
                     timeout=10,
                 )
                 if not resp.acknowledged:
                     # Re-register
+                    re_ts_ms = int(time.time() * 1000)
+                    re_nonce = secrets.token_hex(16)
+                    pop = sign_bytes(
+                        self.share_signing_private_key,
+                        registration_pop_payload(
+                            node_id=self.node_id,
+                            address=self.address,
+                            model_id="",
+                            shard_index=-1,
+                            node_type="daemon",
+                        ),
+                    )
                     stub.Register(registry_pb2.RegisterRequest(
                         node_id=self.node_id,
                         address=self.address,
@@ -666,6 +730,13 @@ class DaemonRegistration:
                         layer_end=-1,
                         node_type="daemon",
                         public_key=b"",
+                        share_signing_public_key=self.share_signing_public_key,
+                        share_signing_pop=pop,
+                        stake_auth_timestamp_ms=re_ts_ms,
+                        stake_auth_nonce=re_nonce,
+                        stake_auth_signature=self._sign_stake_registration(
+                            re_ts_ms, re_nonce
+                        ),
                     ), timeout=10)
                 channel.close()
             except grpc.RpcError as e:
@@ -677,13 +748,68 @@ class DaemonRegistration:
             channel = grpc.insecure_channel(
                 self.registry_address, options=config.GRPC_OPTIONS)
             stub = registry_pb2_grpc.RegistryStub(channel)
+            ts_ms = int(time.time() * 1000)
+            nonce = secrets.token_hex(16)
             stub.Unregister(
-                registry_pb2.UnregisterRequest(node_id=self.node_id),
+                registry_pb2.UnregisterRequest(
+                    node_id=self.node_id,
+                    auth_timestamp_ms=ts_ms,
+                    auth_nonce=nonce,
+                    auth_signature=sign_bytes(
+                        self.share_signing_private_key,
+                        unregister_auth_payload(
+                            node_id=self.node_id,
+                            timestamp_ms=ts_ms,
+                            nonce=nonce,
+                        ),
+                    ),
+                ),
                 timeout=5,
             )
             channel.close()
         except grpc.RpcError as e:
             logger.debug("Unregister from registry failed: %s", e)
+
+    def _load_or_create_share_signing_key(self) -> bytes:
+        priv_path, pub_path = key_file_paths(self.node_id)
+        os.makedirs(os.path.dirname(priv_path), exist_ok=True)
+        if os.path.exists(priv_path):
+            with open(priv_path, "rb") as f:
+                private_bytes = f.read()
+            if len(private_bytes) == 32:
+                return private_bytes
+        private_bytes, public_bytes = generate_signing_keypair()
+        with open(priv_path, "wb") as f:
+            f.write(private_bytes)
+        with open(pub_path, "wb") as f:
+            f.write(public_bytes)
+        try:
+            os.chmod(priv_path, 0o600)
+        except OSError:
+            pass
+        return private_bytes
+
+    def _sign_stake_registration(self, timestamp_ms: int, nonce: str) -> bytes:
+        if not self.stake_evm_private_key:
+            return b""
+        try:
+            from eth_account import Account
+            from eth_account.messages import encode_defunct
+        except Exception:
+            return b""
+        payload = registration_stake_auth_payload(
+            node_id=self.node_id,
+            address=self.address,
+            model_id="",
+            shard_index=-1,
+            node_type="daemon",
+            share_signing_public_key=self.share_signing_public_key,
+            timestamp_ms=timestamp_ms,
+            nonce=nonce,
+        )
+        msg = encode_defunct(text=payload)
+        signed = Account.sign_message(msg, private_key=self.stake_evm_private_key)
+        return bytes(signed.signature)
 
 
 # ---------------------------------------------------------------------------

@@ -72,6 +72,14 @@ from network.share_auth import (
     canonical_share_payload_bytes,
     sign_bytes,
 )
+from network.forward_attestation import (
+    FORWARD_ATTESTATION_VERSION,
+    ForwardAttestationPayload,
+    make_tensor_shape_signature,
+    proof_bytes_hash,
+    sign_forward_attestation,
+    tensor_bytes_digest,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -848,6 +856,38 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             if t and t.strip()
         }
 
+    def _build_forward_attestation(
+        self,
+        *,
+        request: inference_pb2.ForwardRequest,
+        activation_bytes: bytes,
+    ) -> tuple[str, bytes, str, bytes, str]:
+        if not self._node_id or not self._registration_share_signing_private_key:
+            return "", b"", "", b"", ""
+        activation_digest = tensor_bytes_digest(activation_bytes)
+        proof = b""
+        proof_format = "none"
+        payload = ForwardAttestationPayload(
+            version=FORWARD_ATTESTATION_VERSION,
+            signer_node_id=str(self._node_id),
+            signer_node_type="mpc",
+            session_id=str(request.session_id),
+            he_step=int(request.he_step),
+            he_key_id=str(request.he_key_id or ""),
+            activation_digest=activation_digest,
+            tensor_shape=make_tensor_shape_signature(list(request.tensor_shape)),
+            compressed=bool(request.compressed),
+            wire_dtype=str(request.wire_dtype or ""),
+            output_mpc_payload_hash=str(request.output_mpc_payload_hash or ""),
+            proof_format=proof_format,
+            proof_hash=proof_bytes_hash(proof),
+        )
+        signature = sign_forward_attestation(
+            self._registration_share_signing_private_key,
+            payload,
+        )
+        return activation_digest, signature, payload.version, proof, proof_format
+
     def _connect_peer(self):
         """Connect to Node B's MPCPeer service."""
         if self._peer_stub is None and self._peer_address:
@@ -1200,6 +1240,22 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     next_request.he_disable_plaintext_sampling = (
                         request.he_disable_plaintext_sampling
                     )
+                    next_request.output_mpc_op = request.output_mpc_op
+                    next_request.output_mpc_payload_type = request.output_mpc_payload_type
+                    next_request.output_mpc_payload_hash = request.output_mpc_payload_hash
+                # Attach signed forward attestation so downstream compute shards
+                # can verify MPC-A as the authenticated previous hop.
+                (
+                    next_request.prev_activation_digest,
+                    next_request.prev_attestation_signature,
+                    next_request.prev_attestation_version,
+                    next_request.prev_attestation_proof,
+                    next_request.prev_attestation_proof_format,
+                ) = self._build_forward_attestation(
+                    request=next_request,
+                    activation_bytes=bytes(next_request.activation_data),
+                )
+                next_request.prev_attestation_signer_node_id = str(self._node_id or "")
 
                 channel = create_resilient_channel(
                     next_address, config.GRPC_OPTIONS)
@@ -1222,6 +1278,20 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         token_id=response.token_id,
                         has_token=response.has_token,
                         is_eos=response.is_eos,
+                        he_ciphertext=response.he_ciphertext,
+                        he_nonce=response.he_nonce,
+                        he_algo=response.he_algo,
+                        he_session_id=response.he_session_id,
+                        he_step=response.he_step,
+                        he_key_id=response.he_key_id,
+                        he_sender_pubkey=response.he_sender_pubkey,
+                        he_error=response.he_error,
+                        he_compute_payload=response.he_compute_payload,
+                        he_compute_format=response.he_compute_format,
+                        he_top_k=response.he_top_k,
+                        output_mpc_op=response.output_mpc_op,
+                        output_mpc_payload_type=response.output_mpc_payload_type,
+                        output_mpc_payload_hash=response.output_mpc_payload_hash,
                     )
 
                 return response

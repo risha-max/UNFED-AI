@@ -1168,6 +1168,11 @@ class UnfedClient:
         entry_stub = self._get_stub(entry_address)
 
         generated_tokens = list(input_ids)
+        he_private_key = b""
+        he_public_key = b""
+        he_key_id = ""
+        if self.use_he_output:
+            he_private_key, he_public_key, he_key_id = self._start_he_output_session()
 
         # Count image tokens for verification
         num_image_tokens = sum(1 for t in input_ids if t == image_token_id)
@@ -1207,6 +1212,20 @@ class UnfedClient:
                     is_prefill=False,
                 )
                 request.remaining_circuit.extend(remaining_text_circuit)
+            if self.use_he_output:
+                request.he_output_enabled = True
+                request.he_client_pubkey = he_public_key
+                request.he_key_id = he_key_id
+                request.he_step = step
+                request.he_compute_mode = self.he_compute_mode
+                request.he_top_k = int(config.HE_COMPUTE_TOP_K)
+                request.he_temperature = float(config.HE_COMPUTE_TEMPERATURE)
+                request.he_top_p = float(config.HE_COMPUTE_TOP_P)
+                if self.he_compute_mode in (
+                    HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
+                    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+                ):
+                    request.he_disable_plaintext_sampling = True
 
             try:
                 response = entry_stub.Forward(request)
@@ -1215,6 +1234,69 @@ class UnfedClient:
                 break
 
             step_time = time.time() - step_start
+
+            if self.use_he_output:
+                if response.he_error:
+                    raise RuntimeError(response.he_error)
+                if response.he_compute_payload:
+                    if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N:
+                        token_id, is_eos = parse_output_mpc_response_payload(
+                            payload_bytes=bytes(response.he_compute_payload),
+                            expected_session_id=session_id,
+                            expected_step=step,
+                            expected_key_id=he_key_id,
+                            expected_payload_hash=response.output_mpc_payload_hash or "",
+                        )
+                    else:
+                        token_ids, scores = decrypt_topk_artifact(
+                            artifact_bytes=bytes(response.he_compute_payload),
+                            client_private_key=he_private_key,
+                            expected_session_id=session_id,
+                            expected_step=step,
+                            expected_key_id=he_key_id,
+                        )
+                        token_id = sample_from_topk_scores(
+                            token_ids=token_ids,
+                            scores=scores,
+                            temperature=float(request.he_temperature or config.HE_COMPUTE_TEMPERATURE or 1.0),
+                            top_p=float(request.he_top_p or config.HE_COMPUTE_TOP_P or 1.0),
+                        )
+                        is_eos = token_id == vl_tokenizer.eos_token_id
+                    generated_tokens.append(token_id)
+                    token_text = vl_tokenizer.decode([token_id], skip_special_tokens=True)
+                    if verbose:
+                        mode_label = "mpc-output" if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N else "he-compute"
+                        print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} ({mode_label})")
+                    yield token_text
+                    if is_eos:
+                        break
+                    continue
+                if not response.he_ciphertext:
+                    raise RuntimeError("HE output mode enabled but server returned no HE artifact.")
+                if response.he_session_id and response.he_session_id != session_id:
+                    raise RuntimeError("HE artifact session mismatch.")
+                if int(response.he_step) != step:
+                    raise RuntimeError("HE artifact step mismatch.")
+                response_key_id = response.he_key_id or he_key_id
+                if response_key_id != he_key_id:
+                    raise RuntimeError("HE artifact key mismatch.")
+                token_id, is_eos = decrypt_token_artifact(
+                    client_private_key=he_private_key,
+                    sender_public_key=bytes(response.he_sender_pubkey),
+                    session_id=session_id,
+                    step=step,
+                    key_id=he_key_id,
+                    nonce=bytes(response.he_nonce),
+                    ciphertext=bytes(response.he_ciphertext),
+                )
+                generated_tokens.append(token_id)
+                token_text = vl_tokenizer.decode([token_id], skip_special_tokens=True)
+                if verbose:
+                    print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} (he)")
+                yield token_text
+                if is_eos:
+                    break
+                continue
 
             if response.has_token:
                 token_id = response.token_id
@@ -1419,6 +1501,11 @@ class UnfedClient:
         entry_stub = self._get_stub(entry_address)
 
         generated_tokens = list(input_ids)
+        he_private_key = b""
+        he_public_key = b""
+        he_key_id = ""
+        if self.use_he_output:
+            he_private_key, he_public_key, he_key_id = self._start_he_output_session()
         num_image_tokens = sum(1 for t in input_ids if t == image_token_id)
 
         for step in range(max_new_tokens):
@@ -1448,6 +1535,20 @@ class UnfedClient:
                     is_prefill=False,
                 )
                 request.remaining_circuit.extend(remaining_text_circuit)
+            if self.use_he_output:
+                request.he_output_enabled = True
+                request.he_client_pubkey = he_public_key
+                request.he_key_id = he_key_id
+                request.he_step = step
+                request.he_compute_mode = self.he_compute_mode
+                request.he_top_k = int(config.HE_COMPUTE_TOP_K)
+                request.he_temperature = float(config.HE_COMPUTE_TEMPERATURE)
+                request.he_top_p = float(config.HE_COMPUTE_TOP_P)
+                if self.he_compute_mode in (
+                    HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
+                    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+                ):
+                    request.he_disable_plaintext_sampling = True
 
             try:
                 response = entry_stub.Forward(request)
@@ -1456,6 +1557,69 @@ class UnfedClient:
                 break
 
             step_time = time.time() - step_start
+
+            if self.use_he_output:
+                if response.he_error:
+                    raise RuntimeError(response.he_error)
+                if response.he_compute_payload:
+                    if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N:
+                        token_id, is_eos = parse_output_mpc_response_payload(
+                            payload_bytes=bytes(response.he_compute_payload),
+                            expected_session_id=session_id,
+                            expected_step=step,
+                            expected_key_id=he_key_id,
+                            expected_payload_hash=response.output_mpc_payload_hash or "",
+                        )
+                    else:
+                        token_ids, scores = decrypt_topk_artifact(
+                            artifact_bytes=bytes(response.he_compute_payload),
+                            client_private_key=he_private_key,
+                            expected_session_id=session_id,
+                            expected_step=step,
+                            expected_key_id=he_key_id,
+                        )
+                        token_id = sample_from_topk_scores(
+                            token_ids=token_ids,
+                            scores=scores,
+                            temperature=float(request.he_temperature or config.HE_COMPUTE_TEMPERATURE or 1.0),
+                            top_p=float(request.he_top_p or config.HE_COMPUTE_TOP_P or 1.0),
+                        )
+                        is_eos = token_id == vl_tokenizer.eos_token_id
+                    generated_tokens.append(token_id)
+                    token_text = vl_tokenizer.decode([token_id], skip_special_tokens=True)
+                    if verbose:
+                        mode_label = "mpc-output" if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N else "he-compute"
+                        print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} ({mode_label})")
+                    yield token_text
+                    if is_eos:
+                        break
+                    continue
+                if not response.he_ciphertext:
+                    raise RuntimeError("HE output mode enabled but server returned no HE artifact.")
+                if response.he_session_id and response.he_session_id != session_id:
+                    raise RuntimeError("HE artifact session mismatch.")
+                if int(response.he_step) != step:
+                    raise RuntimeError("HE artifact step mismatch.")
+                response_key_id = response.he_key_id or he_key_id
+                if response_key_id != he_key_id:
+                    raise RuntimeError("HE artifact key mismatch.")
+                token_id, is_eos = decrypt_token_artifact(
+                    client_private_key=he_private_key,
+                    sender_public_key=bytes(response.he_sender_pubkey),
+                    session_id=session_id,
+                    step=step,
+                    key_id=he_key_id,
+                    nonce=bytes(response.he_nonce),
+                    ciphertext=bytes(response.he_ciphertext),
+                )
+                generated_tokens.append(token_id)
+                token_text = vl_tokenizer.decode([token_id], skip_special_tokens=True)
+                if verbose:
+                    print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} (he)")
+                yield token_text
+                if is_eos:
+                    break
+                continue
 
             if response.has_token:
                 token_id = response.token_id

@@ -13,6 +13,7 @@ import os
 import time
 import threading
 import uuid
+import secrets
 
 import grpc
 
@@ -28,8 +29,12 @@ from network.share_auth import (
     key_file_paths,
     public_key_from_private,
     registration_pop_payload,
+    registration_stake_auth_payload,
+    heartbeat_auth_payload,
+    unregister_auth_payload,
     sign_bytes,
 )
+from network.secret_loader import load_secret_from_env
 
 
 class RegistryClient:
@@ -49,7 +54,10 @@ class RegistryClient:
                  capability_json: str = "",
                  stake_identity: str = "",
                  share_signing_public_key: bytes = b"",
-                 share_signing_pop: bytes = b"") -> bool:
+                 share_signing_pop: bytes = b"",
+                 stake_auth_timestamp_ms: int = 0,
+                 stake_auth_nonce: str = "",
+                 stake_auth_signature: bytes = b"") -> bool:
         """Register a node with the registry."""
         try:
             response = self._stub.Register(registry_pb2.RegisterRequest(
@@ -67,27 +75,38 @@ class RegistryClient:
                 stake_identity=stake_identity,
                 share_signing_public_key=share_signing_public_key,
                 share_signing_pop=share_signing_pop,
+                stake_auth_timestamp_ms=stake_auth_timestamp_ms,
+                stake_auth_nonce=stake_auth_nonce,
+                stake_auth_signature=stake_auth_signature,
             ))
             return response.success
         except grpc.RpcError as e:
             print(f"[Discovery] Failed to register with registry: {e.details()}")
             return False
 
-    def heartbeat(self, node_id: str) -> bool:
+    def heartbeat(self, node_id: str, auth_timestamp_ms: int = 0,
+                  auth_nonce: str = "", auth_signature: bytes = b"") -> bool:
         """Send a heartbeat to the registry."""
         try:
             response = self._stub.Heartbeat(registry_pb2.HeartbeatRequest(
                 node_id=node_id,
+                auth_timestamp_ms=auth_timestamp_ms,
+                auth_nonce=auth_nonce,
+                auth_signature=auth_signature,
             ))
             return response.acknowledged
         except grpc.RpcError:
             return False
 
-    def unregister(self, node_id: str) -> bool:
+    def unregister(self, node_id: str, auth_timestamp_ms: int = 0,
+                   auth_nonce: str = "", auth_signature: bytes = b"") -> bool:
         """Unregister a node from the registry."""
         try:
             response = self._stub.Unregister(registry_pb2.UnregisterRequest(
                 node_id=node_id,
+                auth_timestamp_ms=auth_timestamp_ms,
+                auth_nonce=auth_nonce,
+                auth_signature=auth_signature,
             ))
             return response.success
         except grpc.RpcError:
@@ -678,7 +697,7 @@ class NodeRegistration:
                  has_embedding: bool = False, has_lm_head: bool = False,
                  registry_address: str = None, node_type: str = "compute",
                  capability_json: str = "", stake_identity: str = "",
-                 node_id: str = None):
+                 node_id: str = None, stake_evm_private_key: str | None = None):
         self.node_id = node_id or str(uuid.uuid4())
         self.address = address
         self.model_id = model_id
@@ -690,6 +709,14 @@ class NodeRegistration:
         self.node_type = node_type
         self.capability_json = capability_json or ""
         self.stake_identity = stake_identity or ""
+        self.stake_evm_private_key = (
+            stake_evm_private_key
+            if stake_evm_private_key is not None
+            else load_secret_from_env(
+                "UNFED_STAKE_EVM_PRIVATE_KEY",
+                file_env_var="UNFED_STAKE_EVM_PRIVATE_KEY_FILE",
+            )
+        )
 
         # Generate X25519 key pair for onion routing
         from network.onion import generate_keypair, public_key_to_bytes
@@ -714,6 +741,9 @@ class NodeRegistration:
             node_type=self.node_type,
         )
         share_signing_pop = sign_bytes(self.share_signing_private_key, pop_payload)
+        ts_ms = int(time.time() * 1000)
+        reg_nonce = secrets.token_hex(16)
+        stake_auth_signature = self._sign_stake_registration(ts_ms, reg_nonce)
         success = self._client.register(
             node_id=self.node_id,
             address=self.address,
@@ -729,6 +759,9 @@ class NodeRegistration:
             stake_identity=self.stake_identity,
             share_signing_public_key=self.share_signing_public_key,
             share_signing_pop=share_signing_pop,
+            stake_auth_timestamp_ms=ts_ms,
+            stake_auth_nonce=reg_nonce,
+            stake_auth_signature=stake_auth_signature,
         )
 
         if success:
@@ -748,9 +781,25 @@ class NodeRegistration:
         while self._running:
             time.sleep(config.HEARTBEAT_INTERVAL_SECONDS)
             if self._running:
-                ack = self._client.heartbeat(self.node_id)
+                hb_ts_ms = int(time.time() * 1000)
+                hb_nonce = secrets.token_hex(16)
+                ack = self._client.heartbeat(
+                    self.node_id,
+                    auth_timestamp_ms=hb_ts_ms,
+                    auth_nonce=hb_nonce,
+                    auth_signature=sign_bytes(
+                        self.share_signing_private_key,
+                        heartbeat_auth_payload(
+                            node_id=self.node_id,
+                            timestamp_ms=hb_ts_ms,
+                            nonce=hb_nonce,
+                        ),
+                    ),
+                )
                 if not ack:
                     # Registry may have restarted — re-register
+                    re_ts_ms = int(time.time() * 1000)
+                    re_nonce = secrets.token_hex(16)
                     self._client.register(
                         node_id=self.node_id,
                         address=self.address,
@@ -775,12 +824,31 @@ class NodeRegistration:
                                 node_type=self.node_type,
                             ),
                         ),
+                        stake_auth_timestamp_ms=re_ts_ms,
+                        stake_auth_nonce=re_nonce,
+                        stake_auth_signature=self._sign_stake_registration(
+                            re_ts_ms, re_nonce
+                        ),
                     )
 
     def stop(self):
         """Unregister from the registry and stop heartbeating."""
         self._running = False
-        self._client.unregister(self.node_id)
+        ts_ms = int(time.time() * 1000)
+        nonce = secrets.token_hex(16)
+        self._client.unregister(
+            self.node_id,
+            auth_timestamp_ms=ts_ms,
+            auth_nonce=nonce,
+            auth_signature=sign_bytes(
+                self.share_signing_private_key,
+                unregister_auth_payload(
+                    node_id=self.node_id,
+                    timestamp_ms=ts_ms,
+                    nonce=nonce,
+                ),
+            ),
+        )
         print(f"[Node {self.node_id[:8]}...] Unregistered from registry")
 
     @property
@@ -805,3 +873,25 @@ class NodeRegistration:
         except OSError:
             pass
         return private_bytes
+
+    def _sign_stake_registration(self, timestamp_ms: int, nonce: str) -> bytes:
+        if not self.stake_evm_private_key:
+            return b""
+        try:
+            from eth_account import Account
+            from eth_account.messages import encode_defunct
+        except Exception:
+            return b""
+        payload = registration_stake_auth_payload(
+            node_id=self.node_id,
+            address=self.address,
+            model_id=self.model_id,
+            shard_index=self.shard_index,
+            node_type=self.node_type,
+            share_signing_public_key=self.share_signing_public_key,
+            timestamp_ms=timestamp_ms,
+            nonce=nonce,
+        )
+        msg = encode_defunct(text=payload)
+        signed = Account.sign_message(msg, private_key=self.stake_evm_private_key)
+        return bytes(signed.signature)

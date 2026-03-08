@@ -72,6 +72,31 @@
 pip install transformers  # for model downloading
 pip install fastapi uvicorn websockets  # for web dashboard
 pip install web3  # for on-chain staking (optional)</code></pre>
+
+      <div class="section-header" style="margin-top: 36px;">
+        <h2>Per-Node <span class="accent">System Requirements</span></h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Node Type</th>
+              <th>CPU</th>
+              <th>RAM</th>
+              <th>GPU</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Registry</strong></td><td>1 vCPU</td><td>1-2 GB</td><td>No</td><td>For larger pools use 2 vCPU / 4 GB.</td></tr>
+            <tr><td><strong>Daemon</strong></td><td>2 vCPU</td><td>4 GB</td><td>No</td><td>Persistent disk recommended for SQLite chain DB.</td></tr>
+            <tr><td><strong>MPC Node A</strong></td><td>4 vCPU</td><td>8-16 GB</td><td>Recommended</td><td>Entry privacy node; usually the heavier MPC side.</td></tr>
+            <tr><td><strong>MPC Node B</strong></td><td>4 vCPU</td><td>8-16 GB</td><td>Recommended</td><td>Peer privacy node; keep low latency to Node A.</td></tr>
+            <tr><td><strong>Compute (text shard)</strong></td><td>4+ vCPU</td><td>8-16 GB</td><td>Recommended</td><td>One process per shard index.</td></tr>
+            <tr><td><strong>Vision shard</strong></td><td>4+ vCPU</td><td>12-24 GB</td><td>Preferred</td><td>Needed for multimodal image paths.</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </section>
 
@@ -183,6 +208,25 @@ pip install web3  # for on-chain staking (optional)</code></pre>
           the registry process at startup. Quorum knobs like
           <code>daemon_required_count</code> are registry-local policy.
         </p>
+        <p>
+          <strong>Stake amount control:</strong> registry-side
+          <code>default_min_stake</code> defines the minimum stake required for node
+          admission (compute/vision/MPC). If a node is below this threshold, registration
+          is rejected until re-staked.
+        </p>
+      </div>
+
+      <div class="info-box">
+        <p>
+          <strong>On-chain admission auth (new):</strong> when on-chain escrow is enabled,
+          compute/vision/MPC/daemon registration must include an EVM signature over the canonical
+          registration payload (node identity, address, model, shard, share-signing key,
+          timestamp, nonce). The recovered signer must match <code>node_id</code>.
+        </p>
+        <pre><code># Recommended: store stake key in a file (OPSEC)
+umask 077
+printf '%s' "0x&lt;staked wallet private key&gt;" &gt; ~/.unfed/node_stake.key
+export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/node_stake.key</code></pre>
       </div>
 
       <div class="info-box">
@@ -203,9 +247,11 @@ pip install web3  # for on-chain staking (optional)</code></pre>
         <p>The chain daemon records compute shares and produces settlement blocks.</p>
       </div>
 
-      <pre><code>python -m network.daemon_node \
+      <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/daemon_stake.key
+python -m network.daemon_node \
   --port 50070 \
   --registry localhost:50050 \
+  --eth-address 0x&lt;daemon staked wallet address&gt; \
   --db ~/.unfed/chain.db</code></pre>
 
       <p>
@@ -224,6 +270,25 @@ pip install web3  # for on-chain staking (optional)</code></pre>
         <p>Pick the node type you want to run and follow its exact startup flow.</p>
       </div>
 
+      <div class="info-box warning">
+        <p><strong>Strict startup order:</strong> start nodes in this order to avoid readiness and admission failures.</p>
+        <ol>
+          <li>Registry</li>
+          <li>Daemon</li>
+          <li>MPC Node B, then MPC Node A (when using <code>mpc_nminus1_n</code>)</li>
+          <li>All required compute shards (and vision shard if multimodal)</li>
+          <li>Web UI (optional)</li>
+        </ol>
+        <p><strong>Readiness gate:</strong> if your client policy requires MPC (for example <code>UNFED_REQUIRE_MPC=1</code>), model status will stay <code>INCOMPLETE</code> until MPC Node A is healthy and registered.</p>
+      </div>
+      <div class="info-box">
+        <p><strong>Reproducibility rule:</strong> in on-chain mode, stake each node wallet before startup and always pass both:</p>
+        <ul>
+          <li><code>UNFED_STAKE_EVM_PRIVATE_KEY_FILE</code> (or <code>UNFED_STAKE_EVM_PRIVATE_KEY</code>)</li>
+          <li><code>--eth-address</code> matching that staked wallet address</li>
+        </ul>
+      </div>
+
       <div class="card-grid">
         <div class="card">
           <h3>Registry Node</h3>
@@ -239,9 +304,11 @@ pip install web3  # for on-chain staking (optional)</code></pre>
           <h3>Daemon Node</h3>
           <p>Use this for sharechain persistence, block production, and fee telemetry.</p>
           <span class="code-label">Start command</span>
-          <pre><code>python -m network.daemon_node \
+          <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/daemon_stake.key
+python -m network.daemon_node \
   --port 50070 \
   --registry localhost:50050 \
+  --eth-address 0x&lt;daemon staked wallet address&gt; \
   --db ~/.unfed/chain.db</code></pre>
           <p><strong>Tutorial:</strong> start after registry, before compute/MPC nodes.</p>
         </div>
@@ -252,7 +319,8 @@ pip install web3  # for on-chain staking (optional)</code></pre>
           <h3>Compute Node (Text Shard)</h3>
           <p>Use this for normal text shard execution. Run one process per shard index.</p>
           <span class="code-label">Shard 0 example</span>
-          <pre><code>python -m node.server \
+          <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/node0_stake.key
+python -m node.server \
   --shard-index 0 \
   --port 50051 \
   --model-type smolvlm \
@@ -260,7 +328,8 @@ pip install web3  # for on-chain staking (optional)</code></pre>
   --registry localhost:50050 \
   --eth-address 0xNodeAddress1</code></pre>
           <span class="code-label">Shard 1 example</span>
-          <pre><code>python -m node.server \
+          <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/node1_stake.key
+python -m node.server \
   --shard-index 1 \
   --port 50052 \
   --model-type smolvlm \
@@ -274,7 +343,8 @@ pip install web3  # for on-chain staking (optional)</code></pre>
           <h3>Vision Node (Multimodal)</h3>
           <p>Use this only for multimodal pipelines that require a vision encoder path.</p>
           <span class="code-label">Vision shard example</span>
-          <pre><code>python -m node.server \
+          <pre><code>export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/vision_stake.key
+python -m node.server \
   --shard-index 0 \
   --port 50060 \
   --model-type smolvlm_vision \
@@ -291,12 +361,15 @@ pip install web3  # for on-chain staking (optional)</code></pre>
           <p>Use this when you want shard-0 privacy via secret sharing.</p>
           <span class="code-label">Start Node B first</span>
           <pre><code># Start MPC Node B first
+export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/mpcb_stake.key
 python -m network.mpc_shard0 \
   --role B --port 50063 \
   --peer localhost:50061 \
-  --shards-dir shards_smolvlm
+  --shards-dir shards_smolvlm \
+  --eth-address 0xMPCBAddress
 
 # Then start MPC Node A
+export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/mpca_stake.key
 python -m network.mpc_shard0 \
   --role A --port 50061 \
   --peer localhost:50063 \
@@ -331,8 +404,13 @@ python -m network.mpc_shard0 \
 
       <div class="info-box">
         <p>
-          <strong>Staking note:</strong> if on-chain staking is enabled, each compute/vision/MPC
+          <strong>Staking note:</strong> if on-chain staking is enabled, each compute/vision/MPC/daemon
           node must meet <code>min_stake</code> before registration is accepted.
+        </p>
+        <p>
+          <strong>Continuous enforcement:</strong> stake eligibility is re-checked during
+          live operation. Nodes that fall below eligibility are excluded from discovery and
+          health views until re-staked.
         </p>
       </div>
 
@@ -407,6 +485,14 @@ python -m scripts.testnet_preflight node \
           <code>mpc_nminus1_n</code>. The legacy <code>server_sample</code> mode is retired.
         </p>
       </div>
+      <div class="info-box">
+        <p><strong>Vision MPC validation:</strong> run the lightweight pytest path by default, then opt into heavy E2E when ready.</p>
+        <pre><code># Default: unit-level vision checks (pytest-friendly)
+python -m pytest tests/test_vision.py -q
+
+# Heavy E2E vision network check (requires model/shards and more resources)
+RUN_VISION_E2E=1 python -m pytest tests/test_vision.py -q</code></pre>
+      </div>
     </div>
   </section>
 
@@ -459,6 +545,11 @@ python -m scripts.testnet_preflight node \
           <code>challenge_window_seconds</code>, and
           <code>he_dispute_rollout_stage</code>.
         </p>
+      </div>
+      <div class="info-box">
+        <p><strong>After startup, verify readiness:</strong></p>
+        <pre><code>python -m client.client --list-models --registry localhost:50050</code></pre>
+        <p>Expected: your target model shows <code>Status: READY</code> before serving users.</p>
       </div>
     </div>
   </section>
@@ -523,7 +614,7 @@ cast send $TOKEN_ADDRESS \
 
 # Stake
 cast send $ESCROW_ADDRESS \
-  "stakeNode(uint256)" 200000000000000000000 \
+  "stake(uint256)" 200000000000000000000 \
   --rpc-url http://localhost:8545 --private-key $NODE_KEY</code></pre>
           </div>
         </div>
