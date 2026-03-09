@@ -11,6 +11,8 @@ service InferenceNode {
   // For intermediate nodes: returns the activation tensor for the next node.
   // For the last node: returns the generated token.
   rpc Forward(ForwardRequest) returns (ForwardResponse);
+  // Micro-batched forward path for amortizing per-RPC overhead.
+  rpc BatchForward(BatchForwardRequest) returns (BatchForwardResponse);
 
   // Transfer a shard file to a requesting node (BitTorrent-style P2P weight distribution).
   rpc GetShard(GetShardRequest) returns (stream ShardChunk);
@@ -147,7 +149,7 @@ message ForwardRequest {
 
   // --- HE compute contract (output-layer decode path) ---
   // Mode selector for HE compute rollout.
-  // Supported values: "off", "decode_client_sample", "mpc_nminus1_n".
+  // Supported values: "off", "decode_client_sample", "full_output_2pc".
   string he_compute_mode = 28;
 
   // Optional HE compute payload transported across shard hops.
@@ -182,13 +184,13 @@ message ForwardRequest {
   bytes prev_attestation_proof = 41;
   string prev_attestation_proof_format = 42;
 
-  // --- Output MPC payload metadata ---
-  // Operation tag for output MPC handoff (for example: penultimate_share).
-  string output_mpc_op = 43;
-  // Payload semantic type (for example: hidden_last_token).
-  string output_mpc_payload_type = 44;
-  // SHA256 over canonical output payload bytes.
-  string output_mpc_payload_hash = 45;
+  // --- Output 2PC artifact metadata ---
+  // Stage tag for output 2PC handoff (for example: penultimate_share/final_sample).
+  string output_2pc_stage = 43;
+  // Artifact semantic type (for example: hidden_last_token/token_sample).
+  string output_2pc_artifact_type = 44;
+  // SHA256 over canonical output 2PC artifact bytes.
+  string output_2pc_artifact_hash = 45;
 }
 
 message ForwardResponse {
@@ -253,10 +255,18 @@ message ForwardResponse {
   // Number of candidate tokens included in he_compute_payload.
   int32 he_top_k = 19;
 
-  // --- Output MPC payload metadata ---
-  string output_mpc_op = 20;
-  string output_mpc_payload_type = 21;
-  string output_mpc_payload_hash = 22;
+  // --- Output 2PC artifact metadata ---
+  string output_2pc_stage = 20;
+  string output_2pc_artifact_type = 21;
+  string output_2pc_artifact_hash = 22;
+}
+
+message BatchForwardRequest {
+  repeated ForwardRequest requests = 1;
+}
+
+message BatchForwardResponse {
+  repeated ForwardResponse responses = 1;
 }
 
 // --- Shard Transfer (P2P weight distribution) ---
@@ -360,6 +370,12 @@ message MPCSendShareRequest {
   int32 num_layers = 5;
   int32 hidden_size = 6;
   int32 seq_len = 7;
+  // Optional triple set identifier for receiver-side cache lookup.
+  string triple_set_id = 8;
+  // Optional packed triples blob. Send once per triple_set_id; receiver caches.
+  bytes triples_blob = 9;
+  // Optional deterministic seed for local triple derivation.
+  int64 triple_seed = 10;
 }
 
 message MPCTriplePayload {
@@ -452,6 +468,9 @@ message GetBlocksResponse {
 message SubmitSharesRequest {
   repeated ShareProto shares = 1;     // Compute shares to submit
   string submitter_id = 2;           // Node ID of the submitting compute node
+  // Optional packed-share transport for lower protobuf object overhead.
+  bytes shares_blob = 3;
+  string shares_blob_format = 4;     // e.g. "shareproto-len-v1"
 }
 
 message SubmitSharesResponse {

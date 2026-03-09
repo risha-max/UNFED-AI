@@ -64,7 +64,7 @@ def _make_signed_request(
         tensor_shape=make_tensor_shape_signature(tensor_shape),
         compressed=False,
         wire_dtype=req.wire_dtype,
-        output_mpc_payload_hash=req.output_mpc_payload_hash,
+        output_2pc_artifact_hash=req.output_2pc_artifact_hash,
         proof_format="none",
         proof_hash=proof_bytes_hash(b""),
     )

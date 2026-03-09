@@ -21,6 +21,7 @@ def _register_node(
     model_id: str,
     shard_index: int,
     node_type: str,
+    capability_json: str = "",
 ):
     priv, pub = generate_signing_keypair()
     address = f"localhost:{50050 + shard_index}"
@@ -34,6 +35,7 @@ def _register_node(
         has_embedding=(shard_index == 0),
         has_lm_head=False,
         node_type=node_type,
+        capability_json=capability_json,
         share_signing_public_key=pub,
         share_signing_pop=sign_bytes(
             priv,
@@ -74,6 +76,12 @@ def test_list_models_can_serve_with_mpc_present(monkeypatch):
     _register_node(
         svc, node_id="0x2000000000000000000000000000000000000001",
         model_id="model-y", shard_index=0, node_type="mpc",
+        capability_json='{"mpc_role":"A","mpc_capabilities":["input","output"]}',
+    )
+    _register_node(
+        svc, node_id="0x2000000000000000000000000000000000000003",
+        model_id="model-y", shard_index=0, node_type="mpc",
+        capability_json='{"mpc_role":"B","mpc_capabilities":["input","output"]}',
     )
     _register_node(
         svc, node_id="0x2000000000000000000000000000000000000002",

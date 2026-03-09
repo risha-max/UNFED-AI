@@ -29,10 +29,12 @@ import random
 import re
 import secrets
 import signal
+import struct
 import sys
 import threading
 import time
 from collections import defaultdict
+from typing import Optional
 
 logger = logging.getLogger("unfed.daemon")
 from concurrent import futures
@@ -123,6 +125,39 @@ def _simple_log(message: str):
         print(message)
 
 
+def _unpack_share_proto_blob(blob: bytes) -> list[inference_pb2.ShareProto]:
+    mv = memoryview(blob)
+    off = 0
+
+    def take_u32() -> int:
+        nonlocal off
+        if off + 4 > len(mv):
+            raise ValueError("shares_blob truncated")
+        val = struct.unpack_from("<I", mv, off)[0]
+        off += 4
+        return int(val)
+
+    def take_bytes(n: int) -> bytes:
+        nonlocal off
+        if n < 0 or off + n > len(mv):
+            raise ValueError("shares_blob truncated bytes")
+        out = bytes(mv[off: off + n])
+        off += n
+        return out
+
+    count = take_u32()
+    out: list[inference_pb2.ShareProto] = []
+    for _ in range(count):
+        n = take_u32()
+        raw = take_bytes(n)
+        sp = inference_pb2.ShareProto()
+        sp.ParseFromString(raw)
+        out.append(sp)
+    if off != len(mv):
+        raise ValueError("shares_blob trailing bytes")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # DaemonServicer — gRPC service
 # ---------------------------------------------------------------------------
@@ -171,6 +206,17 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._reason_counters: dict[str, int] = defaultdict(int)
         self._signer_cache: dict[str, bytes] = {}
         self._signer_cache_ts = 0.0
+        self._signer_cache_ttl_s = float(
+            os.environ.get("UNFED_SIGNER_CACHE_TTL_S", "60")
+        )
+        self._submit_sig_parallel_min = max(
+            1,
+            int(os.environ.get("UNFED_SUBMIT_SIG_PARALLEL_MIN", "8")),
+        )
+        self._submit_sig_parallel_workers = max(
+            1,
+            int(os.environ.get("UNFED_SUBMIT_SIG_PARALLEL_WORKERS", "4")),
+        )
 
         # Subscribers for SubscribeBlocks streaming RPC
         self._subscribers: list[queue.Queue] = []
@@ -180,10 +226,34 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
 
     def SubmitShares(self, request, context):
         """Accept compute shares from a compute/MPC node."""
-        shares = [proto_to_share(s) for s in request.shares]
+        share_protos = list(request.shares)
+        if not share_protos and request.shares_blob:
+            fmt = (request.shares_blob_format or "").strip().lower()
+            if fmt != "shareproto-len-v1":
+                context.set_details("unsupported shares_blob_format")
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                return inference_pb2.SubmitSharesResponse()
+            try:
+                share_protos = _unpack_share_proto_blob(bytes(request.shares_blob))
+            except Exception as e:
+                context.set_details(f"invalid shares_blob: {e}")
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                return inference_pb2.SubmitSharesResponse()
+
+        shares = [proto_to_share(s) for s in share_protos]
+        sig_validity: list[Optional[bool]] = [None] * len(shares)
+        if self._strict_share_auth and len(shares) >= self._submit_sig_parallel_min:
+            with futures.ThreadPoolExecutor(
+                max_workers=self._submit_sig_parallel_workers
+            ) as executor:
+                sig_validity = list(executor.map(self._verify_share_signature, shares))
         accepted: list[ComputeShare] = []
-        for share in shares:
-            ok, reason = self._validate_share(share, request.submitter_id)
+        for i, share in enumerate(shares):
+            ok, reason = self._validate_share(
+                share,
+                request.submitter_id,
+                signature_ok=sig_validity[i] if i < len(sig_validity) else None,
+            )
             if ok:
                 share.validated = True
                 accepted.append(share)
@@ -205,7 +275,12 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
             chain_tip_height=self.chain.get_tip_height(),
         )
 
-    def _validate_share(self, share: ComputeShare, submitter_id: str) -> tuple[bool, str]:
+    def _validate_share(
+        self,
+        share: ComputeShare,
+        submitter_id: str,
+        signature_ok: Optional[bool] = None,
+    ) -> tuple[bool, str]:
         if not self._strict_share_auth:
             return True, "ok_relaxed"
         if submitter_id and share.node_id != submitter_id:
@@ -219,7 +294,10 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
         now_ms = int(time.time() * 1000)
         if abs(now_ms - int(share.timestamp_ms)) > self._max_clock_skew_ms:
             return False, "stale_timestamp"
-        if not self._verify_share_signature(share):
+        sig_ok = signature_ok
+        if sig_ok is None:
+            sig_ok = self._verify_share_signature(share)
+        if not sig_ok:
             return False, "invalid_signature"
         if share.idempotency_key:
             replay_key = ("idempotency", share.idempotency_key, share.node_id, int(share.step_index))
@@ -300,7 +378,7 @@ class DaemonServicer(inference_pb2_grpc.InferenceNodeServicer):
 
     def _refresh_signer_cache(self, force: bool = False):
         now = time.time()
-        if not force and (now - self._signer_cache_ts) < 15:
+        if not force and (now - self._signer_cache_ts) < self._signer_cache_ttl_s:
             return
         try:
             channel = grpc.insecure_channel(self.registry_address, options=config.GRPC_OPTIONS)

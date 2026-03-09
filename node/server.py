@@ -26,10 +26,12 @@ import os
 import random
 import re
 import signal
+import struct
 import sys
 import time
 import threading
 import uuid
+from collections import deque
 from concurrent import futures
 
 import grpc
@@ -53,16 +55,21 @@ from network.he_output import encrypt_token_artifact
 from network.he_compute import (
     HE_COMPUTE_FORMAT_PAILLIER_V1,
     HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+    HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
     HE_COMPUTE_MODE_OFF,
     build_encrypted_topk_artifact,
 )
 from network.mpc_output import (
-    MPC_OUTPUT_REQUEST_FORMAT_V1,
-    MPC_OUTPUT_RESPONSE_FORMAT_V1,
-    build_output_mpc_request_payload,
-    build_output_mpc_response_payload,
-    parse_output_mpc_request_payload,
+    OUTPUT_2PC_HIDDEN_CODEC_FP16,
+    OUTPUT_2PC_HIDDEN_CODEC_FP32,
+    OUTPUT_2PC_HIDDEN_CODEC_INT8,
+    OUTPUT_2PC_REQUEST_FORMAT_V1,
+    OUTPUT_2PC_REQUEST_FORMAT_V2,
+    OUTPUT_2PC_RESPONSE_FORMAT_V1,
+    OUTPUT_2PC_RESPONSE_FORMAT_V2,
+    build_output_2pc_request_artifact,
+    build_output_2pc_response_artifact,
+    parse_output_2pc_request_artifact,
 )
 from network.he_dispute import (
     sign_report_payload,
@@ -169,6 +176,16 @@ def print(*args, **kwargs):  # type: ignore[override]
 def _simple_log(message: str):
     if _SIMPLE_LOGS_ENABLED:
         print(message)
+
+
+def _pack_share_proto_blob(shares_proto: list[inference_pb2.ShareProto]) -> bytes:
+    buf = bytearray()
+    buf.extend(struct.pack("<I", len(shares_proto)))
+    for sp in shares_proto:
+        raw = sp.SerializeToString()
+        buf.extend(struct.pack("<I", len(raw)))
+        buf.extend(raw)
+    return bytes(buf)
 
 
 def tensor_to_bytes(tensor: torch.Tensor,
@@ -367,11 +384,24 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._daemon_stub = None
         self._daemon_address: str = ""
         self._daemon_registry_addr: str = config.REGISTRY_ADDRESS
-        self._share_buffer: list[ComputeShare] = []
+        self._share_buffer: deque[ComputeShare] = deque()
         self._share_buffer_lock = threading.Lock()
+        self._share_buffer_cv = threading.Condition(self._share_buffer_lock)
         self._require_daemon = (
             node_config.require_daemon if node_config else True
         )
+        # Optimized daemon submit path is always on.
+        self._daemon_submit_mode = "async"
+        self._daemon_fail_closed = bool(self._require_daemon)
+        self._daemon_batch_size = 8
+        self._daemon_batch_max_wait_s = 0.0
+        self._daemon_queue_max = 2048
+        self._daemon_retry_base_s = 0.2
+        self._daemon_retry_max_s = 5.0
+        self._daemon_backoff_s = 0.0
+        self._daemon_submit_use_blob = True
+        self._daemon_submitter_thread = None
+        self._daemon_submit_stop = False
         self._wire_dtype_default = (
             node_config.wire_dtype if node_config else "float32"
         )
@@ -393,6 +423,18 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         self._he_compute_top_p = (
             node_config.he_compute_top_p if node_config else 1.0
         )
+        # Output 2PC optimized transport is always on (binary + fp16 hidden codec).
+        self._output_2pc_request_format = OUTPUT_2PC_REQUEST_FORMAT_V2
+        self._output_2pc_response_format = OUTPUT_2PC_RESPONSE_FORMAT_V2
+        self._output_2pc_hidden_codec = OUTPUT_2PC_HIDDEN_CODEC_FP16
+        # Micro-batched forwarding is always enabled for same-next-hop flows.
+        self._forward_microbatch_ms = 2.0
+        self._forward_microbatch_max = 8
+        self._forward_batch_lock = threading.Lock()
+        self._forward_batch_queues: dict[str, deque] = {}
+        self._forward_batch_cvs: dict[str, threading.Condition] = {}
+        self._forward_batch_threads: dict[str, threading.Thread] = {}
+        self._forward_batch_stop = False
         self._he_full_vocab_sidecar_url = (
             node_config.he_full_vocab_sidecar_url if node_config else ""
         )
@@ -467,6 +509,12 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             t.start()
         elif self._daemon_address:
             print(f"[Node] Connected to chain daemon at {self._daemon_address}")
+        if self._daemon_submit_mode == "async" and self._daemon_submitter_thread is None:
+            self._daemon_submitter_thread = threading.Thread(
+                target=self._daemon_submit_loop,
+                daemon=True,
+            )
+            self._daemon_submitter_thread.start()
 
     def _refresh_daemon_from_registry(self, registry_addr: str) -> bool:
         """Discover the least-loaded daemon and update local stub."""
@@ -497,52 +545,111 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             time.sleep(10)
             if self._refresh_daemon_from_registry(registry_addr):
                 print(f"[Node] Connected to chain daemon at {self._daemon_address}")
-                # Flush buffered shares
-                self._flush_share_buffer()
+                with self._share_buffer_cv:
+                    self._share_buffer_cv.notify_all()
 
-    def _submit_share_to_daemon(self, share: ComputeShare):
-        """Submit a compute share to the chain daemon.
-
-        If the daemon is unreachable, buffer locally and retry later.
-        """
-        req = inference_pb2.SubmitSharesRequest(
-            shares=[share_to_proto(share)],
-            submitter_id=share.node_id,
+    def _build_submit_request(self, shares: list[ComputeShare]):
+        protos = [share_to_proto(s) for s in shares]
+        if self._daemon_submit_use_blob:
+            return inference_pb2.SubmitSharesRequest(
+                submitter_id=shares[0].node_id if shares else "",
+                shares_blob=_pack_share_proto_blob(protos),
+                shares_blob_format="shareproto-len-v1",
+            )
+        return inference_pb2.SubmitSharesRequest(
+            shares=protos,
+            submitter_id=shares[0].node_id if shares else "",
         )
+
+    def _submit_share_batch(
+        self,
+        shares: list[ComputeShare],
+        *,
+        raise_on_error: bool,
+    ) -> bool:
+        if not shares:
+            return True
         if self._daemon_stub is None:
             self._refresh_daemon_from_registry(self._daemon_registry_addr)
         if self._daemon_stub is None:
-            if self._require_daemon:
+            if raise_on_error and self._daemon_fail_closed:
                 raise RuntimeError("Daemon is required but unavailable for share submission.")
-            with self._share_buffer_lock:
-                self._share_buffer.append(share)
-            return
+            return False
 
+        req = self._build_submit_request(shares)
         try:
             resp = self._daemon_stub.SubmitShares(req, timeout=5)
-            if int(getattr(resp, "accepted", 0)) > 0:
-                self._session_prev_share_hash[share.session_id] = share.hash()
-                if getattr(resp, "chain_tip_hash", ""):
-                    self._session_prev_block_hash[share.session_id] = str(resp.chain_tip_hash)
+            accepted = int(getattr(resp, "accepted", 0))
+            if accepted > 0:
+                tip_hash = str(getattr(resp, "chain_tip_hash", "") or "")
+                if tip_hash:
+                    for share in shares:
+                        self._session_prev_block_hash[share.session_id] = tip_hash
+            return accepted > 0
         except grpc.RpcError:
             self._daemon_stub = None
-            self._refresh_daemon_from_registry(self._daemon_registry_addr)
-            # Fast failover path: after refreshing to a new daemon, retry once.
-            if self._daemon_stub is not None:
-                try:
-                    resp = self._daemon_stub.SubmitShares(req, timeout=5)
-                    if int(getattr(resp, "accepted", 0)) > 0:
-                        self._session_prev_share_hash[share.session_id] = share.hash()
-                        if getattr(resp, "chain_tip_hash", ""):
-                            self._session_prev_block_hash[share.session_id] = str(resp.chain_tip_hash)
-                    return
-                except grpc.RpcError:
-                    self._daemon_stub = None
-            if self._require_daemon:
+            if raise_on_error and self._daemon_fail_closed:
                 raise RuntimeError("Daemon became unreachable during share submission.")
-            # Daemon unreachable — buffer locally
-            with self._share_buffer_lock:
+            return False
+
+    def _daemon_submit_loop(self) -> None:
+        while True:
+            with self._share_buffer_cv:
+                if self._daemon_submit_stop:
+                    break
+                if len(self._share_buffer) < self._daemon_batch_size:
+                    if self._daemon_batch_max_wait_s > 0 and len(self._share_buffer) > 0:
+                        self._share_buffer_cv.wait(timeout=self._daemon_batch_max_wait_s)
+                    else:
+                        self._share_buffer_cv.wait(timeout=0.5)
+                    if self._daemon_submit_stop:
+                        break
+                    if len(self._share_buffer) == 0:
+                        continue
+                    if len(self._share_buffer) < self._daemon_batch_size and self._daemon_batch_max_wait_s <= 0:
+                        continue
+                batch: list[ComputeShare] = []
+                while self._share_buffer and len(batch) < self._daemon_batch_size:
+                    batch.append(self._share_buffer.popleft())
+
+            if self._daemon_backoff_s > 0:
+                time.sleep(self._daemon_backoff_s)
+
+            ok = self._submit_share_batch(batch, raise_on_error=False)
+            if ok:
+                self._daemon_backoff_s = 0.0
+                continue
+
+            with self._share_buffer_cv:
+                for s in reversed(batch):
+                    self._share_buffer.appendleft(s)
+                if self._daemon_backoff_s <= 0:
+                    self._daemon_backoff_s = self._daemon_retry_base_s
+                else:
+                    self._daemon_backoff_s = min(
+                        self._daemon_retry_max_s,
+                        self._daemon_backoff_s * 2.0,
+                    )
+                self._refresh_daemon_from_registry(self._daemon_registry_addr)
+
+    def _submit_share_to_daemon(self, share: ComputeShare):
+        """Submit a compute share to the chain daemon."""
+        # Keep local prev-share chain monotonic even in async mode.
+        self._session_prev_share_hash[share.session_id] = share.hash()
+        if self._daemon_submit_mode == "async":
+            with self._share_buffer_cv:
+                if len(self._share_buffer) >= self._daemon_queue_max:
+                    if self._daemon_fail_closed:
+                        raise RuntimeError("Daemon submit queue is full.")
+                    return
                 self._share_buffer.append(share)
+                if (
+                    len(self._share_buffer) >= self._daemon_batch_size
+                    or self._daemon_batch_max_wait_s > 0
+                ):
+                    self._share_buffer_cv.notify_all()
+            return
+        self._submit_share_batch([share], raise_on_error=True)
 
     @staticmethod
     def _daemon_utilization_probe(daemon) -> float:
@@ -631,31 +738,24 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
 
     def _flush_share_buffer(self):
         """Send any buffered shares to the daemon."""
-        with self._share_buffer_lock:
+        with self._share_buffer_cv:
             if not self._share_buffer:
                 return
-            shares = self._share_buffer
-            self._share_buffer = []
+            shares = list(self._share_buffer)
+            self._share_buffer.clear()
 
         if self._daemon_stub is None:
             # Put them back
-            with self._share_buffer_lock:
-                self._share_buffer.extend(shares)
+            with self._share_buffer_cv:
+                self._share_buffer.extendleft(reversed(shares))
             return
 
-        try:
-            protos = [share_to_proto(s) for s in shares]
-            self._daemon_stub.SubmitShares(
-                inference_pb2.SubmitSharesRequest(
-                    shares=protos,
-                    submitter_id=shares[0].node_id if shares else "",
-                ),
-                timeout=10,
-            )
+        ok = self._submit_share_batch(shares, raise_on_error=False)
+        if ok:
             print(f"[Node] Flushed {len(shares)} buffered shares to daemon")
-        except grpc.RpcError:
-            with self._share_buffer_lock:
-                self._share_buffer.extend(shares)
+        else:
+            with self._share_buffer_cv:
+                self._share_buffer.extendleft(reversed(shares))
 
     def _load_manifest(self) -> dict:
         """Load the model manifest."""
@@ -683,6 +783,89 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             channel = create_resilient_channel(address, config.GRPC_OPTIONS)
             self._stubs[address] = inference_pb2_grpc.InferenceNodeStub(channel)
         return self._stubs[address]
+
+    def _get_lm_head_device(self) -> torch.device:
+        if self.runner is None or self.runner.lm_head is None:
+            return getattr(self, "_device", torch.device("cpu"))
+        try:
+            return next(self.runner.lm_head.parameters()).device
+        except Exception:
+            return getattr(self, "_device", torch.device("cpu"))
+
+    def _ensure_forward_batcher(self, address: str) -> None:
+        with self._forward_batch_lock:
+            if address in self._forward_batch_threads:
+                return
+            q: deque = deque()
+            cv = threading.Condition()
+            self._forward_batch_queues[address] = q
+            self._forward_batch_cvs[address] = cv
+            t = threading.Thread(
+                target=self._forward_batch_loop,
+                args=(address,),
+                daemon=True,
+            )
+            self._forward_batch_threads[address] = t
+            t.start()
+
+    def _forward_batch_loop(self, address: str) -> None:
+        cv = self._forward_batch_cvs[address]
+        q = self._forward_batch_queues[address]
+        while True:
+            with cv:
+                while not q and not self._forward_batch_stop:
+                    cv.wait(timeout=0.5)
+                if self._forward_batch_stop:
+                    return
+                first = q.popleft()
+                batch = [first]
+                if self._forward_microbatch_ms > 0:
+                    cv.wait(timeout=self._forward_microbatch_ms / 1000.0)
+                while q and len(batch) < self._forward_microbatch_max:
+                    batch.append(q.popleft())
+            stub = self._get_stub(address)
+            reqs = [item["request"] for item in batch]
+            try:
+                batch_resp = stub.BatchForward(
+                    inference_pb2.BatchForwardRequest(requests=reqs),
+                    timeout=30,
+                )
+                if len(batch_resp.responses) != len(batch):
+                    raise RuntimeError("BatchForward response size mismatch")
+                for item, resp in zip(batch, batch_resp.responses):
+                    item["response"] = resp
+                    item["event"].set()
+            except grpc.RpcError as e:
+                # Fallback for nodes that haven't implemented BatchForward yet.
+                if getattr(e, "code", lambda: None)() == grpc.StatusCode.UNIMPLEMENTED:
+                    for item in batch:
+                        try:
+                            item["response"] = stub.Forward(item["request"])
+                        except Exception as single_exc:  # pragma: no cover - defensive
+                            item["error"] = single_exc
+                        item["event"].set()
+                    continue
+                for item in batch:
+                    item["error"] = e
+                    item["event"].set()
+            except Exception as e:  # pragma: no cover - defensive
+                for item in batch:
+                    item["error"] = e
+                    item["event"].set()
+
+    def _forward_rpc(self, address: str, req: inference_pb2.ForwardRequest) -> inference_pb2.ForwardResponse:
+        if self._forward_microbatch_ms <= 0:
+            return self._get_stub(address).Forward(req)
+        self._ensure_forward_batcher(address)
+        item = {"request": req, "response": None, "error": None, "event": threading.Event()}
+        cv = self._forward_batch_cvs[address]
+        with cv:
+            self._forward_batch_queues[address].append(item)
+            cv.notify_all()
+        item["event"].wait()
+        if item["error"] is not None:
+            raise item["error"]
+        return item["response"]
 
     def _get_discovery(self):
         """Lazy-initialize a registry client for random routing."""
@@ -734,7 +917,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             tensor_shape=make_tensor_shape_signature(list(request.tensor_shape)),
             compressed=bool(request.compressed),
             wire_dtype=str(request.wire_dtype or ""),
-            output_mpc_payload_hash=str(request.output_mpc_payload_hash or ""),
+            output_2pc_artifact_hash=str(request.output_2pc_artifact_hash or ""),
             proof_format=proof_format,
             proof_hash=proof_bytes_hash(proof),
         )
@@ -792,7 +975,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             tensor_shape=make_tensor_shape_signature(list(request.tensor_shape)),
             compressed=bool(request.compressed),
             wire_dtype=str(request.wire_dtype or ""),
-            output_mpc_payload_hash=str(request.output_mpc_payload_hash or ""),
+            output_2pc_artifact_hash=str(request.output_2pc_artifact_hash or ""),
             proof_format=proof_format,
             proof_hash=proof_bytes_hash(proof),
         )
@@ -934,12 +1117,12 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         if he_compute_mode not in (
             HE_COMPUTE_MODE_OFF,
             HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-            HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+            HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
         ):
             he_compute_mode = HE_COMPUTE_MODE_OFF
         if requested_he_mode and requested_he_mode == "server_sample":
             context.set_details(
-                "he_compute_mode=server_sample is retired. Use mpc_nminus1_n."
+                "he_compute_mode=server_sample is retired. Use full_output_2pc."
             )
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             return inference_pb2.ForwardResponse()
@@ -948,15 +1131,15 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             and he_compute_mode == HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE
             and self.has_lm_head
         )
-        he_mpc_nminus1_n = (
+        he_full_output_2pc = (
             bool(request.he_output_enabled)
-            and he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N
+            and he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC
             and self.has_lm_head
         )
         he_disable_plaintext_sampling = (
             bool(request.he_disable_plaintext_sampling)
             or he_decode_client_sample
-            or he_mpc_nminus1_n
+            or he_full_output_2pc
         )
         if self._require_daemon and self._daemon_stub is None:
             context.set_details("Daemon is required but unavailable.")
@@ -1124,12 +1307,16 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 # Last node: return the sampled token
                 is_eos = sampled_token == self._eos_token_id if sampled_token is not None else False
 
-                if request.he_output_enabled and he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N:
+                if request.he_output_enabled and he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC:
                     if not request.he_compute_payload:
                         context.set_details("MPC output mode requires he_compute_payload.")
                         context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                         return inference_pb2.ForwardResponse()
-                    if (request.he_compute_format or "") != MPC_OUTPUT_REQUEST_FORMAT_V1:
+                    req_out_fmt = str(request.he_compute_format or "")
+                    if req_out_fmt not in (
+                        OUTPUT_2PC_REQUEST_FORMAT_V1,
+                        OUTPUT_2PC_REQUEST_FORMAT_V2,
+                    ):
                         context.set_details("Unsupported MPC output request payload format.")
                         context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                         return inference_pb2.ForwardResponse()
@@ -1139,15 +1326,18 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                             he_error="MPC output mode requires LM head on final shard.",
                         )
                     try:
-                        hidden_last_token = parse_output_mpc_request_payload(
-                            payload_bytes=bytes(request.he_compute_payload),
+                        hidden_last_token = parse_output_2pc_request_artifact(
+                            artifact_bytes=bytes(request.he_compute_payload),
                             expected_session_id=session_id,
                             expected_step=int(request.he_step),
                             expected_key_id=request.he_key_id or "",
-                            expected_payload_hash=request.output_mpc_payload_hash or "",
+                            expected_artifact_hash=request.output_2pc_artifact_hash or "",
+                            wire_format=req_out_fmt,
                         )
+                        lm_device = self._get_lm_head_device()
+                        hidden_last_token = hidden_last_token.to(device=lm_device, dtype=torch.float32)
                         logits = self.runner.lm_head(hidden_last_token.view(1, 1, -1))
-                        last_logits = logits[0, -1].detach().cpu()
+                        last_logits = logits[0, -1]
                         top_k = int(request.he_top_k or self._he_compute_top_k or 64)
                         top_k = max(1, min(top_k, int(last_logits.shape[-1])))
                         values, indices = torch.topk(last_logits, k=top_k, dim=-1)
@@ -1167,19 +1357,26 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         filtered = torch.zeros_like(probs)
                         filtered[sorted_idx[keep_mask]] = probs[sorted_idx[keep_mask]]
                         denom = filtered.sum()
-                        if float(denom.item()) <= 0.0:
-                            selected_idx = int(torch.argmax(probs).item())
+                        if float(denom.detach().item()) <= 0.0:
+                            selected_idx = int(torch.argmax(probs).detach().item())
                         else:
                             filtered = filtered / denom
-                            selected_idx = int(torch.multinomial(filtered, num_samples=1).item())
-                        sampled = int(indices[selected_idx].item())
+                            selected_idx = int(
+                                torch.multinomial(filtered, num_samples=1).detach().item()
+                            )
+                        sampled = int(indices[selected_idx].detach().item())
                         sampled_is_eos = bool(sampled == self._eos_token_id)
-                        payload, payload_hash = build_output_mpc_response_payload(
+                        payload, payload_hash = build_output_2pc_response_artifact(
                             token_id=sampled,
                             is_eos=sampled_is_eos,
                             session_id=session_id,
                             step=int(request.he_step),
                             key_id=request.he_key_id or "",
+                            wire_format=(
+                                OUTPUT_2PC_RESPONSE_FORMAT_V2
+                                if req_out_fmt == OUTPUT_2PC_REQUEST_FORMAT_V2
+                                else OUTPUT_2PC_RESPONSE_FORMAT_V1
+                            ),
                         )
                         self._record_success_share(
                             session_id=session_id,
@@ -1188,14 +1385,18 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         return inference_pb2.ForwardResponse(
                             has_token=False,
                             he_compute_payload=payload,
-                            he_compute_format=MPC_OUTPUT_RESPONSE_FORMAT_V1,
+                            he_compute_format=(
+                                OUTPUT_2PC_RESPONSE_FORMAT_V2
+                                if req_out_fmt == OUTPUT_2PC_REQUEST_FORMAT_V2
+                                else OUTPUT_2PC_RESPONSE_FORMAT_V1
+                            ),
                             he_top_k=top_k,
                             he_session_id=session_id,
                             he_step=int(request.he_step),
                             he_key_id=request.he_key_id or "",
-                            output_mpc_op="final_sample",
-                            output_mpc_payload_type="token_sample",
-                            output_mpc_payload_hash=payload_hash,
+                            output_2pc_stage="final_sample",
+                            output_2pc_artifact_type="token_sample",
+                            output_2pc_artifact_hash=payload_hash,
                         )
                     except Exception as e:
                         return inference_pb2.ForwardResponse(
@@ -1406,7 +1607,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     next_request.he_compute_mode = he_compute_mode
                     is_penultimate_to_last = self.shard_index == (self.num_shards - 2)
                     if (
-                        he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N
+                        he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC
                         and is_penultimate_to_last
                     ):
                         if hidden is None:
@@ -1416,17 +1617,19 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                             )
                         try:
                             hidden_last_token = hidden[0, -1].detach().cpu()
-                            compute_payload, payload_hash = build_output_mpc_request_payload(
+                            compute_payload, payload_hash = build_output_2pc_request_artifact(
                                 hidden_last_token=hidden_last_token,
                                 session_id=session_id,
                                 step=int(request.he_step),
                                 key_id=request.he_key_id or "",
+                                wire_format=self._output_2pc_request_format,
+                                quantization_mode=self._output_2pc_hidden_codec,
                             )
                             next_request.he_compute_payload = compute_payload
-                            next_request.he_compute_format = MPC_OUTPUT_REQUEST_FORMAT_V1
-                            next_request.output_mpc_op = "penultimate_share"
-                            next_request.output_mpc_payload_type = "hidden_last_token"
-                            next_request.output_mpc_payload_hash = payload_hash
+                            next_request.he_compute_format = self._output_2pc_request_format
+                            next_request.output_2pc_stage = "penultimate_share"
+                            next_request.output_2pc_artifact_type = "hidden_last_token"
+                            next_request.output_2pc_artifact_hash = payload_hash
                         except Exception as e:
                             return inference_pb2.ForwardResponse(
                                 has_token=False,
@@ -1435,9 +1638,9 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     else:
                         next_request.he_compute_payload = request.he_compute_payload
                         next_request.he_compute_format = request.he_compute_format
-                        next_request.output_mpc_op = request.output_mpc_op
-                        next_request.output_mpc_payload_type = request.output_mpc_payload_type
-                        next_request.output_mpc_payload_hash = request.output_mpc_payload_hash
+                        next_request.output_2pc_stage = request.output_2pc_stage
+                        next_request.output_2pc_artifact_type = request.output_2pc_artifact_type
+                        next_request.output_2pc_artifact_hash = request.output_2pc_artifact_hash
                     next_request.he_top_k = request.he_top_k
                     next_request.he_temperature = request.he_temperature
                     next_request.he_top_p = request.he_top_p
@@ -1446,7 +1649,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         or (
                             he_compute_mode in (
                                 HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-                                HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+                                HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
                             )
                             and is_penultimate_to_last
                         )
@@ -1472,8 +1675,7 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                     self.registration.node_id if self.registration else ""
                 )
 
-                stub = self._get_stub(next_address)
-                response = stub.Forward(next_request)
+                response = self._forward_rpc(next_address, next_request)
 
                 # Encrypt the response before returning it upstream
                 if my_response_key and response.encrypted_response:
@@ -1501,9 +1703,9 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         he_compute_payload=response.he_compute_payload,
                         he_compute_format=response.he_compute_format,
                         he_top_k=response.he_top_k,
-                        output_mpc_op=response.output_mpc_op,
-                        output_mpc_payload_type=response.output_mpc_payload_type,
-                        output_mpc_payload_hash=response.output_mpc_payload_hash,
+                        output_2pc_stage=response.output_2pc_stage,
+                        output_2pc_artifact_type=response.output_2pc_artifact_type,
+                        output_2pc_artifact_hash=response.output_2pc_artifact_hash,
                     )
 
                 forward_ok = True
@@ -1526,6 +1728,12 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                 )
             with self._inference_lock:
                 self._active_inferences -= 1
+
+    def BatchForward(self, request, context):
+        responses = []
+        for req in request.requests:
+            responses.append(self.Forward(req, context))
+        return inference_pb2.BatchForwardResponse(responses=responses)
 
     def Commit(self, request, context):
         """
@@ -1913,6 +2121,19 @@ def serve(shard_index: int, port: int, host: str = "[::]",
 
     def _shutdown(signum, frame):
         print(f"\n[Node] Shutting down...")
+        if hasattr(servicer, "_daemon_submit_stop"):
+            with servicer._share_buffer_cv:
+                servicer._daemon_submit_stop = True
+                servicer._share_buffer_cv.notify_all()
+            try:
+                servicer._flush_share_buffer()
+            except Exception:
+                pass
+        if hasattr(servicer, "_forward_batch_stop"):
+            servicer._forward_batch_stop = True
+            for cv in list(getattr(servicer, "_forward_batch_cvs", {}).values()):
+                with cv:
+                    cv.notify_all()
         registration.stop()
         server.stop(grace=5)
         shutdown_event.set()

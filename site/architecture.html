@@ -7,35 +7,6 @@
   <meta name="description" content="Technical architecture of UNFED AI: model sharding, MPC privacy, onion routing, and the multimodal vision pipeline.">
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="img/logo.svg" type="image/svg+xml">
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-  <script>
-    mermaid.initialize({
-      startOnLoad: true,
-      theme: 'dark',
-      flowchart: {
-        useMaxWidth: false,
-        nodeSpacing: 55,
-        rankSpacing: 65,
-      },
-      sequence: {
-        useMaxWidth: false,
-        actorFontSize: 18,
-        messageFontSize: 16,
-        noteFontSize: 15,
-      },
-      themeVariables: {
-        textColor: '#e6edf3',
-        primaryColor: '#1c2128',
-        primaryTextColor: '#e6edf3',
-        secondaryTextColor: '#e6edf3',
-        tertiaryTextColor: '#e6edf3',
-        lineColor: '#00d4aa',
-        secondaryColor: '#161b22',
-        edgeLabelBackground: '#0d1117',
-        fontSize: '17px',
-      }
-    });
-  </script>
 </head>
 <body>
 
@@ -76,26 +47,8 @@
         <p>A text prompt flows through the network from client to response.</p>
       </div>
 
-      <div class="diagram-wrap diagram-wrap--wide">
-        <div class="mermaid mermaid-large">
-flowchart LR
-  C["Client"]
-  subgraph M["Shard 0 Privacy Layer (MPC Pair)"]
-    A["MPC Node A (entry)"]
-    B["MPC Node B (peer)"]
-    A <--> |"secret shares"| B
-  end
-  subgraph T["Text Compute Pipeline"]
-    S1["Compute Shard 1"]
-    S2["Compute Shard 2..N-1"]
-    SN["Compute Shard N (sampling)"]
-    S1 -->|"activations"| S2 -->|"activations"| SN
-  end
-  C -->|"onion-encrypted request"| A
-  A -->|"attested activations"| S1
-  SN -->|"response tokens"| C
-        </div>
-        <p class="diagram-caption">Text inference path: client request enters the MPC pair (shard 0), traverses compute shards, then output returns to client (plaintext by default, or payload-contract path in <code>mpc_nminus1_n</code> mode).</p>
+      <div class="info-box" style="max-width:900px; margin:0 auto 20px;">
+        <p><strong>Pipeline sequence:</strong> Client request -> input MPC pair (shard 0) -> text shard 1 -> intermediate shards (2..N-2) -> text shard N-1 -> output MPC A/B capability path -> client receives sampled-token artifact in <code>full_output_2pc</code> mode.</p>
       </div>
 
       <div class="info-box">
@@ -121,20 +74,8 @@ flowchart LR
         <p>Transformer models are split layer-by-layer across independent nodes.</p>
       </div>
 
-      <div class="diagram-wrap">
-        <div class="mermaid">
-graph TB
-  subgraph model ["Full Transformer Model"]
-    Embed["Embedding + Layers 0-14"] --> Mid["Layers 15-29"]
-    Mid --> Head["LM Head + Sampling"]
-  end
-  subgraph network ["UNFED Network"]
-    S0["Shard 0 (MPC Pair)"] --> S1["Shard 1 (Compute Node)"]
-  end
-  Embed -.->|"maps to"| S0
-  Mid -.->|"maps to"| S1
-        </div>
-        <p class="diagram-caption">A 30-layer model split into 2 shards, each served by a different operator.</p>
+      <div class="info-box" style="max-width:900px; margin:0 auto 20px;">
+        <p><strong>Example split (30 layers):</strong> shard 0 serves embedding + layers 0-14 (as an MPC pair), shard 1 serves layers 15-29 plus LM head/sampling. Each shard can be run by a different operator.</p>
       </div>
 
       <p style="max-width:800px; margin:0 auto;">
@@ -175,24 +116,9 @@ graph TB
         </div>
       </div>
 
-      <div class="diagram-wrap diagram-wrap--wide" style="margin-top:32px;">
-        <div class="mermaid mermaid-large">
-sequenceDiagram
-  participant C as Client
-  participant A as MPC_Node_A
-  participant B as MPC_Node_B
-  participant S1 as Shard_1
-
-  C->>A: token_ids (encrypted)
-  A->>A: Generate random shares
-  A->>B: share_B
-  A->>A: Compute on share_A
-  B->>B: Compute on share_B
-  B->>A: partial_result_B
-  A->>A: Reconstruct hidden_states
-  A->>S1: hidden_states (activations only)
-        </div>
-        <p class="diagram-caption">MPC protocol: neither Node A nor Node B can reconstruct the original token IDs.</p>
+      <div class="info-box" style="margin-top: 20px;">
+        <p><strong>MPC message flow:</strong> client sends encrypted token IDs to MPC A -> A creates/forwards share B to MPC B -> B returns partial result to A -> A combines secure results and forwards hidden states (not raw tokens) to shard 1.</p>
+        <p><strong>Result:</strong> neither MPC node can reconstruct the original token IDs alone.</p>
       </div>
     </div>
   </section>
@@ -242,16 +168,8 @@ sequenceDiagram
         <p>How image understanding is added without breaking the privacy model.</p>
       </div>
 
-      <div class="diagram-wrap">
-        <div class="mermaid">
-graph LR
-  Img["Image"] --> VS["Vision Shard"]
-  VS -->|"image embeddings"| MPC["MPC Pair (Shard 0)"]
-  Prompt["Text Prompt"] --> MPC
-  MPC -->|"merged activations"| S1["Text Shard 1"]
-  S1 -->|"tokens"| Client["Client"]
-        </div>
-        <p class="diagram-caption">Multimodal pipeline: vision embeddings are merged with text at shard 0, then token generation follows the same output-privacy modes (<code>off</code>, <code>decode_client_sample</code>, <code>mpc_nminus1_n</code>).</p>
+      <div class="info-box" style="max-width:900px; margin:0 auto 20px;">
+        <p><strong>Multimodal path:</strong> image -> vision shard (ViT encoder + connector) -> image embeddings; text prompt -> shard 0 MPC path; both streams merge at shard 0, then continue through the same text shards and output-privacy modes (<code>off</code>, <code>decode_client_sample</code>, <code>full_output_2pc</code>).</p>
       </div>
 
       <p style="max-width:800px; margin:0 auto;">

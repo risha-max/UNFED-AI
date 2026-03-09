@@ -11,10 +11,10 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "proto"))
 
 from network.mpc_output import (
-    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
-    build_output_mpc_request_payload,
-    build_output_mpc_response_payload,
-    parse_output_mpc_response_payload,
+    HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
+    build_output_2pc_request_artifact,
+    build_output_2pc_response_artifact,
+    parse_output_2pc_response_artifact,
 )
 
 try:
@@ -120,10 +120,10 @@ if _RUNTIME_AVAILABLE:
 
 class TestMPCOutputLeakage(unittest.TestCase):
     def test_output_mode_constant_is_expected(self):
-        self.assertEqual(HE_COMPUTE_MODE_MPC_N_MINUS_1_N, "mpc_nminus1_n")
+        self.assertEqual(HE_COMPUTE_MODE_FULL_OUTPUT_2PC, "full_output_2pc")
 
     def test_response_payload_does_not_include_hidden_values(self):
-        payload_bytes, payload_hash = build_output_mpc_response_payload(
+        payload_bytes, payload_hash = build_output_2pc_response_artifact(
             token_id=7,
             is_eos=False,
             session_id="sess-contract-1",
@@ -132,12 +132,12 @@ class TestMPCOutputLeakage(unittest.TestCase):
         )
         decoded = json.loads(payload_bytes.decode("utf-8"))
         self.assertNotIn("hidden", decoded)
-        token_id, is_eos = parse_output_mpc_response_payload(
-            payload_bytes=payload_bytes,
+        token_id, is_eos = parse_output_2pc_response_artifact(
+            artifact_bytes=payload_bytes,
             expected_session_id="sess-contract-1",
             expected_step=0,
             expected_key_id="kid-contract-1",
-            expected_payload_hash=payload_hash,
+            expected_artifact_hash=payload_hash,
         )
         self.assertEqual(token_id, 7)
         self.assertFalse(is_eos)
@@ -147,7 +147,7 @@ class TestMPCOutputLeakage(unittest.TestCase):
         servicer = _build_light_servicer()
         context = _DummyContext()
         hidden = torch.tensor([111.0, 222.0, 333.0, 444.0], dtype=torch.float32)
-        payload, payload_hash = build_output_mpc_request_payload(
+        payload, payload_hash = build_output_2pc_request_artifact(
             hidden_last_token=hidden,
             session_id="sess-leak-1",
             step=0,
@@ -160,11 +160,11 @@ class TestMPCOutputLeakage(unittest.TestCase):
             he_output_enabled=True,
             he_key_id="kid-leak-1",
             he_step=0,
-            he_compute_mode=HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+            he_compute_mode=HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
             he_top_k=2,
             he_compute_payload=payload,
-            he_compute_format="mpc-output-request-v1",
-            output_mpc_payload_hash=payload_hash,
+            he_compute_format="output-2pc-request-v1",
+            output_2pc_artifact_hash=payload_hash,
         )
         resp = servicer.Forward(req, context)
 
@@ -173,15 +173,15 @@ class TestMPCOutputLeakage(unittest.TestCase):
         self.assertEqual(resp.token_id, 0)
         self.assertEqual(bytes(resp.activation_data), b"")
         self.assertTrue(bytes(resp.he_compute_payload))
-        self.assertEqual(resp.he_compute_format, "mpc-output-response-v1")
-        self.assertEqual(resp.output_mpc_payload_type, "token_sample")
+        self.assertEqual(resp.he_compute_format, "output-2pc-response-v1")
+        self.assertEqual(resp.output_2pc_artifact_type, "token_sample")
 
     @unittest.skipUnless(_RUNTIME_AVAILABLE, "grpc runtime unavailable in this environment")
     def test_mpc_response_payload_does_not_echo_hidden_values(self):
         servicer = _build_light_servicer()
         context = _DummyContext()
         hidden = torch.tensor([101.25, 202.5, 303.75, 404.0], dtype=torch.float32)
-        payload, payload_hash = build_output_mpc_request_payload(
+        payload, payload_hash = build_output_2pc_request_artifact(
             hidden_last_token=hidden,
             session_id="sess-leak-2",
             step=1,
@@ -194,10 +194,10 @@ class TestMPCOutputLeakage(unittest.TestCase):
             he_output_enabled=True,
             he_key_id="kid-leak-2",
             he_step=1,
-            he_compute_mode=HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+            he_compute_mode=HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
             he_compute_payload=payload,
-            he_compute_format="mpc-output-request-v1",
-            output_mpc_payload_hash=payload_hash,
+            he_compute_format="output-2pc-request-v1",
+            output_2pc_artifact_hash=payload_hash,
         )
         resp = servicer.Forward(req, context)
 

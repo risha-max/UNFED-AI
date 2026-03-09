@@ -43,19 +43,24 @@ class BeaverTriple:
 
     @staticmethod
     def generate(shape: tuple[int, ...],
-                 dtype: torch.dtype = torch.float32) -> "BeaverTriple":
+                 dtype: torch.dtype = torch.float32,
+                 seed: Optional[int] = None) -> "BeaverTriple":
         """Generate a single Beaver triple (a, b, c = a*b) and split into
         additive shares for two parties."""
-        a = torch.randn(shape, dtype=dtype)
-        b = torch.randn(shape, dtype=dtype)
+        g = None
+        if seed is not None:
+            g = torch.Generator(device="cpu")
+            g.manual_seed(int(seed) & ((1 << 63) - 1))
+        a = torch.randn(shape, dtype=dtype, generator=g)
+        b = torch.randn(shape, dtype=dtype, generator=g)
         c = a * b
 
         # Split into additive shares: x = x_0 + x_1
-        a_0 = torch.randn_like(a)
+        a_0 = torch.randn_like(a, generator=g)
         a_1 = a - a_0
-        b_0 = torch.randn_like(b)
+        b_0 = torch.randn_like(b, generator=g)
         b_1 = b - b_0
-        c_0 = torch.randn_like(c)
+        c_0 = torch.randn_like(c, generator=g)
         c_1 = c - c_0
 
         return BeaverTriple(
@@ -69,6 +74,7 @@ class BeaverTriple:
         b_shape: tuple[int, ...],
         transpose_b: bool = True,
         dtype: torch.dtype = torch.float32,
+        seed: Optional[int] = None,
     ) -> "BeaverTriple":
         """Generate a Beaver triple for matrix multiplication.
 
@@ -79,18 +85,22 @@ class BeaverTriple:
         Shares are stored in BeaverTripleShares where a/b/c have their
         respective shapes (not necessarily identical).
         """
-        a = torch.randn(a_shape, dtype=dtype)
-        b = torch.randn(b_shape, dtype=dtype)
+        g = None
+        if seed is not None:
+            g = torch.Generator(device="cpu")
+            g.manual_seed(int(seed) & ((1 << 63) - 1))
+        a = torch.randn(a_shape, dtype=dtype, generator=g)
+        b = torch.randn(b_shape, dtype=dtype, generator=g)
         if transpose_b:
             c = torch.matmul(a, b.transpose(-2, -1))
         else:
             c = torch.matmul(a, b)
 
-        a_0 = torch.randn_like(a)
+        a_0 = torch.randn_like(a, generator=g)
         a_1 = a - a_0
-        b_0 = torch.randn_like(b)
+        b_0 = torch.randn_like(b, generator=g)
         b_1 = b - b_0
-        c_0 = torch.randn_like(c)
+        c_0 = torch.randn_like(c, generator=g)
         c_1 = c - c_0
 
         return BeaverTriple(

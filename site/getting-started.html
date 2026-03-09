@@ -275,11 +275,11 @@ python -m network.daemon_node \
         <ol>
           <li>Registry</li>
           <li>Daemon</li>
-          <li>MPC Node B, then MPC Node A (when using <code>mpc_nminus1_n</code>)</li>
+          <li>MPC Node B, then MPC Node A (for <code>full_output_2pc</code> and input MPC)</li>
           <li>All required compute shards (and vision shard if multimodal)</li>
           <li>Web UI (optional)</li>
         </ol>
-        <p><strong>Readiness gate:</strong> if your client policy requires MPC (for example <code>UNFED_REQUIRE_MPC=1</code>), model status will stay <code>INCOMPLETE</code> until MPC Node A is healthy and registered.</p>
+        <p><strong>Readiness gate:</strong> if your client policy requires MPC (for example <code>UNFED_REQUIRE_MPC=1</code>), model status stays <code>INCOMPLETE</code> until at least one healthy input MPC pair and one healthy output MPC pair are registered (the same A/B pair can advertise both).</p>
       </div>
       <div class="info-box">
         <p><strong>Reproducibility rule:</strong> in on-chain mode, stake each node wallet before startup and always pass both:</p>
@@ -365,6 +365,7 @@ export UNFED_STAKE_EVM_PRIVATE_KEY_FILE=~/.unfed/mpcb_stake.key
 python -m network.mpc_shard0 \
   --role B --port 50063 \
   --peer localhost:50061 \
+  --registry localhost:50050 \
   --shards-dir shards_smolvlm \
   --eth-address 0xMPCBAddress
 
@@ -482,7 +483,7 @@ python -m scripts.testnet_preflight node \
         <p>
           <strong>Output privacy modes:</strong> use <code>he_compute_mode</code> with
           <code>off</code>, <code>decode_client_sample</code>, or
-          <code>mpc_nminus1_n</code>. The legacy <code>server_sample</code> mode is retired.
+          <code>full_output_2pc</code>. The legacy <code>server_sample</code> mode is retired.
         </p>
       </div>
       <div class="info-box">

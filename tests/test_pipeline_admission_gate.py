@@ -48,5 +48,5 @@ def test_pipeline_rejects_without_mpc_when_required(monkeypatch):
     )
     monkeypatch.setattr(pipeline_mod, "RegistryClient", lambda *_: _FakeDiscoveryNoMpc())
     scheduler = pipeline_mod.PipelineScheduler(max_concurrent=1)
-    with pytest.raises(RuntimeError, match="missing MPC shard-0 entry"):
+    with pytest.raises(RuntimeError, match="missing required MPC pairs"):
         list(scheduler.generate_single("hello"))

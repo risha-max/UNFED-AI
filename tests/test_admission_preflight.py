@@ -3,8 +3,17 @@ from types import SimpleNamespace
 from network.admission import preflight_model_admission
 
 
-def _node(shard_index: int, node_type: str) -> SimpleNamespace:
-    return SimpleNamespace(shard_index=shard_index, node_type=node_type)
+def _node(
+    shard_index: int,
+    node_type: str,
+    *,
+    capability_json: str = "",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        shard_index=shard_index,
+        node_type=node_type,
+        capability_json=capability_json,
+    )
 
 
 class _FakeDiscovery:
@@ -63,7 +72,7 @@ def test_preflight_rejects_multimodal_when_vision_incomplete(monkeypatch):
 
 
 def test_preflight_rejects_missing_daemon_by_default(monkeypatch):
-    monkeypatch.delenv("UNFED_REQUIRE_MPC", raising=False)
+    monkeypatch.setenv("UNFED_REQUIRE_MPC", "0")
     monkeypatch.delenv("UNFED_REQUIRE_DAEMON", raising=False)
     discovery = _FakeDiscovery([_node(0, "mpc"), _node(1, "compute")])
     # Force discovery() with empty model_id to return no daemon.
@@ -75,7 +84,7 @@ def test_preflight_rejects_missing_daemon_by_default(monkeypatch):
 
 def test_preflight_accepts_without_daemon_when_override_disabled(monkeypatch):
     monkeypatch.setenv("UNFED_REQUIRE_DAEMON", "0")
-    monkeypatch.delenv("UNFED_REQUIRE_MPC", raising=False)
+    monkeypatch.setenv("UNFED_REQUIRE_MPC", "0")
     discovery = _FakeDiscovery([_node(0, "mpc"), _node(1, "compute")])
     discovery.discover = lambda model_id: [_node(0, "mpc"), _node(1, "compute")]
     result = preflight_model_admission(discovery, "model-x")

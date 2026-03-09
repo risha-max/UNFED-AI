@@ -8,6 +8,7 @@ Hard-default behavior:
 """
 
 from dataclasses import dataclass
+import json
 import os
 
 
@@ -57,6 +58,8 @@ class AdmissionResult:
     mpc_available: bool
     text: Coverage
     vision: Coverage
+    mpc_input_pair_available: bool = False
+    mpc_output_pair_available: bool = False
     verifier_required: bool = True
     healthy_verifier_count: int = 0
     required_verifier_count: int = 1
@@ -73,6 +76,42 @@ def _coverage_for(nodes: list) -> Coverage:
         covered_shards=len(shard_indexes),
         total_shards=max(shard_indexes) + 1,
     )
+
+
+def _parse_mpc_capability_json(capability_json: str) -> dict:
+    try:
+        parsed = json.loads(capability_json or "{}")
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
+
+
+def _node_has_mpc_capability(node, capability: str) -> bool:
+    data = _parse_mpc_capability_json(getattr(node, "capability_json", ""))
+    caps = data.get("mpc_capabilities")
+    if isinstance(caps, list) and caps:
+        return capability in {str(x).strip().lower() for x in caps}
+    return True
+
+
+def _node_mpc_role(node) -> str:
+    data = _parse_mpc_capability_json(getattr(node, "capability_json", ""))
+    role = str(data.get("mpc_role", "")).strip().upper()
+    return role if role in ("A", "B") else "A"
+
+
+def _has_mpc_pair(nodes: list, capability: str) -> bool:
+    scoped = [
+        n for n in nodes
+        if getattr(n, "node_type", "") == "mpc"
+        and int(getattr(n, "shard_index", -1)) == 0
+        and _node_has_mpc_capability(n, capability)
+    ]
+    has_a = any(_node_mpc_role(n) == "A" for n in scoped)
+    has_b = any(_node_mpc_role(n) == "B" for n in scoped)
+    return has_a and has_b
 
 
 def preflight_model_admission(
@@ -129,7 +168,9 @@ def preflight_model_admission(
 
     text_nodes = [n for n in all_nodes if n.node_type in ("compute", "mpc")]
     vision_nodes = [n for n in all_nodes if n.node_type == "vision"]
-    mpc_available = any(n.node_type == "mpc" and int(n.shard_index) == 0 for n in all_nodes)
+    input_pair_available = _has_mpc_pair(all_nodes, "input")
+    output_pair_available = _has_mpc_pair(all_nodes, "output")
+    mpc_available = input_pair_available and output_pair_available
     text = _coverage_for(text_nodes)
     vision = _coverage_for(vision_nodes)
 
@@ -144,6 +185,8 @@ def preflight_model_admission(
             model_id=selected_model,
             mpc_required=mpc_required,
             mpc_available=mpc_available,
+            mpc_input_pair_available=input_pair_available,
+            mpc_output_pair_available=output_pair_available,
             text=text,
             vision=vision,
             verifier_required=verifier_required,
@@ -155,12 +198,14 @@ def preflight_model_admission(
             ok=False,
             reason="missing_mpc",
             message=(
-                f"Model '{selected_model}' is missing MPC shard-0 entry while "
-                "UNFED_REQUIRE_MPC=1."
+                f"Model '{selected_model}' is missing required MPC pairs "
+                "(need input A/B + output A/B) while UNFED_REQUIRE_MPC=1."
             ),
             model_id=selected_model,
             mpc_required=mpc_required,
             mpc_available=mpc_available,
+            mpc_input_pair_available=input_pair_available,
+            mpc_output_pair_available=output_pair_available,
             text=text,
             vision=vision,
             verifier_required=verifier_required,
@@ -178,6 +223,8 @@ def preflight_model_admission(
             model_id=selected_model,
             mpc_required=mpc_required,
             mpc_available=mpc_available,
+            mpc_input_pair_available=input_pair_available,
+            mpc_output_pair_available=output_pair_available,
             text=text,
             vision=vision,
             verifier_required=verifier_required,
@@ -212,6 +259,8 @@ def preflight_model_admission(
                 model_id=selected_model,
                 mpc_required=mpc_required,
                 mpc_available=mpc_available,
+                mpc_input_pair_available=input_pair_available,
+                mpc_output_pair_available=output_pair_available,
                 text=text,
                 vision=vision,
                 verifier_required=verifier_required,
@@ -246,6 +295,8 @@ def preflight_model_admission(
                 model_id=selected_model,
                 mpc_required=mpc_required,
                 mpc_available=mpc_available,
+                mpc_input_pair_available=input_pair_available,
+                mpc_output_pair_available=output_pair_available,
                 text=text,
                 vision=vision,
                 verifier_required=verifier_required,
@@ -263,6 +314,8 @@ def preflight_model_admission(
         model_id=selected_model,
         mpc_required=mpc_required,
         mpc_available=mpc_available,
+        mpc_input_pair_available=input_pair_available,
+        mpc_output_pair_available=output_pair_available,
         text=text,
         vision=vision,
         verifier_required=verifier_required,

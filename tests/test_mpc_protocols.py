@@ -71,7 +71,7 @@ def _split_shares(x: torch.Tensor):
 
 
 class _CorruptMacExchanger(LocalPeerExchanger):
-    """Test helper that flips one MAC exchange payload."""
+    """Test helper that tampers one packed exchange payload."""
 
     def __init__(self):
         super().__init__()
@@ -81,11 +81,13 @@ class _CorruptMacExchanger(LocalPeerExchanger):
     def exchange(self, session_id: str, op_id: str,
                  my_epsilon: torch.Tensor, my_delta: torch.Tensor):
         peer_eps, peer_del = super().exchange(session_id, op_id, my_epsilon, my_delta)
-        if op_id.endswith("::mac"):
-            with self._lock_corrupt:
-                if not self._corrupted:
-                    self._corrupted = True
-                    return peer_eps + 1.0, peer_del
+        with self._lock_corrupt:
+            if not self._corrupted:
+                self._corrupted = True
+                tampered = peer_del.clone().reshape(-1)
+                if tampered.numel() > 0:
+                    tampered[-1] = tampered[-1] + 1.0
+                return peer_eps, tampered.reshape_as(peer_del)
         return peer_eps, peer_del
 
 

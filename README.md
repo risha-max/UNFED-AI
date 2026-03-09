@@ -293,22 +293,22 @@ python -m node.server \
 Publicly advertised compute nodes now require TLS by default. If a node advertises
 a non-local endpoint and no TLS cert/key is provided, startup fails closed.
 
-### 5. Output privacy mode (`N-1/N` MPC path)
+### 5. Output privacy mode (full output-stage 2PC)
 
-Output privacy now supports a native N-1/N handoff mode without the retired
+Output privacy now supports full output-stage 2PC without the retired
 `server_sample` path:
 
 - `off`: standard plaintext sampling
 - `decode_client_sample`: final node returns encrypted top-k artifact for client-side sampling
-- `mpc_nminus1_n`: penultimate shard sends output payload contract to final shard, final shard returns MPC-output token payload
+- `full_output_2pc`: output stage uses MPC A/B roles for sampled-token artifact return
 
 Set it via env or node config:
 
 ```bash
-export UNFED_HE_COMPUTE_MODE=mpc_nminus1_n
+export UNFED_HE_COMPUTE_MODE=full_output_2pc
 ```
 
-`server_sample` is rejected at runtime and should not be used.
+`server_sample` is rejected at runtime and should not be used. When MPC policy is enabled, model readiness requires one healthy input MPC pair and one healthy output MPC pair (the same A/B pair may advertise both capabilities).
 
 Clients connect with:
 ```bash

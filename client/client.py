@@ -49,13 +49,13 @@ from network.onion import (
 from network.he_output import generate_client_keypair, decrypt_token_artifact
 from network.he_compute import (
     HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+    HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
     HE_COMPUTE_MODE_OFF,
     decrypt_topk_artifact,
     generate_client_compute_keypair,
     sample_from_topk_scores,
 )
-from network.mpc_output import parse_output_mpc_response_payload
+from network.mpc_output import parse_output_2pc_response_artifact
 from network.voting import VotingCoordinator
 from network.racing import RacingCoordinator
 
@@ -150,7 +150,7 @@ class UnfedClient:
         if self.he_compute_mode not in (
             HE_COMPUTE_MODE_OFF,
             HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-            HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+            HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
         ):
             self.he_compute_mode = HE_COMPUTE_MODE_OFF
 
@@ -230,7 +230,6 @@ class UnfedClient:
                                    model_id: str = None) -> int:
         """Return exact input token count for SmolVLM requests."""
         from PIL import Image
-
         vl_model_id = model_id or self.model_id
         processor = _get_processor(vl_model_id)
 
@@ -409,7 +408,7 @@ class UnfedClient:
 
         if self.use_he_output and self.he_compute_mode in (
             HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-            HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+            HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
         ):
             # Keep deterministic plain routing for output-protected modes.
             routing_mode = "plain"
@@ -513,7 +512,7 @@ class UnfedClient:
                 request.he_top_p = float(config.HE_COMPUTE_TOP_P)
                 if self.he_compute_mode in (
                     HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-                    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+                    HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
                 ):
                     request.he_disable_plaintext_sampling = True
 
@@ -572,13 +571,13 @@ class UnfedClient:
                 if response.he_error:
                     raise RuntimeError(response.he_error)
                 if response.he_compute_payload:
-                    if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N:
-                        token_id, is_eos = parse_output_mpc_response_payload(
-                            payload_bytes=bytes(response.he_compute_payload),
+                    if self.he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC:
+                        token_id, is_eos = parse_output_2pc_response_artifact(
+                            artifact_bytes=bytes(response.he_compute_payload),
                             expected_session_id=session_id,
                             expected_step=step,
                             expected_key_id=he_key_id,
-                            expected_payload_hash=response.output_mpc_payload_hash or "",
+                            expected_artifact_hash=response.output_2pc_artifact_hash or "",
                         )
                     else:
                         token_ids, scores = decrypt_topk_artifact(
@@ -598,7 +597,7 @@ class UnfedClient:
                     generated_tokens.append(token_id)
                     token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
                     if verbose:
-                        mode_label = "mpc-output" if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N else "he-compute"
+                        mode_label = "output-2pc" if self.he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC else "he-compute"
                         print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} ({mode_label})")
                     yield token_text
                     if is_eos:
@@ -1223,7 +1222,7 @@ class UnfedClient:
                 request.he_top_p = float(config.HE_COMPUTE_TOP_P)
                 if self.he_compute_mode in (
                     HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-                    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+                    HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
                 ):
                     request.he_disable_plaintext_sampling = True
 
@@ -1239,13 +1238,13 @@ class UnfedClient:
                 if response.he_error:
                     raise RuntimeError(response.he_error)
                 if response.he_compute_payload:
-                    if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N:
-                        token_id, is_eos = parse_output_mpc_response_payload(
-                            payload_bytes=bytes(response.he_compute_payload),
+                    if self.he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC:
+                        token_id, is_eos = parse_output_2pc_response_artifact(
+                            artifact_bytes=bytes(response.he_compute_payload),
                             expected_session_id=session_id,
                             expected_step=step,
                             expected_key_id=he_key_id,
-                            expected_payload_hash=response.output_mpc_payload_hash or "",
+                            expected_artifact_hash=response.output_2pc_artifact_hash or "",
                         )
                     else:
                         token_ids, scores = decrypt_topk_artifact(
@@ -1265,7 +1264,7 @@ class UnfedClient:
                     generated_tokens.append(token_id)
                     token_text = vl_tokenizer.decode([token_id], skip_special_tokens=True)
                     if verbose:
-                        mode_label = "mpc-output" if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N else "he-compute"
+                        mode_label = "output-2pc" if self.he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC else "he-compute"
                         print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} ({mode_label})")
                     yield token_text
                     if is_eos:
@@ -1546,7 +1545,7 @@ class UnfedClient:
                 request.he_top_p = float(config.HE_COMPUTE_TOP_P)
                 if self.he_compute_mode in (
                     HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-                    HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+                    HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
                 ):
                     request.he_disable_plaintext_sampling = True
 
@@ -1562,13 +1561,13 @@ class UnfedClient:
                 if response.he_error:
                     raise RuntimeError(response.he_error)
                 if response.he_compute_payload:
-                    if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N:
-                        token_id, is_eos = parse_output_mpc_response_payload(
-                            payload_bytes=bytes(response.he_compute_payload),
+                    if self.he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC:
+                        token_id, is_eos = parse_output_2pc_response_artifact(
+                            artifact_bytes=bytes(response.he_compute_payload),
                             expected_session_id=session_id,
                             expected_step=step,
                             expected_key_id=he_key_id,
-                            expected_payload_hash=response.output_mpc_payload_hash or "",
+                            expected_artifact_hash=response.output_2pc_artifact_hash or "",
                         )
                     else:
                         token_ids, scores = decrypt_topk_artifact(
@@ -1588,7 +1587,7 @@ class UnfedClient:
                     generated_tokens.append(token_id)
                     token_text = vl_tokenizer.decode([token_id], skip_special_tokens=True)
                     if verbose:
-                        mode_label = "mpc-output" if self.he_compute_mode == HE_COMPUTE_MODE_MPC_N_MINUS_1_N else "he-compute"
+                        mode_label = "output-2pc" if self.he_compute_mode == HE_COMPUTE_MODE_FULL_OUTPUT_2PC else "he-compute"
                         print(f"  [{step_time:.3f}s] Token {step}: {token_id} -> {token_text!r} ({mode_label})")
                     yield token_text
                     if is_eos:

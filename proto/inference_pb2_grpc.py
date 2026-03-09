@@ -41,6 +41,11 @@ class InferenceNodeStub(object):
                 request_serializer=inference__pb2.ForwardRequest.SerializeToString,
                 response_deserializer=inference__pb2.ForwardResponse.FromString,
                 _registered_method=True)
+        self.BatchForward = channel.unary_unary(
+                '/unfed.InferenceNode/BatchForward',
+                request_serializer=inference__pb2.BatchForwardRequest.SerializeToString,
+                response_deserializer=inference__pb2.BatchForwardResponse.FromString,
+                _registered_method=True)
         self.GetShard = channel.unary_stream(
                 '/unfed.InferenceNode/GetShard',
                 request_serializer=inference__pb2.GetShardRequest.SerializeToString,
@@ -92,6 +97,13 @@ class InferenceNodeServicer(object):
         runs through this node's layers, and returns the result.
         For intermediate nodes: returns the activation tensor for the next node.
         For the last node: returns the generated token.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def BatchForward(self, request, context):
+        """Micro-batched forward path for amortizing per-RPC overhead.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -164,6 +176,11 @@ def add_InferenceNodeServicer_to_server(servicer, server):
                     request_deserializer=inference__pb2.ForwardRequest.FromString,
                     response_serializer=inference__pb2.ForwardResponse.SerializeToString,
             ),
+            'BatchForward': grpc.unary_unary_rpc_method_handler(
+                    servicer.BatchForward,
+                    request_deserializer=inference__pb2.BatchForwardRequest.FromString,
+                    response_serializer=inference__pb2.BatchForwardResponse.SerializeToString,
+            ),
             'GetShard': grpc.unary_stream_rpc_method_handler(
                     servicer.GetShard,
                     request_deserializer=inference__pb2.GetShardRequest.FromString,
@@ -233,6 +250,33 @@ class InferenceNode(object):
             '/unfed.InferenceNode/Forward',
             inference__pb2.ForwardRequest.SerializeToString,
             inference__pb2.ForwardResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BatchForward(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.InferenceNode/BatchForward',
+            inference__pb2.BatchForwardRequest.SerializeToString,
+            inference__pb2.BatchForwardResponse.FromString,
             options,
             channel_credentials,
             insecure,

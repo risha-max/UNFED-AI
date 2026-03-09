@@ -18,7 +18,7 @@ from phe import paillier
 
 HE_COMPUTE_MODE_OFF = "off"
 HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE = "decode_client_sample"
-HE_COMPUTE_MODE_MPC_N_MINUS_1_N = "mpc_nminus1_n"
+HE_COMPUTE_MODE_FULL_OUTPUT_2PC = "full_output_2pc"
 HE_COMPUTE_FORMAT_PAILLIER_V1 = "paillier-topk-v1"
 HE_COMPUTE_FORMAT_PAILLIER_HIDDEN_V1 = "paillier-hidden-v1"
 
@@ -28,10 +28,11 @@ def get_he_compute_mode() -> str:
     if mode in (
         HE_COMPUTE_MODE_OFF,
         HE_COMPUTE_MODE_DECODE_CLIENT_SAMPLE,
-        HE_COMPUTE_MODE_MPC_N_MINUS_1_N,
+        HE_COMPUTE_MODE_FULL_OUTPUT_2PC,
     ):
         return mode
     return HE_COMPUTE_MODE_OFF
+
 
 
 def generate_client_compute_keypair() -> tuple[bytes, bytes]:

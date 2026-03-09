@@ -7,8 +7,6 @@
   <meta name="description" content="UNFED AI economic model: per-token pricing, on-chain staking, slashing, reward schemes, and settlement flows.">
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="img/logo.svg" type="image/svg+xml">
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-  <script>mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { primaryColor: '#1c2128', primaryTextColor: '#e6edf3', lineColor: '#00d4aa', secondaryColor: '#161b22' } });</script>
 </head>
 <body>
 
@@ -97,16 +95,8 @@
         <p>From client payment to node payout, tracked on-chain.</p>
       </div>
 
-      <div class="diagram-wrap">
-        <div class="mermaid">
-graph LR
-  Client["Client"] -->|"deposit"| Escrow["UnfedEscrow.sol"]
-  Escrow -->|"locked"| Pool["Settlement Pool"]
-  Pool -->|"settlement"| Nodes["Node Payouts"]
-  Nodes -->|"proportional"| N1["Node A (60% shares)"]
-  Nodes -->|"proportional"| N2["Node B (40% shares)"]
-        </div>
-        <p class="diagram-caption">Revenue flows from client deposits through escrow to proportional node payouts.</p>
+      <div class="info-box" style="max-width:900px; margin:0 auto 20px;">
+        <p><strong>Revenue flow:</strong> client deposits into <code>UnfedEscrow.sol</code> -> funds remain locked through usage accounting -> settlement window computes total revenue -> payouts are distributed to nodes proportional to weighted compute shares.</p>
       </div>
 
       <div class="steps">

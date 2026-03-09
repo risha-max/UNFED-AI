@@ -187,13 +187,13 @@ python -m node.server \
         <p>
           A pair of nodes that replaces shard 0 with privacy-preserving computation.
           Token IDs are secret-shared between Node A (entry point) and Node B (peer).
-          Neither can reconstruct the original text. Node A registers with the registry;
-          Node B runs as a silent peer.
+          Neither can reconstruct the original text. Both A and B now register and can
+          advertise MPC capabilities for input and output-stage 2PC roles.
         </p>
         <div class="meta">
           <div class="meta-item"><strong>GPU:</strong> Required (both nodes)</div>
           <div class="meta-item"><strong>Weights:</strong> Shard 0 file (both nodes)</div>
-          <div class="meta-item"><strong>Stake:</strong> Node A only</div>
+          <div class="meta-item"><strong>Stake:</strong> Both A and B (on-chain mode)</div>
           <div class="meta-item"><strong>Earns:</strong> 1.0 share weight (split between A and B)</div>
         </div>
         <span class="code-label">Start Node B (peer) first</span>

@@ -34,6 +34,8 @@ import torch
 
 from network.mpc_beaver import BeaverTriple, BeaverTripleShares
 
+_MPC_MAC_FLOAT32_LEN = 32
+
 
 @dataclass
 class MpcDncConfig:
@@ -248,11 +250,11 @@ def _exchange_with_mac(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Exchange `(epsilon, delta)` and verify payload integrity via MAC digest.
-    """
-    peer_epsilon, peer_delta = exchanger.exchange(
-        session_id, op_id, my_epsilon, my_delta
-    )
 
+    Optimization:
+    - Piggyback MAC in the same RPC exchange by appending MAC floats to delta.
+      This removes the second `::mac` round-trip while preserving integrity checks.
+    """
     my_mac = _mac_digest_tensor(
         session_id=session_id,
         op_id=op_id,
@@ -260,9 +262,21 @@ def _exchange_with_mac(
         delta=my_delta,
         direction="open",
     )
-    peer_mac, _ = exchanger.exchange(
-        session_id, f"{op_id}::mac", my_mac, torch.zeros_like(my_mac)
+    flat_delta = my_delta.reshape(-1)
+    packed_delta = torch.cat((flat_delta, my_mac), dim=0).reshape(-1)
+    peer_epsilon, peer_packed_delta = exchanger.exchange(
+        session_id, op_id, my_epsilon, packed_delta
     )
+
+    expected_packed_len = flat_delta.numel() + _MPC_MAC_FLOAT32_LEN
+    if peer_packed_delta.numel() != expected_packed_len:
+        raise RuntimeError(
+            f"MPC packed delta length mismatch for op_id={op_id}: "
+            f"got={peer_packed_delta.numel()} expected={expected_packed_len}"
+        )
+    peer_flat = peer_packed_delta.reshape(-1)
+    peer_delta = peer_flat[: flat_delta.numel()].reshape_as(my_delta)
+    peer_mac = peer_flat[flat_delta.numel() :].reshape(_MPC_MAC_FLOAT32_LEN)
     expected_peer_mac = _mac_digest_tensor(
         session_id=session_id,
         op_id=op_id,
@@ -950,12 +964,11 @@ def secure_silu(x_share: torch.Tensor,
     than the previous degree-3 approximation (~1e-2 error).
 
     Cost: 5 secure multiplications (x^2, x^3, x^4, x^5, x*sigmoid)
-    = 5 round-trips.
 
     Returns party's share of SiLU(x).
     """
-    # Minimax coefficients for sigmoid over [-6, 6]
-    # Fitted via Remez algorithm (tools/fit_polynomials.py)
+    # Coefficients for sigmoid approximation over [-6, 6].
+    # Keep only the accurate degree-5 path to preserve generation quality.
     c1 = 0.21570
     c3 = -0.00761
     c5 = 0.00011219
@@ -1046,6 +1059,7 @@ def allocate_layer0_triples(
     intermediate_size: int,
     seq_len: int,
     batch: int = 1,
+    seed: Optional[int] = None,
 ) -> dict[str, BeaverTriple]:
     """
     Generate all Beaver triples needed for one layer 0 MPC forward pass.
@@ -1065,16 +1079,24 @@ def allocate_layer0_triples(
     mlp = (batch, seq_len, intermediate_size)
     scalar_pos = (batch, seq_len, 1)
 
+    def _seed_for(name: str) -> Optional[int]:
+        if seed is None:
+            return None
+        digest = hashlib.sha256(f"{int(seed)}:{name}".encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "little", signed=False)
+
     def add(name: str, shape: tuple):
-        triples[name] = BeaverTriple.generate(shape)
-        triples[f"{name}_sac"] = BeaverTriple.generate(shape)
+        triples[name] = BeaverTriple.generate(shape, seed=_seed_for(name))
+        triples[f"{name}_sac"] = BeaverTriple.generate(
+            shape, seed=_seed_for(f"{name}_sac")
+        )
 
     def add_matmul(name: str, a_shape: tuple, b_shape: tuple,
                    transpose_b: bool = True):
         triples[name] = BeaverTriple.generate_matmul(
-            a_shape, b_shape, transpose_b=transpose_b)
+            a_shape, b_shape, transpose_b=transpose_b, seed=_seed_for(name))
         triples[f"{name}_sac"] = BeaverTriple.generate_matmul(
-            a_shape, b_shape, transpose_b=transpose_b)
+            a_shape, b_shape, transpose_b=transpose_b, seed=_seed_for(f"{name}_sac"))
 
     # --- Input RMSNorm (variance revealed, only x^2 triple needed) ---
     add("rmsnorm_in_sq", hs)

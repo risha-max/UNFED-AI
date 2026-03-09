@@ -7,35 +7,6 @@
   <meta name="description" content="UNFED AI protocol: P2Pool share chain, verification tickets, fraud proofs, on-chain settlement finalization, and gossip discovery.">
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="img/logo.svg" type="image/svg+xml">
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-  <script>
-    mermaid.initialize({
-      startOnLoad: true,
-      theme: 'dark',
-      flowchart: {
-        useMaxWidth: false,
-        nodeSpacing: 55,
-        rankSpacing: 65,
-      },
-      sequence: {
-        useMaxWidth: false,
-        actorFontSize: 18,
-        messageFontSize: 16,
-        noteFontSize: 15,
-      },
-      themeVariables: {
-        textColor: '#e6edf3',
-        primaryColor: '#1c2128',
-        primaryTextColor: '#e6edf3',
-        secondaryTextColor: '#e6edf3',
-        tertiaryTextColor: '#e6edf3',
-        lineColor: '#00d4aa',
-        secondaryColor: '#161b22',
-        edgeLabelBackground: '#0d1117',
-        fontSize: '17px',
-      }
-    });
-  </script>
 </head>
 <body>
 
@@ -108,18 +79,8 @@
         </div>
       </div>
 
-      <div class="diagram-wrap diagram-wrap--wide" style="margin-top: 32px;">
-        <div class="mermaid mermaid-large">
-graph LR
-  B1["Block N-2"] --> B2["Block N-1"] --> B3["Block N (tip)"]
-  B3 --> B4["Block N+1 (pending)"]
-  subgraph B3_detail ["Block N"]
-    S1["Share: Node A | shard 0 | w=1.0"]
-    S2["Share: Node B | shard 1 | w=1.0"]
-    S3["Share: Node C | shard 1 | w=1.0"]
-  end
-        </div>
-        <p class="diagram-caption">Share chain blocks contain compute shares from all active nodes.</p>
+      <div class="info-box" style="margin-top: 24px;">
+        <p><strong>Share-chain progression:</strong> blocks link by parent hash (N-2 -> N-1 -> N tip -> N+1 pending), and each tip block aggregates compute-share records from active nodes (node ID, shard index, token count, weight, timestamp).</p>
       </div>
     </div>
   </section>
@@ -187,25 +148,11 @@ graph LR
     <div class="container">
       <div class="section-header">
         <h2>Output <span class="accent">Privacy</span></h2>
-        <p>N-1/N MPC output handoff replaces the retired server-side sidecar path.</p>
+        <p>Full output-stage 2PC replaces the retired server-side sidecar path.</p>
       </div>
 
-      <div class="diagram-wrap diagram-wrap--wide">
-        <div class="mermaid mermaid-large">
-flowchart LR
-  C["Client"]
-  N1["Penultimate Shard (N-1)"]
-  N["Final Shard (N)"]
-  P1["MPC Output Payload<br/>request: session/step/key/hash"]
-  P2["MPC Output Payload<br/>response: token/sample/hash"]
-
-  C -->|"ForwardRequest (he_compute_mode=mpc_nminus1_n)"| N1
-  N1 -->|"he_compute_payload + output_mpc_* metadata"| N
-  N -->|"sampled-token payload contract"| C
-  N1 --> P1
-  N --> P2
-        </div>
-        <p class="diagram-caption">Output privacy contract: N-1 emits payload metadata, N validates bindings and returns sampled-token payload metadata.</p>
+      <div class="info-box" style="max-width:900px; margin:0 auto;">
+        <p><strong>Output privacy path:</strong> penultimate compute shard (N-1) hands off to output MPC A/B with bound output-2PC metadata; MPC A/B return a sampled-token artifact to the client with session/step/key/hash binding for replay/substitution resistance.</p>
       </div>
 
       <div class="split" style="margin-top: 32px;">
@@ -214,7 +161,7 @@ flowchart LR
           <ul>
             <li><code>off</code>: plaintext token path</li>
             <li><code>decode_client_sample</code>: encrypted top-k for client sampling</li>
-            <li><code>mpc_nminus1_n</code>: N-1/N payload-contract path</li>
+            <li><code>full_output_2pc</code>: output MPC A/B artifact path</li>
             <li><code>server_sample</code> is retired and rejected at runtime</li>
             <li>Applies to both text-only and multimodal token generation stages</li>
           </ul>
@@ -234,7 +181,7 @@ python -m pytest tests/test_mpc_output_adversarial.py \
       <div class="info-box" style="margin-top: 20px;">
         <p>
           <strong>Vision MPC note:</strong> current vision privacy includes MPC handling for
-          image-side share processing and text-stage output privacy contracts. Full parity
+          image-side share processing and text-stage output privacy controls. Full parity
           coverage across all vision internals remains an active hardening area.
         </p>
       </div>
@@ -289,21 +236,8 @@ python -m pytest tests/test_mpc_output_adversarial.py \
         <p>How the verifier detects and reports cheating.</p>
       </div>
 
-      <div class="diagram-wrap diagram-wrap--wide">
-        <div class="mermaid mermaid-large">
-sequenceDiagram
-  participant N as Compute_Node
-  participant R as Registry
-
-  N->>R: SubmitHESuspicionReport(report)
-  R->>R: Validate signature + bindings
-  alt Anomaly confirmed
-    R->>R: Apply slashing policy
-  else No anomaly
-    R->>R: Record report only
-  end
-        </div>
-        <p class="diagram-caption">Registry-native adjudication lifecycle for suspicious outputs.</p>
+      <div class="info-box" style="max-width:900px; margin:0 auto;">
+        <p><strong>Fraud-proof lifecycle:</strong> compute node submits a signed suspicion report -> registry validates signatures and evidence bindings -> confirmed anomalies trigger slashing policy; non-confirmed reports are retained for audit history only.</p>
       </div>
 
       <div class="split" style="margin-top: 32px;">

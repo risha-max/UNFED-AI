@@ -173,6 +173,42 @@ class NodeRecord:
         )
 
 
+def _parse_mpc_capability_json(capability_json: str) -> dict:
+    try:
+        parsed = json.loads(capability_json or "{}")
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
+
+
+def _node_has_mpc_capability(record: NodeRecord, capability: str) -> bool:
+    data = _parse_mpc_capability_json(record.capability_json)
+    caps = data.get("mpc_capabilities")
+    if isinstance(caps, list) and caps:
+        return capability in {str(x).strip().lower() for x in caps}
+    return True
+
+
+def _node_mpc_role(record: NodeRecord) -> str:
+    data = _parse_mpc_capability_json(record.capability_json)
+    role = str(data.get("mpc_role", "")).strip().upper()
+    return role if role in ("A", "B") else "A"
+
+
+def _has_mpc_pair(records: list[NodeRecord], capability: str) -> bool:
+    scoped = [
+        r for r in records
+        if r.node_type == "mpc"
+        and int(r.shard_index) == 0
+        and _node_has_mpc_capability(r, capability)
+    ]
+    has_a = any(_node_mpc_role(r) == "A" for r in scoped)
+    has_b = any(_node_mpc_role(r) == "B" for r in scoped)
+    return has_a and has_b
+
+
 class VerifierRecord:
     """In-memory record of a registered verifier node."""
 
@@ -1596,9 +1632,9 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             max_shard = max(n.shard_index for n in mnodes)
             total_shards = max_shard + 1
             covered = len(shard_set)
-            mpc_available = any(
-                n.node_type == "mpc" and n.shard_index == 0 for n in mnodes
-            )
+            mpc_input_pair_available = _has_mpc_pair(mnodes, "input")
+            mpc_output_pair_available = _has_mpc_pair(mnodes, "output")
+            mpc_available = mpc_input_pair_available and mpc_output_pair_available
             can_serve = (covered == total_shards) and (
                 (not mpc_required) or mpc_available
             )
@@ -1674,12 +1710,18 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         else:
             overall = "healthy"
 
+        mpc_required = resolve_mpc_required_flag()
+        mpc_input_pair_available = _has_mpc_pair(nodes, "input")
+        mpc_output_pair_available = _has_mpc_pair(nodes, "output")
+        mpc_available = mpc_input_pair_available and mpc_output_pair_available
+        can_serve = all_covered and ((not mpc_required) or mpc_available)
+
         return registry_pb2.PoolHealthResponse(
             model_id=request.model_id,
             total_shards=total_shards,
             shards=shard_healths,
             overall_status=overall,
-            can_serve=all_covered,
+            can_serve=can_serve,
         )
 
     def SubmitHESuspicionReport(self, request, context):

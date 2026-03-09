@@ -37,6 +37,31 @@ from network.share_auth import (
 from network.secret_loader import load_secret_from_env
 
 
+def _parse_mpc_capability_json(capability_json: str) -> dict:
+    try:
+        parsed = json.loads(capability_json or "{}")
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
+
+
+def _node_has_mpc_capability(node, capability: str) -> bool:
+    data = _parse_mpc_capability_json(getattr(node, "capability_json", ""))
+    caps = data.get("mpc_capabilities")
+    if isinstance(caps, list) and caps:
+        return capability in {str(x).strip().lower() for x in caps}
+    # Backward compatibility: legacy MPC entries are treated as both.
+    return True
+
+
+def _node_mpc_role(node) -> str:
+    data = _parse_mpc_capability_json(getattr(node, "capability_json", ""))
+    role = str(data.get("mpc_role", "")).strip().upper()
+    return role if role in ("A", "B") else "A"
+
+
 class RegistryClient:
     """Client for the registry service."""
 
@@ -146,10 +171,15 @@ class RegistryClient:
         return [n for n in all_nodes
                 if n.node_type not in ("vision", "mpc", "daemon", "he_sidecar", "verifier")]
 
-    def discover_mpc(self, model_id: str = "") -> list:
+    def discover_mpc(self, model_id: str = "", capability: str = "input") -> list:
         """Discover MPC entry nodes (role A) for shard 0."""
         all_nodes = self.discover(model_id)
-        return [n for n in all_nodes if n.node_type == "mpc"]
+        return [
+            n for n in all_nodes
+            if n.node_type == "mpc"
+            and _node_mpc_role(n) == "A"
+            and _node_has_mpc_capability(n, capability)
+        ]
 
     def discover_vision(self, model_id: str = "") -> list:
         """Discover vision nodes for a multimodal model."""
@@ -202,9 +232,10 @@ class RegistryClient:
         shard 0) so that circuits work when shard 0 is MPC-only.
         """
         nodes = self.discover_compute(model_id)
-        # Also include MPC nodes — they serve as shard 0 entry points
-        mpc_nodes = self.discover_mpc(model_id)
-        all_nodes = nodes + mpc_nodes
+        # Fundamental routing invariant: when input MPC entry nodes exist,
+        # shard 0 must be routed through MPC (role A) instead of plain compute.
+        mpc_nodes = self.discover_mpc(model_id, capability="input")
+        all_nodes = list(nodes) + list(mpc_nodes)
         if not all_nodes:
             print("[Discovery] No compute nodes found for model")
             return None
@@ -213,6 +244,9 @@ class RegistryClient:
         shard_map: dict[int, list] = {}
         for node in all_nodes:
             shard_map.setdefault(node.shard_index, []).append(node)
+
+        if mpc_nodes:
+            shard_map[0] = list(mpc_nodes)
 
         # Check full coverage
         max_shard = max(shard_map.keys())
@@ -326,7 +360,7 @@ class RegistryClient:
         If no MPC nodes are available, returns None (caller should fall back
         to regular racing).
         """
-        mpc_nodes = self.discover_mpc(model_id)
+        mpc_nodes = self.discover_mpc(model_id, capability="input")
         if not mpc_nodes:
             return None
 
@@ -483,10 +517,15 @@ class RegistryPool:
         return [n for n in nodes
                 if n.node_type not in ("vision", "mpc", "daemon", "he_sidecar", "verifier")]
 
-    def discover_mpc(self, model_id: str = "") -> list:
+    def discover_mpc(self, model_id: str = "", capability: str = "input") -> list:
         """Discover MPC entry nodes."""
         nodes = self.discover(model_id)
-        return [n for n in nodes if n.node_type == "mpc"]
+        return [
+            n for n in nodes
+            if n.node_type == "mpc"
+            and _node_mpc_role(n) == "A"
+            and _node_has_mpc_capability(n, capability)
+        ]
 
     def discover_vision(self, model_id: str = "") -> list:
         """Discover vision nodes."""
