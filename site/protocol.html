@@ -281,6 +281,16 @@ python -m pytest tests/test_mpc_output_adversarial.py \
             The registry only accepts windows with validated shares and required
             audits, then computes payout splits for that settlement.
           </p>
+          <p>
+            Racing winners are reported to the registry and signed as coordinator
+            receipts. During settlement, winner nodes get a bounded share-weight
+            bonus while all other validated shares remain payable.
+          </p>
+          <p>
+            Winner reports are submitted in batches to reduce control-plane overhead
+            under high token rates, while preserving per-hop receipt signing and
+            replay-safe idempotency semantics.
+          </p>
         </div>
 
         <div class="flow-item">
@@ -300,7 +310,7 @@ python -m pytest tests/test_mpc_output_adversarial.py \
             After the challenge window expires, the registry finalizes using
             <code>finalizeSettlement(hash)</code> when verifier/daemon safety gates are
             healthy. Rewards are allocated from measured token usage according to
-            weighted shares, and become claimable from escrow.
+            weighted shares (including bounded winner bonuses), and become claimable from escrow.
           </p>
         </div>
       </div>

@@ -1529,6 +1529,10 @@ class MPCNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
         seq_lens = [1, 8, 16, 32]
         target = 1
         batch = 1
+        required_attrs = ("hidden_size", "num_heads", "head_dim", "intermediate_size")
+        if not all(hasattr(self.mpc, attr) for attr in required_attrs):
+            print("[MPC-A] Triple cache prewarm skipped: missing MPC shape metadata")
+            return
         start = time.perf_counter()
         self._layer0_triple_cache.prewarm(
             hidden_size=self.mpc.hidden_size,

@@ -45,7 +45,12 @@ from network.he_dispute import (
     is_anomaly_reason,
     verify_report_signature,
 )
-from network.share_auth import registration_pop_payload, verify_signature
+from network.share_auth import (
+    generate_signing_keypair,
+    registration_pop_payload,
+    sign_bytes,
+    verify_signature,
+)
 from network.share_auth import (
     registration_stake_auth_payload,
     heartbeat_auth_payload,
@@ -124,8 +129,39 @@ def _simple_log(message: str):
         print(message)
 
 
+def _winner_receipt_payload_bytes(
+    *,
+    model_id: str,
+    session_id: str,
+    shard_index: int,
+    step_index: int,
+    winner_node_id: str,
+    winner_address: str,
+    winner_response_hash: str,
+    timestamp_ms: int,
+    nonce: str,
+) -> bytes:
+    return (
+        f"unfed-race-winner|{model_id}|{session_id}|{int(shard_index)}|"
+        f"{int(step_index)}|{winner_node_id}|{winner_address}|"
+        f"{winner_response_hash}|{int(timestamp_ms)}|{nonce}"
+    ).encode("utf-8")
+
+
 def _is_eth_address(value: str) -> bool:
     return isinstance(value, str) and bool(_ETH_ADDRESS_RE.fullmatch(value))
+
+
+def _split_validation_messages(messages: list[str]) -> tuple[list[str], list[str]]:
+    """Split validation output into hard errors and warnings."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    for msg in messages:
+        if str(msg).startswith("WARNING:"):
+            warnings.append(msg)
+        else:
+            errors.append(msg)
+    return errors, warnings
 
 
 class NodeRecord:
@@ -324,6 +360,13 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             name="default")
         self._cluster_config.ensure_id()
         self._start_time = time.time()
+        self._registry_grpc_max_workers = 10
+        self._registry_node_timeout_seconds = max(1, int(config.NODE_TIMEOUT_SECONDS))
+        self._registry_cleanup_interval_seconds = 10.0
+        self._registry_gossip_interval_seconds = 60.0
+        self._registry_peer_exchange_timeout_seconds = 10.0
+        self._registry_daemon_poll_timeout_seconds = 3.0
+        self._apply_runtime_tuning_from_cluster_config()
 
         # --- Known peer registries (endpoint -> PeerInfo-like dict) ---
         self._known_peers: dict[str, dict] = {}
@@ -369,6 +412,24 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._last_verifier_payout_share: dict[str, float] = {}
         self._share_window_audit_lock = threading.Lock()
         self._share_window_audits: list[dict] = []
+        self._race_receipt_lock = threading.Lock()
+        self._race_receipts_by_key: dict[str, dict] = {}
+        self._race_receipts: list[dict] = []
+        self._winner_bonus_per_report = max(
+            0.0, float(getattr(self._cluster_config, "winner_bonus_per_report", 0.25))
+        )
+        self._winner_bonus_cap_ratio = min(
+            1.0,
+            max(0.0, float(getattr(self._cluster_config, "winner_bonus_cap_ratio", 0.5))),
+        )
+        self._winner_receipt_store_path = os.path.expanduser(
+            str(getattr(self._cluster_config, "winner_receipt_store_path", "~/.unfed/registry_winner_receipts.jsonl"))
+        )
+        self._winner_receipt_store_max_entries = max(
+            1000,
+            int(getattr(self._cluster_config, "winner_receipt_store_max_entries", 200000) or 200000),
+        )
+        self._winner_receipt_private_key, self._winner_receipt_public_key = generate_signing_keypair()
 
         # Model manifests (model_id -> manifest JSON string)
         self._manifests: dict[str, str] = {}
@@ -451,6 +512,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             target=self._gossip_loop, daemon=True)
         self._gossip_thread.start()
 
+        self._load_winner_receipts_from_store()
+
         # --- Auto-assignment state ---
         self._mpc_waiting_queue: list[dict] = []  # nodes waiting for MPC partner
         self._assignment_history: dict[str, dict] = {}  # node_id -> assignment
@@ -471,10 +534,45 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._stake_eligibility_cache: dict[str, tuple[bool, float]] = {}
         self._auth_lock = threading.Lock()
 
+    def _apply_runtime_tuning_from_cluster_config(self):
+        """Refresh runtime tunables derived from cluster config."""
+        self._registry_grpc_max_workers = max(
+            1, int(getattr(self._cluster_config, "registry_grpc_max_workers", 10))
+        )
+        self._registry_node_timeout_seconds = max(
+            1, int(getattr(self._cluster_config, "registry_node_timeout_seconds", config.NODE_TIMEOUT_SECONDS))
+        )
+        self._registry_cleanup_interval_seconds = max(
+            1.0, float(getattr(self._cluster_config, "registry_cleanup_interval_seconds", 10.0))
+        )
+        self._registry_gossip_interval_seconds = max(
+            1.0, float(getattr(self._cluster_config, "registry_gossip_interval_seconds", 60.0))
+        )
+        self._registry_peer_exchange_timeout_seconds = max(
+            1.0, float(getattr(self._cluster_config, "registry_peer_exchange_timeout_seconds", 10.0))
+        )
+        self._registry_daemon_poll_timeout_seconds = max(
+            1.0, float(getattr(self._cluster_config, "registry_daemon_poll_timeout_seconds", 3.0))
+        )
+        self._winner_bonus_per_report = max(
+            0.0, float(getattr(self._cluster_config, "winner_bonus_per_report", self._winner_bonus_per_report))
+        )
+        self._winner_bonus_cap_ratio = min(
+            1.0,
+            max(0.0, float(getattr(self._cluster_config, "winner_bonus_cap_ratio", self._winner_bonus_cap_ratio))),
+        )
+        self._winner_receipt_store_path = os.path.expanduser(
+            str(getattr(self._cluster_config, "winner_receipt_store_path", self._winner_receipt_store_path))
+        )
+        self._winner_receipt_store_max_entries = max(
+            1000,
+            int(getattr(self._cluster_config, "winner_receipt_store_max_entries", self._winner_receipt_store_max_entries) or self._winner_receipt_store_max_entries),
+        )
+
     def _cleanup_loop(self):
         """Periodically remove nodes that haven't sent a heartbeat."""
         while True:
-            time.sleep(config.HEARTBEAT_INTERVAL_SECONDS)
+            time.sleep(self._registry_cleanup_interval_seconds)
             self._remove_stale_nodes()
 
     def _timestamp_is_fresh(self, timestamp_ms: int) -> bool:
@@ -563,6 +661,239 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._stake_eligibility_cache[node_id] = (eligible, now)
         return eligible
 
+    def _winner_receipt_store_compact(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._winner_receipt_store_path), exist_ok=True)
+            with open(self._winner_receipt_store_path, "w", encoding="utf-8") as f:
+                for rec in self._race_receipts[-self._winner_receipt_store_max_entries:]:
+                    row = {
+                        "race_key": rec.get("race_key", ""),
+                        "receipt_id": rec.get("receipt_id", ""),
+                        "model_id": rec.get("model_id", ""),
+                        "session_id": rec.get("session_id", ""),
+                        "shard_index": int(rec.get("shard_index", 0)),
+                        "step_index": int(rec.get("step_index", 0)),
+                        "winner_node_id": rec.get("winner_node_id", ""),
+                        "winner_address": rec.get("winner_address", ""),
+                        "winner_response_hash": rec.get("winner_response_hash", ""),
+                        "candidate_addresses": list(rec.get("candidate_addresses", [])),
+                        "timestamp_ms": int(rec.get("timestamp_ms", 0)),
+                        "timestamp_s": float(rec.get("timestamp_s", 0.0)),
+                        "nonce": rec.get("nonce", ""),
+                        "payload_hex": bytes(rec.get("payload", b"")).hex(),
+                        "signature_hex": bytes(rec.get("signature", b"")).hex(),
+                        "consumed": bool(rec.get("consumed", False)),
+                    }
+                    f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        except Exception as e:
+            _simple_log(f"[Registry] winner-receipt compact failed: {e}")
+
+    def _append_winner_receipt_to_store(self, rec: dict) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._winner_receipt_store_path), exist_ok=True)
+            row = {
+                "race_key": rec.get("race_key", ""),
+                "receipt_id": rec.get("receipt_id", ""),
+                "model_id": rec.get("model_id", ""),
+                "session_id": rec.get("session_id", ""),
+                "shard_index": int(rec.get("shard_index", 0)),
+                "step_index": int(rec.get("step_index", 0)),
+                "winner_node_id": rec.get("winner_node_id", ""),
+                "winner_address": rec.get("winner_address", ""),
+                "winner_response_hash": rec.get("winner_response_hash", ""),
+                "candidate_addresses": list(rec.get("candidate_addresses", [])),
+                "timestamp_ms": int(rec.get("timestamp_ms", 0)),
+                "timestamp_s": float(rec.get("timestamp_s", 0.0)),
+                "nonce": rec.get("nonce", ""),
+                "payload_hex": bytes(rec.get("payload", b"")).hex(),
+                "signature_hex": bytes(rec.get("signature", b"")).hex(),
+                "consumed": bool(rec.get("consumed", False)),
+            }
+            with open(self._winner_receipt_store_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        except Exception as e:
+            _simple_log(f"[Registry] winner-receipt append failed: {e}")
+
+    def _load_winner_receipts_from_store(self) -> None:
+        path = self._winner_receipt_store_path
+        if not path or (not os.path.exists(path)):
+            return
+        try:
+            last_settlement_end = 0.0
+            settlements = self._share_chain.get_settlements()
+            if settlements:
+                last_settlement_end = max(float(getattr(s, "period_end", 0.0) or 0.0) for s in settlements)
+            loaded = 0
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    ts_s = float(row.get("timestamp_s", 0.0) or 0.0)
+                    if ts_s <= last_settlement_end:
+                        # Already covered by finalized settlement windows.
+                        continue
+                    race_key = str(row.get("race_key", "") or "")
+                    if not race_key or race_key in self._race_receipts_by_key:
+                        continue
+                    rec = {
+                        "race_key": race_key,
+                        "receipt_id": str(row.get("receipt_id", "") or ""),
+                        "model_id": str(row.get("model_id", "") or ""),
+                        "session_id": str(row.get("session_id", "") or ""),
+                        "shard_index": int(row.get("shard_index", 0) or 0),
+                        "step_index": int(row.get("step_index", 0) or 0),
+                        "winner_node_id": str(row.get("winner_node_id", "") or ""),
+                        "winner_address": str(row.get("winner_address", "") or ""),
+                        "winner_response_hash": str(row.get("winner_response_hash", "") or ""),
+                        "candidate_addresses": list(row.get("candidate_addresses", []) or []),
+                        "timestamp_ms": int(row.get("timestamp_ms", 0) or 0),
+                        "timestamp_s": ts_s,
+                        "nonce": str(row.get("nonce", "") or ""),
+                        "payload": bytes.fromhex(str(row.get("payload_hex", "") or "")),
+                        "signature": bytes.fromhex(str(row.get("signature_hex", "") or "")),
+                        "consumed": bool(row.get("consumed", False)),
+                    }
+                    self._race_receipts_by_key[race_key] = rec
+                    self._race_receipts.append(rec)
+                    loaded += 1
+            if len(self._race_receipts) > self._winner_receipt_store_max_entries:
+                self._race_receipts = self._race_receipts[-self._winner_receipt_store_max_entries:]
+                self._race_receipts_by_key = {
+                    str(r.get("race_key", "")): r for r in self._race_receipts
+                }
+            if loaded > 0:
+                _simple_log(f"[Registry] Loaded {loaded} winner receipts from store")
+        except Exception as e:
+            _simple_log(f"[Registry] winner-receipt load failed: {e}")
+
+    def _record_winner_receipt(self, request) -> registry_pb2.ReportRaceWinnerResponse:
+        model_id = str(request.model_id or "").strip()
+        session_id = str(request.session_id or "").strip()
+        shard_index = int(request.shard_index)
+        step_index = int(request.step_index)
+        winner_node_id = str(request.winner_node_id or "").strip()
+        winner_address = str(request.winner_address or "").strip()
+        winner_response_hash = str(request.winner_response_hash or "").strip()
+        timestamp_ms = int(request.timestamp_ms or int(time.time() * 1000))
+        nonce = str(request.nonce or "").strip() or uuid.uuid4().hex
+
+        if not session_id or shard_index < 0 or step_index < 0 or not winner_response_hash:
+            return registry_pb2.ReportRaceWinnerResponse(
+                accepted=False,
+                status="rejected",
+                message="invalid winner report payload",
+            )
+
+        if not winner_node_id and winner_address:
+            with self._lock:
+                for rec in self._nodes.values():
+                    if rec.address == winner_address:
+                        winner_node_id = rec.node_id
+                        break
+        if not winner_node_id:
+            winner_node_id = winner_address
+
+        race_key = f"{session_id}:{shard_index}:{step_index}"
+        with self._race_receipt_lock:
+            existing = self._race_receipts_by_key.get(race_key)
+            if existing is not None:
+                return registry_pb2.ReportRaceWinnerResponse(
+                    accepted=True,
+                    status="duplicate",
+                    message="winner already recorded",
+                    receipt_id=str(existing["receipt_id"]),
+                    receipt_payload=bytes(existing["payload"]),
+                    receipt_signature=bytes(existing["signature"]),
+                    receipt_signer_public_key=bytes(self._winner_receipt_public_key),
+                )
+
+            payload = _winner_receipt_payload_bytes(
+                model_id=model_id,
+                session_id=session_id,
+                shard_index=shard_index,
+                step_index=step_index,
+                winner_node_id=winner_node_id,
+                winner_address=winner_address,
+                winner_response_hash=winner_response_hash,
+                timestamp_ms=timestamp_ms,
+                nonce=nonce,
+            )
+            signature = sign_bytes(self._winner_receipt_private_key, payload)
+            receipt_id = hashlib.sha256(payload + signature).hexdigest()[:24]
+            rec = {
+                "race_key": race_key,
+                "receipt_id": receipt_id,
+                "model_id": model_id,
+                "session_id": session_id,
+                "shard_index": shard_index,
+                "step_index": step_index,
+                "winner_node_id": winner_node_id,
+                "winner_address": winner_address,
+                "winner_response_hash": winner_response_hash,
+                "candidate_addresses": list(getattr(request, "candidate_addresses", [])),
+                "timestamp_ms": timestamp_ms,
+                "timestamp_s": float(timestamp_ms) / 1000.0,
+                "nonce": nonce,
+                "payload": payload,
+                "signature": signature,
+                "consumed": False,
+            }
+            self._race_receipts_by_key[race_key] = rec
+            self._race_receipts.append(rec)
+            if len(self._race_receipts) > self._winner_receipt_store_max_entries:
+                drop = self._race_receipts.pop(0)
+                self._race_receipts_by_key.pop(str(drop.get("race_key", "")), None)
+                self._winner_receipt_store_compact()
+            self._append_winner_receipt_to_store(rec)
+
+        return registry_pb2.ReportRaceWinnerResponse(
+            accepted=True,
+            status="accepted",
+            message="winner receipt signed",
+            receipt_id=receipt_id,
+            receipt_payload=payload,
+            receipt_signature=signature,
+            receipt_signer_public_key=bytes(self._winner_receipt_public_key),
+        )
+
+    def _collect_winner_bonus_map(self, settlement) -> dict[str, float]:
+        start_t = float(getattr(settlement, "period_start", 0.0) or 0.0)
+        end_t = float(getattr(settlement, "period_end", 0.0) or 0.0)
+        if end_t <= 0.0 or end_t < start_t:
+            return {}
+        winners_in_window: dict[str, int] = defaultdict(int)
+        consumed_any = False
+        with self._race_receipt_lock:
+            for rec in self._race_receipts:
+                if rec.get("consumed", False):
+                    continue
+                ts = float(rec.get("timestamp_s", 0.0) or 0.0)
+                if ts < start_t or ts > end_t:
+                    continue
+                winner_node_id = str(rec.get("winner_node_id", "") or "")
+                if winner_node_id in settlement.node_shares:
+                    winners_in_window[winner_node_id] += 1
+                    rec["consumed"] = True
+                    consumed_any = True
+        if consumed_any:
+            self._winner_receipt_store_compact()
+
+        bonus_map: dict[str, float] = {}
+        for node_id, count in winners_in_window.items():
+            base = float(settlement.node_shares.get(node_id, 0.0))
+            if base <= 0.0:
+                continue
+            raw_bonus = float(count) * float(self._winner_bonus_per_report)
+            capped_bonus = min(raw_bonus, base * float(self._winner_bonus_cap_ratio))
+            if capped_bonus > 0.0:
+                bonus_map[node_id] = capped_bonus
+        return bonus_map
+
     def _settlement_loop(self):
         """Monitor share-chain for new settlements and post them to payments.
 
@@ -612,11 +943,13 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                         continue
                     daemon_recipient = self._select_daemon_recipient()
                     daemon_work_map = self._consume_infra_work_maps()
+                    winner_bonus_map = self._collect_winner_bonus_map(s)
                     self._settlement_processor.process_settlement(
                         s,
                         daemon_recipient=daemon_recipient,
                         daemon_fee_bps=int(self._cluster_config.daemon_fee_bps),
                         daemon_work_map=daemon_work_map,
+                        winner_bonus_shares=winner_bonus_map,
                     )
 
                     # Post on-chain if escrow is enabled
@@ -676,7 +1009,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
     def _gossip_loop(self):
         """Periodically exchange peer lists with known registries."""
         while True:
-            time.sleep(60)  # gossip every 60 seconds
+            time.sleep(self._registry_gossip_interval_seconds)
             self._do_gossip_round()
 
     def _do_gossip_round(self):
@@ -696,7 +1029,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 resp = stub.ExchangePeers(
                     registry_pb2.ExchangePeersRequest(
                         known_peers=my_peers),
-                    timeout=10,
+                    timeout=self._registry_peer_exchange_timeout_seconds,
                 )
                 # Merge their peers into ours
                 with self._peers_lock:
@@ -726,7 +1059,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         with self._lock:
             stale = [
                 nid for nid, record in self._nodes.items()
-                if now - record.last_heartbeat > config.NODE_TIMEOUT_SECONDS
+                if now - record.last_heartbeat > self._registry_node_timeout_seconds
             ]
             for nid in stale:
                 record = self._nodes.pop(nid)
@@ -794,7 +1127,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 stub = inference_pb2_grpc.InferenceNodeStub(channel)
                 resp = stub.GetBlocks(
                     inference_pb2.GetBlocksRequest(from_height=from_height),
-                    timeout=3,
+                    timeout=self._registry_daemon_poll_timeout_seconds,
                 )
                 channel.close()
             except Exception:
@@ -1517,12 +1850,37 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         with self._infra_work_lock:
             daemon_work_window = dict(self._daemon_work_window)
             daemon_payout_share = dict(self._last_daemon_payout_share)
+        winner_bonus_window: dict[str, float] = {}
+        recent_winners: list[dict] = []
+        with self._race_receipt_lock:
+            for rec in self._race_receipts:
+                if rec.get("consumed", False):
+                    continue
+                node_id = str(rec.get("winner_node_id", "") or "")
+                if node_id:
+                    winner_bonus_window[node_id] = (
+                        winner_bonus_window.get(node_id, 0.0) + float(self._winner_bonus_per_report)
+                    )
+            for rec in self._race_receipts[-20:]:
+                recent_winners.append(
+                    {
+                        "session_id": str(rec.get("session_id", "")),
+                        "shard_index": int(rec.get("shard_index", 0) or 0),
+                        "step_index": int(rec.get("step_index", 0) or 0),
+                        "winner_node_id": str(rec.get("winner_node_id", "") or ""),
+                        "timestamp_ms": int(rec.get("timestamp_ms", 0) or 0),
+                        "consumed": bool(rec.get("consumed", False)),
+                    }
+                )
         return registry_pb2.GetInfraTelemetryResponse(
             healthy_daemon_count=healthy_daemon_count,
             required_daemon_count=required_daemon_count,
             selected_daemon_recipient=self._select_daemon_recipient(),
             daemon_work_window_json=json.dumps(daemon_work_window),
             daemon_payout_share_json=json.dumps(daemon_payout_share),
+            winner_bonus_window_json=json.dumps(winner_bonus_window),
+            recent_winner_receipts_json=json.dumps(recent_winners),
+            winner_receipt_count=len(self._race_receipts),
         )
 
     def SubmitShareWindowAudit(self, request, context):
@@ -1994,19 +2352,29 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 success=False, message=f"Invalid config: {e}")
 
         errors = new_config.validate()
-        if errors:
+        hard_errors, warnings = _split_validation_messages(errors)
+        if hard_errors:
             return registry_pb2.SetClusterConfigResponse(
                 success=False,
-                message=f"Validation errors: {'; '.join(errors)}")
+                message=f"Validation errors: {'; '.join(hard_errors)}")
 
         # Preserve cluster_id from the original config
         new_config.cluster_id = self._cluster_config.cluster_id
         new_config.updated_at = time.time()
         self._cluster_config = new_config
+        self._apply_runtime_tuning_from_cluster_config()
 
         print(f"[Registry] Cluster config updated: name={new_config.name}")
+        if warnings:
+            print(f"[Registry] Cluster config warning(s): {'; '.join(warnings)}")
         return registry_pb2.SetClusterConfigResponse(
-            success=True, message="Cluster config updated")
+            success=True,
+            message=(
+                "Cluster config updated"
+                if not warnings
+                else f"Cluster config updated with warnings: {'; '.join(warnings)}"
+            ),
+        )
 
     def ExchangePeers(self, request, context):
         """Gossip: merge caller's peer list with ours, return ours."""
@@ -2115,6 +2483,22 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             accepted=True,
         )
 
+    def ReportRaceWinner(self, request, context):
+        return self._record_winner_receipt(request)
+
+    def ReportRaceWinners(self, request, context):
+        results = []
+        accepted_count = 0
+        for item in request.winners:
+            res = self._record_winner_receipt(item)
+            results.append(res)
+            if bool(getattr(res, "accepted", False)):
+                accepted_count += 1
+        return registry_pb2.ReportRaceWinnersResponse(
+            accepted_count=int(accepted_count),
+            results=results,
+        )
+
 
 class RegistryGossipServicer(inference_pb2_grpc.InferenceNodeServicer):
     """Minimal InferenceNode servicer for the registry to participate in gossip.
@@ -2195,6 +2579,12 @@ def serve(port: int, cluster_config_path: str | None = None,
         print(f"[Registry] Loaded cluster config from {cluster_config_path}")
     else:
         cluster_cfg = ClusterConfig(name="default")
+    validation_messages = cluster_cfg.validate()
+    hard_errors, warnings = _split_validation_messages(validation_messages)
+    if hard_errors:
+        raise ValueError(f"Invalid cluster config: {'; '.join(hard_errors)}")
+    if warnings:
+        print(f"[Registry] Cluster config warning(s): {'; '.join(warnings)}")
     cluster_cfg.ensure_id()
     # Auto-set public_endpoint if not configured
     if not cluster_cfg.public_endpoint:
@@ -2206,7 +2596,12 @@ def serve(port: int, cluster_config_path: str | None = None,
     my_endpoint = cluster_cfg.public_endpoint
     seed_peers = [p for p in seed_peers if p != my_endpoint]
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(
+            max_workers=max(1, int(cluster_cfg.registry_grpc_max_workers))
+        ),
+        options=config.GRPC_OPTIONS,
+    )
 
     registry_servicer = RegistryServicer(
         cluster_config=cluster_cfg, seed_peers=seed_peers,
@@ -2232,7 +2627,7 @@ def serve(port: int, cluster_config_path: str | None = None,
     print(f"[Registry] Endpoint: {cluster_cfg.public_endpoint}")
     print(f"[Registry] Seed peers: {len(seed_peers)}")
     print(f"[Registry] Share-chain: passive gossip peer (nodes produce blocks)")
-    print(f"[Registry] Nodes timeout after {config.NODE_TIMEOUT_SECONDS}s "
+    print(f"[Registry] Nodes timeout after {cluster_cfg.registry_node_timeout_seconds}s "
           f"without heartbeat")
     print(f"[Registry] Waiting for nodes to register...")
 

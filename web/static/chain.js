@@ -438,6 +438,9 @@ const Chain = {
         const verifierMap = data.verifier_payout_share || {};
         const daemonWork = data.daemon_work_window || {};
         const verifierWork = data.verifier_work_window || {};
+        const winnerBonus = data.winner_bonus_window || {};
+        const recentWinners = data.recent_winner_receipts || [];
+        const winnerReceiptCount = Number(data.winner_receipt_count || 0);
         const selectedDaemon = data.selected_daemon_recipient || '';
         const selectedVerifier = data.selected_verifier_recipient || '';
 
@@ -445,12 +448,15 @@ const Chain = {
         const verifierRows = Object.entries(verifierMap).sort((a, b) => b[1] - a[1]);
         const daemonWorkRows = Object.entries(daemonWork).sort((a, b) => b[1] - a[1]);
         const verifierWorkRows = Object.entries(verifierWork).sort((a, b) => b[1] - a[1]);
+        const winnerBonusRows = Object.entries(winnerBonus).sort((a, b) => b[1] - a[1]);
 
         if (
             !daemonRows.length &&
             !verifierRows.length &&
             !daemonWorkRows.length &&
             !verifierWorkRows.length &&
+            !winnerBonusRows.length &&
+            !recentWinners.length &&
             !selectedDaemon &&
             !selectedVerifier
         ) {
@@ -491,6 +497,21 @@ const Chain = {
                     ${verifierWorkRows.length ? renderWorkRows(verifierWorkRows, selectedVerifier) : '<div class="infra-empty">No verifier work yet</div>'}
                     <div class="infra-subtitle">Last payout share</div>
                     ${verifierRows.length ? renderShareRows(verifierRows, selectedVerifier) : '<div class="infra-empty">No verifier payout rows yet</div>'}
+                </div>
+                <div class="infra-payout-card">
+                    <div class="infra-payout-title">Winner bonus (pending)</div>
+                    ${winnerBonusRows.length ? renderWorkRows(winnerBonusRows, '') : '<div class="infra-empty">No pending winner bonus rows</div>'}
+                    <div class="infra-subtitle">Recent winner receipts (${winnerReceiptCount})</div>
+                    ${
+                        recentWinners.length
+                            ? recentWinners.slice(-6).reverse().map((r) => `
+                                <div class="infra-payout-row">
+                                    <span class="infra-payout-address mono" title="${r.winner_node_id || ''}">${App.truncHash(r.winner_node_id || 'unknown', 8)}</span>
+                                    <span class="infra-payout-work">s${r.shard_index}/t${r.step_index}${r.consumed ? ' consumed' : ''}</span>
+                                </div>
+                            `).join('')
+                            : '<div class="infra-empty">No winner receipts yet</div>'
+                    }
                 </div>
             </div>
             <div class="chain-card-hint">Pending work accumulates continuously; payout share updates after infra settlement accounting cycles.</div>

@@ -58,6 +58,10 @@ service Registry {
 
   // Report token usage after a generation request (for settlement accounting).
   rpc ReportUsage(ReportUsageRequest) returns (ReportUsageResponse);
+  // Record race winner for settlement-time winner bonus weighting.
+  rpc ReportRaceWinner(ReportRaceWinnerRequest) returns (ReportRaceWinnerResponse);
+  // Batch winner reports to reduce control-plane RPC overhead.
+  rpc ReportRaceWinners(ReportRaceWinnersRequest) returns (ReportRaceWinnersResponse);
 
   // --- Auto-assignment ---
 
@@ -327,6 +331,38 @@ message ReportUsageResponse {
   bool accepted = 2;
 }
 
+message ReportRaceWinnerRequest {
+  string model_id = 1;
+  string session_id = 2;
+  int32 shard_index = 3;
+  int32 step_index = 4;
+  string winner_node_id = 5;
+  string winner_address = 6;
+  string winner_response_hash = 7;
+  repeated string candidate_addresses = 8;
+  int64 timestamp_ms = 9;
+  string nonce = 10;
+}
+
+message ReportRaceWinnerResponse {
+  bool accepted = 1;
+  string status = 2; // accepted|duplicate|rejected
+  string message = 3;
+  string receipt_id = 4;
+  bytes receipt_payload = 5;
+  bytes receipt_signature = 6;
+  bytes receipt_signer_public_key = 7;
+}
+
+message ReportRaceWinnersRequest {
+  repeated ReportRaceWinnerRequest winners = 1;
+}
+
+message ReportRaceWinnersResponse {
+  int32 accepted_count = 1;
+  repeated ReportRaceWinnerResponse results = 2;
+}
+
 // --- Auto-assignment ---
 
 message NodeCapacity {
@@ -377,6 +413,9 @@ message GetInfraTelemetryResponse {
   string selected_daemon_recipient = 3;
   string daemon_work_window_json = 4;      // {recipient_or_node_id: work_units}
   string daemon_payout_share_json = 5;     // {recipient: [0..1]}
+  string winner_bonus_window_json = 6;     // {winner_node_id: bonus_share_units}
+  string recent_winner_receipts_json = 7;  // [{session_id, shard_index, step_index, winner_node_id, timestamp_ms, consumed}]
+  int32 winner_receipt_count = 8;          // receipts currently retained in registry memory/store
 }
 
 message SubmitShareWindowAuditRequest {

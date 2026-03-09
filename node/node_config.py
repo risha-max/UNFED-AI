@@ -47,6 +47,18 @@ DEFAULT_WORKERS = {
 }
 
 
+def _suggest_default_workers(role: str) -> int:
+    """Pick a conservative role-aware worker default from CPU count."""
+    cpu_count = max(1, (os.cpu_count() or 1))
+    if role == "daemon":
+        # Daemons handle many lightweight RPCs; allow a wider pool.
+        return max(4, min(32, cpu_count * 2))
+    if role in ("compute", "mpc"):
+        # Compute roles also run heavy model work, so keep pool tighter.
+        return max(2, min(16, cpu_count))
+    return max(2, min(8, cpu_count))
+
+
 # ---------------------------------------------------------------------------
 # Base config — shared by all node roles
 # ---------------------------------------------------------------------------
@@ -86,7 +98,13 @@ class BaseNodeConfig:
         if self.port == 0:
             self.port = DEFAULT_PORTS.get(self.role, 50051)
         if self.grpc_max_workers == 0:
-            self.grpc_max_workers = DEFAULT_WORKERS.get(self.role, 4)
+            if self.role in DEFAULT_WORKERS:
+                self.grpc_max_workers = max(
+                    DEFAULT_WORKERS[self.role],
+                    _suggest_default_workers(self.role),
+                )
+            else:
+                self.grpc_max_workers = 4
         if self.advertise is None:
             self.advertise = f"localhost:{self.port}"
         if self.registry is None:
@@ -350,6 +368,24 @@ def _validate(cfg: NodeConfig):
             f"grpc_max_workers must be >= 1, got {cfg.grpc_max_workers}")
     if not isinstance(cfg.require_tls_for_public, bool):
         raise ValueError("require_tls_for_public must be true/false")
+    if cfg.grpc_max_message_mb < 1:
+        raise ValueError("grpc_max_message_mb must be >= 1")
+    if cfg.heartbeat_interval_seconds < 1:
+        raise ValueError("heartbeat_interval_seconds must be >= 1")
+    if cfg.connect_timeout <= 0:
+        raise ValueError("connect_timeout must be > 0")
+    if cfg.forward_timeout <= 0:
+        raise ValueError("forward_timeout must be > 0")
+    if cfg.max_retries < 0:
+        raise ValueError("max_retries must be >= 0")
+    if cfg.retry_backoff_base <= 0:
+        raise ValueError("retry_backoff_base must be > 0")
+    if cfg.retry_backoff_max < cfg.retry_backoff_base:
+        raise ValueError("retry_backoff_max must be >= retry_backoff_base")
+    if cfg.keepalive_time_ms < 1:
+        raise ValueError("keepalive_time_ms must be >= 1")
+    if cfg.keepalive_timeout_ms < 1:
+        raise ValueError("keepalive_timeout_ms must be >= 1")
 
     if isinstance(cfg, MPCConfig):
         # MPC-specific validation (before ComputeConfig check since MPC is a subclass)
@@ -432,6 +468,36 @@ def _validate(cfg: NodeConfig):
             raise ValueError(
                 f"verification_sampling_rate must be in [0.0, 1.0], "
                 f"got {cfg.verification_sampling_rate}")
+
+    if isinstance(cfg, DaemonConfig):
+        if cfg.chain_prune_keep < 0:
+            raise ValueError("chain_prune_keep must be >= 0")
+        if cfg.block_interval_seconds <= 0:
+            raise ValueError("block_interval_seconds must be > 0")
+        if cfg.settlement_blocks < 1:
+            raise ValueError("settlement_blocks must be >= 1")
+        if cfg.collection_window_seconds < 0:
+            raise ValueError("collection_window_seconds must be >= 0")
+        if cfg.peer_refresh_interval_seconds <= 0:
+            raise ValueError("peer_refresh_interval_seconds must be > 0")
+        if cfg.gossip_timeout_seconds <= 0:
+            raise ValueError("gossip_timeout_seconds must be > 0")
+        if cfg.sync_timeout_seconds <= 0:
+            raise ValueError("sync_timeout_seconds must be > 0")
+        if cfg.fee_min <= 0:
+            raise ValueError("fee_min must be > 0")
+        if cfg.fee_max < cfg.fee_min:
+            raise ValueError("fee_max must be >= fee_min")
+        if not cfg.fee_min <= cfg.fee_base <= cfg.fee_max:
+            raise ValueError("fee_base must be within [fee_min, fee_max]")
+        if cfg.fee_adjustment_factor <= 0:
+            raise ValueError("fee_adjustment_factor must be > 0")
+        if not 0 < cfg.fee_target_utilization <= 1:
+            raise ValueError("fee_target_utilization must be in (0, 1]")
+        if cfg.fee_window_blocks < 1:
+            raise ValueError("fee_window_blocks must be >= 1")
+        if cfg.fee_target_capacity < 1:
+            raise ValueError("fee_target_capacity must be >= 1")
 
 
 # ---------------------------------------------------------------------------

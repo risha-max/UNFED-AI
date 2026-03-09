@@ -426,6 +426,8 @@ async def get_health(model_id: str = ""):
             infra = get_infra_telemetry()
         daemon_work_window = {}
         daemon_payout_share = {}
+        winner_bonus_window = {}
+        recent_winner_receipts = []
         if infra is not None:
             try:
                 daemon_work_window = json.loads(
@@ -439,6 +441,18 @@ async def get_health(model_id: str = ""):
                 )
             except Exception:
                 daemon_payout_share = {}
+            try:
+                winner_bonus_window = json.loads(
+                    getattr(infra, "winner_bonus_window_json", "{}") or "{}"
+                )
+            except Exception:
+                winner_bonus_window = {}
+            try:
+                recent_winner_receipts = json.loads(
+                    getattr(infra, "recent_winner_receipts_json", "[]") or "[]"
+                )
+            except Exception:
+                recent_winner_receipts = []
         if health:
             return {
                 "model_id": health.model_id,
@@ -472,6 +486,12 @@ async def get_health(model_id: str = ""):
                 ),
                 "daemon_work_window": daemon_work_window,
                 "daemon_payout_share": daemon_payout_share,
+                "winner_bonus_window": winner_bonus_window,
+                "recent_winner_receipts": recent_winner_receipts,
+                "winner_receipt_count": (
+                    int(getattr(infra, "winner_receipt_count", 0) or 0)
+                    if infra is not None else 0
+                ),
             }
         return {"error": "No health data available"}
     except Exception as e:

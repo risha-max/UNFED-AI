@@ -215,6 +215,19 @@ class TestPaymentContract:
         split = payment_contract.settlement_payout_split(settlement.settlement_hash)
         assert split["node_A"] == pytest.approx(0.06, rel=1e-9)
 
+    def test_winner_bonus_reweights_within_same_payout_pool(self, payment_contract):
+        payment_contract.report_usage(100, 50)  # payout = 0.06
+        summary = _make_settlement({"node_A": 6.0, "node_B": 4.0})
+        settlement = payment_contract.post_settlement(
+            summary,
+            winner_bonus_shares={"node_A": 2.0},  # effective shares: A=8, B=4
+        )
+        split = payment_contract.settlement_payout_split(settlement.settlement_hash)
+        assert split["node_A"] == pytest.approx(0.04, rel=1e-9)
+        assert split["node_B"] == pytest.approx(0.02, rel=1e-9)
+        # Total payout remains unchanged (no extra spend from registry wallet).
+        assert (split["node_A"] + split["node_B"]) == pytest.approx(0.06, rel=1e-9)
+
 
 class TestSettlementProcessor:
     """Tests for the settlement processor."""

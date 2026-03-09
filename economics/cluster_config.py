@@ -103,6 +103,18 @@ class ClusterConfig:
     he_dispute_window_seconds: int = 60
     he_dispute_slash_fraction: float = 0.5
     he_dispute_rollout_stage: str = "shadow"  # shadow|soft|enforced
+    winner_bonus_per_report: float = 0.25     # extra share-units per signed winner receipt
+    winner_bonus_cap_ratio: float = 0.5       # max bonus as fraction of node base shares/settlement
+    winner_receipt_store_path: str = "~/.unfed/registry_winner_receipts.jsonl"
+    winner_receipt_store_max_entries: int = 200000
+
+    # --- Registry runtime tuning ---
+    registry_grpc_max_workers: int = 10
+    registry_node_timeout_seconds: int = 30
+    registry_cleanup_interval_seconds: float = 10.0
+    registry_gossip_interval_seconds: float = 60.0
+    registry_peer_exchange_timeout_seconds: float = 10.0
+    registry_daemon_poll_timeout_seconds: float = 3.0
 
     # --- Metadata ---
     created_at: float = 0.0
@@ -147,6 +159,24 @@ class ClusterConfig:
             errors.append("he_dispute_slash_fraction must be in [0.0, 1.0]")
         if str(self.he_dispute_rollout_stage) not in {"shadow", "soft", "enforced"}:
             errors.append("he_dispute_rollout_stage must be one of shadow|soft|enforced")
+        if float(self.winner_bonus_per_report) < 0.0:
+            errors.append("winner_bonus_per_report must be >= 0.0")
+        if not 0.0 <= float(self.winner_bonus_cap_ratio) <= 1.0:
+            errors.append("winner_bonus_cap_ratio must be in [0.0, 1.0]")
+        if int(self.winner_receipt_store_max_entries) < 1000:
+            errors.append("winner_receipt_store_max_entries must be >= 1000")
+        if int(self.registry_grpc_max_workers) < 1:
+            errors.append("registry_grpc_max_workers must be >= 1")
+        if int(self.registry_node_timeout_seconds) <= 0:
+            errors.append("registry_node_timeout_seconds must be > 0")
+        if float(self.registry_cleanup_interval_seconds) <= 0:
+            errors.append("registry_cleanup_interval_seconds must be > 0")
+        if float(self.registry_gossip_interval_seconds) <= 0:
+            errors.append("registry_gossip_interval_seconds must be > 0")
+        if float(self.registry_peer_exchange_timeout_seconds) <= 0:
+            errors.append("registry_peer_exchange_timeout_seconds must be > 0")
+        if float(self.registry_daemon_poll_timeout_seconds) <= 0:
+            errors.append("registry_daemon_poll_timeout_seconds must be > 0")
         # Warn (not error) if on-chain fields are missing
         if not self.chain_rpc_url or not self.escrow_contract_address:
             errors.append(

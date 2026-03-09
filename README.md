@@ -310,6 +310,14 @@ export UNFED_HE_COMPUTE_MODE=full_output_2pc
 
 `server_sample` is rejected at runtime and should not be used. When MPC policy is enabled, model readiness requires one healthy input MPC pair and one healthy output MPC pair (the same A/B pair may advertise both capabilities).
 
+Performance-oriented transport paths for compute/MPC nodes are now always-on:
+
+- daemon share submission uses async queue + batching + compact blob transport
+- output-stage 2PC uses binary artifact transport with FP16 hidden-vector codec
+- same-next-hop forwarding uses short-window micro-batching (`BatchForward`)
+
+These are no longer controlled by runtime environment toggles.
+
 Clients connect with:
 ```bash
 python -m client.client --tls-ca /path/to/ca.crt
@@ -380,6 +388,27 @@ python -m web.server --port 8080 --registry localhost:50050
 ```
 
 The registry will verify node stake eligibility on-chain, post settlements, and handle slashing.
+
+### Winner bonus and payout split
+
+Racing still uses first-valid-wins for request serving, but settlement payouts are not
+winner-only. The registry accepts race-winner reports and signs winner receipts, then
+applies a winner-share bonus during settlement weighting:
+
+- all validated shares still participate in payout split
+- winner nodes receive extra share weight for reported winning hops
+- total settlement payout is unchanged (bonus is reweighted within the same pool)
+
+Winner-bonus policy is cluster-config driven:
+
+- `winner_bonus_per_report` (default `0.25`)
+- `winner_bonus_cap_ratio` (default `0.5`)
+- `winner_receipt_store_path` (default `~/.unfed/registry_winner_receipts.jsonl`)
+- `winner_receipt_store_max_entries` (default `200000`)
+
+Racing clients now report winners in batches per decode step to reduce control-plane RPC
+overhead (`ReportRaceWinners`), with automatic fallback to single-report mode when
+connected to older registries.
 
 ## Docs Site
 

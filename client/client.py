@@ -790,6 +790,7 @@ class UnfedClient:
 
         for step in range(max_new_tokens):
             step_start = time.time()
+            winner_reports: list[dict] = []
 
             current_activation = None
             current_shape = None
@@ -833,6 +834,24 @@ class UnfedClient:
                     return
 
                 response = race_result.response
+                try:
+                    winner_hash = self._racer.response_hash(response)
+                    winner_reports.append(
+                        {
+                            "model_id": self.model_id,
+                            "session_id": session_id,
+                            "shard_index": shard_idx,
+                            "step_index": step,
+                            "winner_node_id": "",
+                            "winner_address": race_result.winner_address,
+                            "winner_response_hash": winner_hash,
+                            "candidate_addresses": list(nodes),
+                            "timestamp_ms": int(time.time() * 1000),
+                            "nonce": uuid.uuid4().hex,
+                        }
+                    )
+                except Exception:
+                    pass
 
                 if verbose and shard_idx < num_shards - 1:
                     print(f"    Shard {shard_idx}: won by {race_result.winner_address} "
@@ -848,6 +867,11 @@ class UnfedClient:
                     return
 
             step_time = time.time() - step_start
+            if winner_reports:
+                try:
+                    self.discovery.report_race_winners(winner_reports)
+                except Exception:
+                    pass
 
             if response.has_token:
                 token_id = response.token_id

@@ -200,6 +200,10 @@ class RacingCoordinator:
             h.update(str(response.output_2pc_artifact_type).encode("utf-8"))
         return h.hexdigest()
 
+    def response_hash(self, response: inference_pb2.ForwardResponse) -> str:
+        """Public helper to hash a response for coordinator receipts."""
+        return self._compute_response_hash(response)
+
     def _verify_responses(self, shard_index: int,
                           winner_addr: str, winner_resp: inference_pb2.ForwardResponse,
                           other_addr: str, other_resp: inference_pb2.ForwardResponse):

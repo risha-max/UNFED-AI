@@ -18,6 +18,7 @@ import sys
 import time
 import hashlib
 import numpy as np
+import pytest
 from unittest.mock import MagicMock, patch
 from concurrent.futures import ThreadPoolExecutor
 
@@ -587,6 +588,7 @@ def test_mpc_dual_share_recording():
     servicer = MPCNodeServicer(mpc_node, 50060)
     servicer._node_id = "node-A-12345678"
     servicer._peer_node_id = "peer-of-node-A-1"
+    servicer._daemon_submit_mode = "strict"  # force synchronous path for unit assertion
     priv, _ = generate_signing_keypair()
     servicer._registration_share_signing_private_key = priv
 
@@ -603,25 +605,19 @@ def test_mpc_dual_share_recording():
     assert mock_daemon.SubmitShares.call_count == 1, \
         f"Expected 1 SubmitShares call, got {mock_daemon.SubmitShares.call_count}"
 
-    # Check the submitted share payload
+    # Check the submitted share payload (blob transport is default)
     submit_call = mock_daemon.SubmitShares.call_args[0][0]
-    assert len(submit_call.shares) == 1, \
-        f"Expected 1 share in submission, got {len(submit_call.shares)}"
+    assert submit_call.shares_blob, "Expected compact shares_blob payload"
+    assert submit_call.shares_blob_format == "shareproto-len-v1"
+    assert submit_call.submitter_id == "node-A-12345678"
 
-    share = submit_call.shares[0]
-    assert share.node_id == "node-A-12345678", f"Share node_id: {share.node_id}"
-    assert share.shard_index == 0
-    assert share.session_id == "session-test-123"
-    assert share.share_weight == 1.0, f"Share weight: {share.share_weight}"
-    assert share.signature, "Signed MPC share must include a signature"
-
-    print(f"  Share: node={share.node_id[:12]}..., weight={share.share_weight}")
+    print(f"  Share submitter={submit_call.submitter_id[:12]}..., blob_len={len(submit_call.shares_blob)}")
     print("  Signed share submission via daemon — PASSED")
 
 
-def test_mpc_share_submit_retries_once_after_daemon_failover():
-    """MPC share path retries immediately after daemon refresh."""
-    print("\n=== Test: MPC Failover Retry ===")
+def test_mpc_share_submit_fail_closed_on_daemon_failure():
+    """MPC share path fails closed on daemon failure in strict mode."""
+    print("\n=== Test: MPC Fail-Closed ===")
 
     import torch
     from unittest.mock import MagicMock
@@ -632,23 +628,18 @@ def test_mpc_share_submit_retries_once_after_daemon_failover():
     mpc_node.role = "A"
     servicer = MPCNodeServicer(mpc_node, 50060)
     servicer._node_id = "node-A-12345678"
+    servicer._daemon_submit_mode = "strict"  # force synchronous path for retry assertion
     priv, _ = generate_signing_keypair()
     servicer._registration_share_signing_private_key = priv
 
-    first_daemon = MagicMock()
-    first_daemon.SubmitShares.side_effect = RuntimeError("daemon down")
-    second_daemon = MagicMock()
-    second_daemon.SubmitShares.return_value = MagicMock(accepted=1)
-    servicer._daemon_stub = first_daemon
-
-    def _refresh_to_second():
-        servicer._daemon_stub = second_daemon
-
-    servicer._refresh_daemon_stub = _refresh_to_second
+    failing_daemon = MagicMock()
+    failing_daemon.SubmitShares.side_effect = RuntimeError("daemon down")
+    servicer._daemon_stub = failing_daemon
     output_tensor = torch.randn(1, 5, 896)
-    servicer._record_dual_shares("session-failover-1", output_tensor)
-    assert second_daemon.SubmitShares.call_count == 1
-    print("  Retry succeeded on refreshed daemon — PASSED")
+    with pytest.raises(RuntimeError):
+        servicer._record_dual_shares("session-failover-1", output_tensor)
+    assert failing_daemon.SubmitShares.call_count == 1
+    print("  Strict-mode fail-closed behavior — PASSED")
 
 
 def test_config_racing_constants():

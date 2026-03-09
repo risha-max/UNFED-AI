@@ -560,12 +560,24 @@ class GossipManager:
     def __init__(self, node_id: str, chain: ShareChain,
                  servicer: DaemonServicer,
                  registry_address: str,
-                 self_address: str):
+                 self_address: str,
+                 block_interval_seconds: float = 10.0,
+                 collection_window_seconds: float = 4.0,
+                 peer_refresh_interval_seconds: float = 30.0,
+                 gossip_timeout_seconds: float = 5.0,
+                 sync_timeout_seconds: float = 30.0,
+                 chain_prune_keep: int = 10000):
         self.node_id = node_id
         self.chain = chain
         self.servicer = servicer
         self.registry_address = registry_address
         self.self_address = self_address
+        self.block_interval_seconds = float(max(0.1, block_interval_seconds))
+        self.collection_window_seconds = float(max(0.0, collection_window_seconds))
+        self.peer_refresh_interval_seconds = float(max(1.0, peer_refresh_interval_seconds))
+        self.gossip_timeout_seconds = float(max(1.0, gossip_timeout_seconds))
+        self.sync_timeout_seconds = float(max(1.0, sync_timeout_seconds))
+        self.chain_prune_keep = int(max(0, chain_prune_keep))
 
         self._peers: list[str] = []
         self._peers_lock = threading.Lock()
@@ -604,11 +616,14 @@ class GossipManager:
         multiple nodes — unlike the old per-node block production.
         """
         while self._running:
-            time.sleep(1.0)
+            time.sleep(self.block_interval_seconds)
             if self._running and self.chain.has_pending_shares():
                 # Collection window: wait for more shares to arrive
-                time.sleep(4.0)
-                time.sleep(random.uniform(0, 2.0))
+                if self.collection_window_seconds > 0:
+                    time.sleep(self.collection_window_seconds)
+                    jitter_cap = min(2.0, max(0.0, self.collection_window_seconds * 0.5))
+                    if jitter_cap > 0:
+                        time.sleep(random.uniform(0.0, jitter_cap))
                 if self._running and self.chain.has_pending_shares():
                     block = self.chain.produce_block()
                     if block is not None:
@@ -621,13 +636,15 @@ class GossipManager:
                         self.servicer.notify_new_block(block)
                         # Audit root to registry for independent settlement checks
                         self.servicer.submit_share_window_audit(block)
+                        if self.chain_prune_keep > 0 and getattr(self.chain, "_store", None) is not None:
+                            self.chain._store.prune(self.chain_prune_keep)
                         # Gossip to peers
                         self._gossip_block(block)
 
     def _peer_loop(self):
         """Periodically refresh the peer list."""
         while self._running:
-            time.sleep(30)
+            time.sleep(self.peer_refresh_interval_seconds)
             if self._running:
                 self._refresh_peers()
 
@@ -639,7 +656,7 @@ class GossipManager:
             stub = registry_pb2_grpc.RegistryStub(channel)
             resp = stub.Discover(
                 registry_pb2.DiscoverRequest(model_id=""),
-                timeout=10,
+                timeout=self.sync_timeout_seconds,
             )
             # Find all daemon nodes (excluding ourselves)
             addresses = [n.address for n in resp.nodes
@@ -666,7 +683,7 @@ class GossipManager:
             if peer == self.self_address or peer == exclude:
                 continue
             try:
-                self._get_stub(peer).GossipBlock(msg, timeout=5)
+                self._get_stub(peer).GossipBlock(msg, timeout=self.gossip_timeout_seconds)
             except grpc.RpcError as e:
                 logger.debug("Gossip to %s failed: %s", peer, e)
 
@@ -677,7 +694,7 @@ class GossipManager:
             stub = self._get_stub(peer_address)
             resp = stub.GetBlocks(
                 inference_pb2.GetBlocksRequest(from_height=my_height + 1),
-                timeout=30,
+                timeout=self.sync_timeout_seconds,
             )
             synced = 0
             for block_msg in resp.blocks:
@@ -703,10 +720,12 @@ class DaemonRegistration:
     """Register the daemon as node_type='daemon' with the registry."""
 
     def __init__(self, node_id: str, address: str,
-                 registry_address: str):
+                 registry_address: str,
+                 heartbeat_interval_seconds: int = config.HEARTBEAT_INTERVAL_SECONDS):
         self.node_id = node_id
         self.address = address
         self.registry_address = registry_address
+        self.heartbeat_interval_seconds = int(max(1, heartbeat_interval_seconds))
         self._running = False
         self.stake_evm_private_key = load_secret_from_env(
             "UNFED_STAKE_EVM_PRIVATE_KEY",
@@ -760,7 +779,7 @@ class DaemonRegistration:
 
     def _heartbeat_loop(self):
         while self._running:
-            time.sleep(config.HEARTBEAT_INTERVAL_SECONDS)
+            time.sleep(self.heartbeat_interval_seconds)
             if not self._running:
                 break
             try:
@@ -898,7 +917,25 @@ def serve(port: int = 50070, host: str = "[::]",
           advertise_address: str = None,
           registry_address: str = None,
           db_path: str = None,
-          node_id: str = ""):
+          node_id: str = "",
+          chain_prune_keep: int = 10000,
+          block_interval_seconds: float = 10.0,
+          settlement_blocks: int = 6,
+          collection_window_seconds: float = 4.0,
+          peer_refresh_interval_seconds: float = 30.0,
+          gossip_timeout_seconds: float = 5.0,
+          sync_timeout_seconds: float = 30.0,
+          fee_enabled: bool = True,
+          fee_base: float = 0.001,
+          fee_min: float = 0.0001,
+          fee_max: float = 0.1,
+          fee_adjustment_factor: float = 0.125,
+          fee_target_utilization: float = 0.7,
+          fee_window_blocks: int = 10,
+          fee_target_capacity: int = 40,
+          heartbeat_interval_seconds: int = config.HEARTBEAT_INTERVAL_SECONDS,
+          grpc_max_workers: int = 10,
+          grpc_options: Optional[list] = None):
     """Start the chain daemon.
 
     Args:
@@ -921,12 +958,17 @@ def serve(port: int = 50070, host: str = "[::]",
     print(f"[Daemon]   Address: {public_address}")
     print(f"[Daemon]   Registry: {registry_address}")
     print(f"[Daemon]   Database: {db_path}")
+    print(f"[Daemon]   Block interval: {block_interval_seconds}s")
+    print(f"[Daemon]   Settlement: every {settlement_blocks} blocks")
+    print(f"[Daemon]   Collection window: {collection_window_seconds}s")
+    print(f"[Daemon]   Peer refresh: {peer_refresh_interval_seconds}s")
+    print(f"[Daemon]   Chain prune keep: {chain_prune_keep}")
 
     # Initialize SQLite store and chain
     store = ChainStore(db_path=db_path)
     chain = ShareChain(
-        block_interval=10.0,
-        settlement_blocks=6,
+        block_interval=block_interval_seconds,
+        settlement_blocks=settlement_blocks,
         store=store,
     )
 
@@ -934,26 +976,30 @@ def serve(port: int = 50070, host: str = "[::]",
           f"blocks={chain.height}")
 
     # Initialize fee oracle (EIP-1559-style dynamic pricing)
-    from economics.fee_oracle import FeeOracle
-    fee_oracle = FeeOracle(
-        target_utilization=getattr(config, 'FEE_TARGET_UTILIZATION', 0.7),
-        base_fee=getattr(config, 'FEE_BASE_DEFAULT', 0.001),
-        min_fee=getattr(config, 'FEE_MIN', 0.0001),
-        max_fee=getattr(config, 'FEE_MAX', 0.1),
-        window_blocks=getattr(config, 'FEE_WINDOW_BLOCKS', 10),
-        adjustment_factor=getattr(config, 'FEE_ADJUSTMENT_FACTOR', 0.125),
-        target_capacity=getattr(config, 'FEE_TARGET_CAPACITY', 40),
-    )
-    # Warm up oracle with existing chain blocks
-    for block in chain.get_blocks_from(0):
-        if block.shares:  # skip genesis
-            fee_oracle.update(block)
-    print(f"[Daemon] Fee oracle initialized: base_fee={fee_oracle.get_base_fee():.6f}")
+    fee_oracle = None
+    if fee_enabled:
+        from economics.fee_oracle import FeeOracle
+        fee_oracle = FeeOracle(
+            target_utilization=fee_target_utilization,
+            base_fee=fee_base,
+            min_fee=fee_min,
+            max_fee=fee_max,
+            window_blocks=fee_window_blocks,
+            adjustment_factor=fee_adjustment_factor,
+            target_capacity=fee_target_capacity,
+        )
+        # Warm up oracle with existing chain blocks
+        for block in chain.get_blocks_from(0):
+            if block.shares:  # skip genesis
+                fee_oracle.update(block)
+        print(f"[Daemon] Fee oracle initialized: base_fee={fee_oracle.get_base_fee():.6f}")
+    else:
+        print("[Daemon] Fee oracle disabled")
 
     # Create gRPC server
     server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=10),
-        options=config.GRPC_OPTIONS,
+        futures.ThreadPoolExecutor(max_workers=max(1, int(grpc_max_workers))),
+        options=list(grpc_options or config.GRPC_OPTIONS),
     )
     servicer = DaemonServicer(
         chain,
@@ -973,6 +1019,7 @@ def serve(port: int = 50070, host: str = "[::]",
         node_id=node_id,
         address=public_address,
         registry_address=registry_address,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
     )
     registration.start()
 
@@ -983,6 +1030,12 @@ def serve(port: int = 50070, host: str = "[::]",
         servicer=servicer,
         registry_address=registry_address,
         self_address=public_address,
+        block_interval_seconds=block_interval_seconds,
+        collection_window_seconds=collection_window_seconds,
+        peer_refresh_interval_seconds=peer_refresh_interval_seconds,
+        gossip_timeout_seconds=gossip_timeout_seconds,
+        sync_timeout_seconds=sync_timeout_seconds,
+        chain_prune_keep=chain_prune_keep,
     )
     gossip.start()
 
@@ -1025,6 +1078,41 @@ if __name__ == "__main__":
                         help="Registry address (default: from config)")
     parser.add_argument("--db", default=None,
                         help="SQLite database path (default: ~/.unfed/chain.db)")
+    parser.add_argument("--chain-prune-keep", type=int, default=10000,
+                        help="Keep last N blocks on disk (0 disables pruning)")
+    parser.add_argument("--block-interval", type=float, default=10.0,
+                        help="Target block production interval in seconds")
+    parser.add_argument("--settlement-blocks", type=int, default=6,
+                        help="Blocks per settlement window")
+    parser.add_argument("--collection-window", type=float, default=4.0,
+                        help="Share collection window before block production")
+    parser.add_argument("--peer-refresh-interval", type=float, default=30.0,
+                        help="Peer list refresh interval in seconds")
+    parser.add_argument("--gossip-timeout", type=float, default=5.0,
+                        help="Gossip RPC timeout in seconds")
+    parser.add_argument("--sync-timeout", type=float, default=30.0,
+                        help="Peer sync/discovery timeout in seconds")
+    parser.add_argument("--fee-disabled", action="store_true",
+                        help="Disable dynamic fee oracle")
+    parser.add_argument("--fee-base", type=float, default=0.001,
+                        help="Starting dynamic base fee")
+    parser.add_argument("--fee-min", type=float, default=0.0001,
+                        help="Minimum dynamic fee")
+    parser.add_argument("--fee-max", type=float, default=0.1,
+                        help="Maximum dynamic fee")
+    parser.add_argument("--fee-adjustment-factor", type=float, default=0.125,
+                        help="Fee adjustment aggressiveness")
+    parser.add_argument("--fee-target-utilization", type=float, default=0.7,
+                        help="Target utilization for fee control loop")
+    parser.add_argument("--fee-window-blocks", type=int, default=10,
+                        help="Rolling window size for utilization")
+    parser.add_argument("--fee-target-capacity", type=int, default=40,
+                        help="Shares/block at 100% utilization")
+    parser.add_argument("--heartbeat-interval", type=int,
+                        default=config.HEARTBEAT_INTERVAL_SECONDS,
+                        help="Registry heartbeat interval in seconds")
+    parser.add_argument("--grpc-max-workers", type=int, default=10,
+                        help="gRPC thread pool size")
     parser.add_argument("--eth-address", default="",
                         help="Stable daemon node identity (recommended: staked EVM address)")
     parser.add_argument("--quiet", action="store_true",
@@ -1042,4 +1130,21 @@ if __name__ == "__main__":
         registry_address=args.registry,
         db_path=args.db,
         node_id=args.eth_address,
+        chain_prune_keep=args.chain_prune_keep,
+        block_interval_seconds=args.block_interval,
+        settlement_blocks=args.settlement_blocks,
+        collection_window_seconds=args.collection_window,
+        peer_refresh_interval_seconds=args.peer_refresh_interval,
+        gossip_timeout_seconds=args.gossip_timeout,
+        sync_timeout_seconds=args.sync_timeout,
+        fee_enabled=not args.fee_disabled,
+        fee_base=args.fee_base,
+        fee_min=args.fee_min,
+        fee_max=args.fee_max,
+        fee_adjustment_factor=args.fee_adjustment_factor,
+        fee_target_utilization=args.fee_target_utilization,
+        fee_window_blocks=args.fee_window_blocks,
+        fee_target_capacity=args.fee_target_capacity,
+        heartbeat_interval_seconds=args.heartbeat_interval,
+        grpc_max_workers=args.grpc_max_workers,
     )

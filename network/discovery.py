@@ -165,6 +165,81 @@ class RegistryClient:
             print(f"[Discovery] Failed to get infra telemetry: {e.details()}")
             return None
 
+    def report_race_winner(
+        self,
+        *,
+        model_id: str,
+        session_id: str,
+        shard_index: int,
+        step_index: int,
+        winner_node_id: str,
+        winner_address: str,
+        winner_response_hash: str,
+        candidate_addresses: list[str] | None = None,
+        timestamp_ms: int = 0,
+        nonce: str = "",
+    ):
+        try:
+            req = registry_pb2.ReportRaceWinnerRequest(
+                model_id=str(model_id or ""),
+                session_id=str(session_id or ""),
+                shard_index=int(shard_index),
+                step_index=int(step_index),
+                winner_node_id=str(winner_node_id or ""),
+                winner_address=str(winner_address or ""),
+                winner_response_hash=str(winner_response_hash or ""),
+                timestamp_ms=int(timestamp_ms or 0),
+                nonce=str(nonce or ""),
+            )
+            if candidate_addresses:
+                req.candidate_addresses.extend([str(a) for a in candidate_addresses if a])
+            return self._stub.ReportRaceWinner(req, timeout=5)
+        except grpc.RpcError as e:
+            print(f"[Discovery] Failed to report race winner: {e.details()}")
+            return None
+
+    def report_race_winners(self, reports: list[dict]):
+        if not reports:
+            return None
+        try:
+            req = registry_pb2.ReportRaceWinnersRequest()
+            for r in reports:
+                item = registry_pb2.ReportRaceWinnerRequest(
+                    model_id=str(r.get("model_id", "") or ""),
+                    session_id=str(r.get("session_id", "") or ""),
+                    shard_index=int(r.get("shard_index", 0) or 0),
+                    step_index=int(r.get("step_index", 0) or 0),
+                    winner_node_id=str(r.get("winner_node_id", "") or ""),
+                    winner_address=str(r.get("winner_address", "") or ""),
+                    winner_response_hash=str(r.get("winner_response_hash", "") or ""),
+                    timestamp_ms=int(r.get("timestamp_ms", 0) or 0),
+                    nonce=str(r.get("nonce", "") or ""),
+                )
+                cands = list(r.get("candidate_addresses", []) or [])
+                if cands:
+                    item.candidate_addresses.extend([str(a) for a in cands if a])
+                req.winners.append(item)
+            return self._stub.ReportRaceWinners(req, timeout=5)
+        except grpc.RpcError as e:
+            # Backward compatibility with registries that only support single-report RPC.
+            if e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                for r in reports:
+                    self.report_race_winner(
+                        model_id=str(r.get("model_id", "") or ""),
+                        session_id=str(r.get("session_id", "") or ""),
+                        shard_index=int(r.get("shard_index", 0) or 0),
+                        step_index=int(r.get("step_index", 0) or 0),
+                        winner_node_id=str(r.get("winner_node_id", "") or ""),
+                        winner_address=str(r.get("winner_address", "") or ""),
+                        winner_response_hash=str(r.get("winner_response_hash", "") or ""),
+                        candidate_addresses=list(r.get("candidate_addresses", []) or []),
+                        timestamp_ms=int(r.get("timestamp_ms", 0) or 0),
+                        nonce=str(r.get("nonce", "") or ""),
+                    )
+                return None
+            print(f"[Discovery] Failed to report race winners: {e.details()}")
+            return None
+
     def discover_compute(self, model_id: str = "") -> list:
         """Discover only compute nodes (excludes vision and MPC nodes)."""
         all_nodes = self.discover(model_id)
@@ -574,6 +649,42 @@ class RegistryPool:
         return self._try_each(
             lambda c: c.get_infra_telemetry(),
             "get_infra_telemetry",
+        )
+
+    def report_race_winner(
+        self,
+        *,
+        model_id: str,
+        session_id: str,
+        shard_index: int,
+        step_index: int,
+        winner_node_id: str,
+        winner_address: str,
+        winner_response_hash: str,
+        candidate_addresses: list[str] | None = None,
+        timestamp_ms: int = 0,
+        nonce: str = "",
+    ):
+        return self._try_each(
+            lambda c: c.report_race_winner(
+                model_id=model_id,
+                session_id=session_id,
+                shard_index=shard_index,
+                step_index=step_index,
+                winner_node_id=winner_node_id,
+                winner_address=winner_address,
+                winner_response_hash=winner_response_hash,
+                candidate_addresses=candidate_addresses or [],
+                timestamp_ms=timestamp_ms,
+                nonce=nonce,
+            ),
+            "report_race_winner",
+        )
+
+    def report_race_winners(self, reports: list[dict]):
+        return self._try_each(
+            lambda c: c.report_race_winners(reports),
+            "report_race_winners",
         )
 
     def find_healthy_registry(self) -> str | None:

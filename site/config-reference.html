@@ -99,6 +99,10 @@ python -m node.run --config mpc_config.json</code></pre>
             <tr><td><code>he_dispute_window_seconds</code></td><td><code>60</code></td><td>Window size for HE dispute rate-limits.</td></tr>
             <tr><td><code>he_dispute_slash_fraction</code></td><td><code>0.5</code></td><td>Slash fraction for confirmed HE fraud.</td></tr>
             <tr><td><code>he_dispute_rollout_stage</code></td><td><code>"shadow"</code></td><td>Enforcement stage: <code>shadow|soft|enforced</code>.</td></tr>
+            <tr><td><code>winner_bonus_per_report</code></td><td><code>0.25</code></td><td>Share-weight bonus added per coordinator-signed race-winner receipt.</td></tr>
+            <tr><td><code>winner_bonus_cap_ratio</code></td><td><code>0.5</code></td><td>Caps winner bonus at this fraction of that node's base settlement shares.</td></tr>
+            <tr><td><code>winner_receipt_store_path</code></td><td><code>"~/.unfed/registry_winner_receipts.jsonl"</code></td><td>Lightweight persistent store for signed winner receipts (restart continuity + audit trail).</td></tr>
+            <tr><td><code>winner_receipt_store_max_entries</code></td><td><code>200000</code></td><td>Maximum retained winner receipts before compaction.</td></tr>
             <tr><td><code>created_at</code>, <code>updated_at</code></td><td><code>0.0</code></td><td>Metadata timestamps (typically managed automatically).</td></tr>
           </tbody>
         </table>

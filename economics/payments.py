@@ -62,6 +62,7 @@ class Settlement:
     daemon_recipient: str = ""
     daemon_fee_bps: int = 0
     daemon_work_map: dict[str, float] = field(default_factory=dict)
+    winner_bonus_shares: dict[str, float] = field(default_factory=dict)
 
 
 # --- Stake Manager ---
@@ -272,6 +273,7 @@ class PaymentContract:
         daemon_recipient: str | None = None,
         daemon_fee_bps: int | None = None,
         daemon_work_map: dict[str, float] | None = None,
+        winner_bonus_shares: dict[str, float] | None = None,
     ) -> Settlement:
         """
         Post a settlement from the share-chain.
@@ -307,6 +309,7 @@ class PaymentContract:
                 if daemon_fee_bps is None else int(max(0, daemon_fee_bps))
             ),
             daemon_work_map=dict(daemon_work_map or {}),
+            winner_bonus_shares=dict(winner_bonus_shares or {}),
         )
 
         with self._lock:
@@ -346,11 +349,20 @@ class PaymentContract:
 
         payouts: dict[str, float] = {}
         total_shares = settlement.summary.total_shares
+        effective_shares: dict[str, float] = dict(settlement.summary.node_shares)
+        for node_id, bonus in (settlement.winner_bonus_shares or {}).items():
+            b = max(0.0, float(bonus))
+            if b <= 0.0:
+                continue
+            if node_id not in effective_shares:
+                continue
+            effective_shares[node_id] = effective_shares.get(node_id, 0.0) + b
+        effective_total = float(sum(effective_shares.values()))
         node_paid_total = 0.0
-        for node_id, weighted_shares in settlement.summary.node_shares.items():
+        for node_id, weighted_shares in effective_shares.items():
             payout = 0.0
-            if total_shares > 0:
-                payout = total_revenue * (weighted_shares / total_shares)
+            if total_shares > 0 and effective_total > 0:
+                payout = total_revenue * (weighted_shares / effective_total)
             if payout > 0:
                 payouts[node_id] = payouts.get(node_id, 0.0) + payout
                 node_paid_total += payout

@@ -118,6 +118,16 @@ class RegistryStub(object):
                 request_serializer=registry__pb2.ReportUsageRequest.SerializeToString,
                 response_deserializer=registry__pb2.ReportUsageResponse.FromString,
                 _registered_method=True)
+        self.ReportRaceWinner = channel.unary_unary(
+                '/unfed.Registry/ReportRaceWinner',
+                request_serializer=registry__pb2.ReportRaceWinnerRequest.SerializeToString,
+                response_deserializer=registry__pb2.ReportRaceWinnerResponse.FromString,
+                _registered_method=True)
+        self.ReportRaceWinners = channel.unary_unary(
+                '/unfed.Registry/ReportRaceWinners',
+                request_serializer=registry__pb2.ReportRaceWinnersRequest.SerializeToString,
+                response_deserializer=registry__pb2.ReportRaceWinnersResponse.FromString,
+                _registered_method=True)
         self.RequestAssignment = channel.unary_unary(
                 '/unfed.Registry/RequestAssignment',
                 request_serializer=registry__pb2.RequestAssignmentRequest.SerializeToString,
@@ -258,6 +268,20 @@ class RegistryServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReportRaceWinner(self, request, context):
+        """Record race winner for settlement-time winner bonus weighting.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReportRaceWinners(self, request, context):
+        """Batch winner reports to reduce control-plane RPC overhead.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def RequestAssignment(self, request, context):
         """--- Auto-assignment ---
 
@@ -363,6 +387,16 @@ def add_RegistryServicer_to_server(servicer, server):
                     servicer.ReportUsage,
                     request_deserializer=registry__pb2.ReportUsageRequest.FromString,
                     response_serializer=registry__pb2.ReportUsageResponse.SerializeToString,
+            ),
+            'ReportRaceWinner': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReportRaceWinner,
+                    request_deserializer=registry__pb2.ReportRaceWinnerRequest.FromString,
+                    response_serializer=registry__pb2.ReportRaceWinnerResponse.SerializeToString,
+            ),
+            'ReportRaceWinners': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReportRaceWinners,
+                    request_deserializer=registry__pb2.ReportRaceWinnersRequest.FromString,
+                    response_serializer=registry__pb2.ReportRaceWinnersResponse.SerializeToString,
             ),
             'RequestAssignment': grpc.unary_unary_rpc_method_handler(
                     servicer.RequestAssignment,
@@ -816,6 +850,60 @@ class Registry(object):
             '/unfed.Registry/ReportUsage',
             registry__pb2.ReportUsageRequest.SerializeToString,
             registry__pb2.ReportUsageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReportRaceWinner(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/ReportRaceWinner',
+            registry__pb2.ReportRaceWinnerRequest.SerializeToString,
+            registry__pb2.ReportRaceWinnerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReportRaceWinners(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/ReportRaceWinners',
+            registry__pb2.ReportRaceWinnersRequest.SerializeToString,
+            registry__pb2.ReportRaceWinnersResponse.FromString,
             options,
             channel_credentials,
             insecure,
