@@ -10,6 +10,7 @@ const Chat = {
     imagePreview: null,
     imagePreviewImg: null,
     imageRemoveBtn: null,
+    clearChatBtn: null,
 
     pendingImage: null,       // { file, path, dataUrl }
     currentAssistantEl: null, // Currently streaming message element
@@ -31,6 +32,7 @@ const Chat = {
         this.imagePreview = document.getElementById('imagePreview');
         this.imagePreviewImg = document.getElementById('imagePreviewImg');
         this.imageRemoveBtn = document.getElementById('imageRemoveBtn');
+        this.clearChatBtn = document.getElementById('clearChatBtn');
         this.loadHistory();
         this.renderHistory();
         this.restoreInterruptedGeneration();
@@ -60,6 +62,7 @@ const Chat = {
         });
 
         this.imageRemoveBtn.addEventListener('click', () => this.clearImage());
+        this.clearChatBtn?.addEventListener('click', () => this.clearChat());
 
         // Drag & drop on the chat area
         this.messagesEl.addEventListener('dragover', (e) => {
@@ -168,6 +171,33 @@ const Chat = {
             msg.querySelector('.message-body').appendChild(meta);
         }
         this.clearPendingGeneration();
+    },
+
+    clearChat() {
+        const runningWarning = App.state.generating
+            ? ' A generation is currently in progress and may still be billed.'
+            : '';
+        const ok = window.confirm(
+            `Clear all chat messages and local conversation context?${runningWarning}`
+        );
+        if (!ok) return;
+
+        this.history = [];
+        this.saveHistory();
+        this.clearPendingGeneration();
+        this.currentAssistantEl = null;
+        this.currentAssistantText = "";
+        this.clearImage();
+
+        this.messagesEl.innerHTML = `
+            <div class="chat-welcome">
+                <h2>UNFED AI</h2>
+                <p>Private, decentralized inference. Your queries are split across nodes — no single node sees the full picture.</p>
+                <p class="hint">Type a message or drop an image to get started.</p>
+            </div>
+        `;
+        this.welcomeShown = true;
+        this.addSystemMessage('Chat history and local context cleared.');
     },
 
     handleImageFile(file) {

@@ -172,3 +172,23 @@ curl -X POST "http://localhost:8080/api/faucet" \
   -H "Content-Type: application/json" \
   -d '{"address":"0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"}'
 ```
+
+## 9) Public testnet Go/No-Go automation
+
+Use the env-based checklist for repeatable readiness checks:
+
+```bash
+cp .env.public-testnet.example .env.testnet
+./scripts/run_public_testnet_checklist.sh
+```
+
+You can also launch and verify in one command:
+
+```bash
+./scripts/start_public_testnet.sh
+```
+
+Notes:
+- The launcher writes PID/log files under `.runtime/public-testnet/`.
+- If your environment does not have local shard files yet, `.env.testnet` can
+  use `MOCK_NODE_ENABLED=1` as a temporary readiness bootstrap.

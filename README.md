@@ -177,6 +177,22 @@ Run preflight before exposing services:
 ```bash
 python -m scripts.testnet_preflight web --host 127.0.0.1
 python -m scripts.testnet_preflight node --advertise "203.0.113.42:50051" --tls-cert /path/to/server.crt --tls-key /path/to/server.key
+python -m scripts.testnet_preflight runtime --web-url http://127.0.0.1:8080
+```
+
+Or run the bundled one-command checklist against an env profile:
+
+```bash
+cp .env.public-testnet.example .env.testnet
+./scripts/run_public_testnet_checklist.sh
+```
+
+One-command launch + readiness check:
+
+```bash
+./scripts/start_public_testnet.sh
+# optionally reuse already running services
+./scripts/start_public_testnet.sh --reuse-running
 ```
 
 ## Using GGUF / Ollama Models

@@ -474,7 +474,13 @@ python -m scripts.testnet_preflight web --host 127.0.0.1
 python -m scripts.testnet_preflight node \
   --advertise 203.0.113.42:50051 \
   --tls-cert /path/to/server.crt \
-  --tls-key /path/to/server.key</code></pre>
+  --tls-key /path/to/server.key
+
+# Runtime checks against running web/registry stack
+python -m scripts.testnet_preflight runtime --web-url http://127.0.0.1:8080
+
+# Optional one-command profile check
+./scripts/run_public_testnet_checklist.sh</code></pre>
       <p>
         If any check fails, treat the result as <strong>NO-GO</strong> and fix the
         reported issue before rollout.

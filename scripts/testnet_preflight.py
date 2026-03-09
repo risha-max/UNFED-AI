@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import os
 import sys
 from dataclasses import dataclass
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -147,6 +150,60 @@ def check_node(args: argparse.Namespace) -> list[CheckResult]:
     return out
 
 
+def _http_get_json(base_url: str, path: str, timeout_s: float = 3.0):
+    url = f"{base_url.rstrip('/')}{path}"
+    req = urlrequest.Request(url=url, method="GET")
+    with urlrequest.urlopen(req, timeout=timeout_s) as resp:
+        payload = resp.read().decode("utf-8")
+    return json.loads(payload)
+
+
+def check_runtime(args: argparse.Namespace) -> list[CheckResult]:
+    base_url = (args.web_url or "http://127.0.0.1:8080").strip()
+    out: list[CheckResult] = [CheckResult(True, f"web_url={base_url}")]
+
+    try:
+        auth_mode = _http_get_json(base_url, "/api/client/auth/mode")
+        dev_auth_bypass = bool(auth_mode.get("dev_auth_bypass", False))
+        out.append(CheckResult(not dev_auth_bypass, "runtime dev_auth_bypass must be false"))
+    except (urlerror.URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
+        out.append(CheckResult(False, f"failed to query /api/client/auth/mode: {e}"))
+        return out
+
+    try:
+        models = _http_get_json(base_url, "/api/models")
+        model_rows = list(models.get("models", [])) if isinstance(models, dict) else []
+        healthy = [m for m in model_rows if bool(m.get("can_serve", m.get("is_healthy", False)))]
+        out.append(CheckResult(bool(model_rows), "runtime model catalog must be non-empty"))
+        out.append(CheckResult(bool(healthy), "runtime must have at least one serve-ready model"))
+    except (urlerror.URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
+        out.append(CheckResult(False, f"failed to query /api/models: {e}"))
+
+    try:
+        nodes_payload = _http_get_json(base_url, "/api/network/nodes")
+        nodes = list(nodes_payload.get("nodes", [])) if isinstance(nodes_payload, dict) else []
+        daemon_count = sum(1 for n in nodes if str(n.get("node_type", "")) == "daemon")
+        serving_count = sum(
+            1 for n in nodes if str(n.get("node_type", "")) in {"compute", "mpc", "vision"}
+        )
+        out.append(CheckResult(daemon_count >= 1, "runtime requires at least one daemon node"))
+        out.append(CheckResult(serving_count >= 1, "runtime requires compute/mpc/vision serving nodes"))
+    except (urlerror.URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
+        out.append(CheckResult(False, f"failed to query /api/network/nodes: {e}"))
+
+    try:
+        summary = _http_get_json(base_url, "/api/registry/summary")
+        registry = summary.get("registry", {}) if isinstance(summary, dict) else {}
+        healthy_models = int(registry.get("healthy_models", 0) or 0)
+        total_models = int(registry.get("total_models", 0) or 0)
+        out.append(CheckResult(total_models >= 1, "registry summary total_models must be >= 1"))
+        out.append(CheckResult(healthy_models >= 1, "registry summary healthy_models must be >= 1"))
+    except (urlerror.URLError, json.JSONDecodeError, TimeoutError, ValueError) as e:
+        out.append(CheckResult(False, f"failed to query /api/registry/summary: {e}"))
+
+    return out
+
+
 def print_report(service: str, checks: list[CheckResult]) -> int:
     failed = [c for c in checks if not c.ok]
     print(f"[Preflight] service={service}")
@@ -177,6 +234,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["true", "false", "1", "0"],
         help="Require TLS for non-local advertised addresses",
     )
+
+    p_runtime = sub.add_parser(
+        "runtime",
+        help="Validate live web/registry runtime readiness via HTTP APIs",
+    )
+    p_runtime.add_argument(
+        "--web-url",
+        default="http://127.0.0.1:8080",
+        help="Base URL for running web server",
+    )
     return p
 
 
@@ -186,6 +253,8 @@ def main() -> int:
         checks = check_web(args)
     elif args.service == "node":
         checks = check_node(args)
+    elif args.service == "runtime":
+        checks = check_runtime(args)
     else:
         print("Unknown service", file=sys.stderr)
         return 2
