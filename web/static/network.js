@@ -11,6 +11,11 @@ const Network = {
     circuitHint: null,
     nodesList: null,
     refreshBtn: null,
+    modelFilterEl: null,
+    typeFilterEl: null,
+    healthyOnlyEl: null,
+    windowEl: null,
+    perfHintEl: null,
 
     // Track circuit node elements for hop animation
     circuitNodeEls: {},  // address -> DOM element
@@ -25,27 +30,149 @@ const Network = {
         this.circuitHint = document.getElementById('circuitHint');
         this.nodesList = document.getElementById('nodesList');
         this.refreshBtn = document.getElementById('refreshNodesBtn');
+        this.modelFilterEl = document.getElementById('networkModelFilter');
+        this.typeFilterEl = document.getElementById('networkTypeFilter');
+        this.healthyOnlyEl = document.getElementById('networkHealthyOnly');
+        this.windowEl = document.getElementById('registryWindow');
+        this.perfHintEl = document.getElementById('registryPerfHint');
 
         this.refreshBtn.addEventListener('click', () => this.loadNodes());
+        this.modelFilterEl?.addEventListener('change', () => this.renderNodes(App.state.nodes));
+        this.typeFilterEl?.addEventListener('change', () => this.renderNodes(App.state.nodes));
+        this.healthyOnlyEl?.addEventListener('change', () => this.renderNodes(App.state.nodes));
 
         // Listen for circuit updates from chat
         App.on('circuitUpdate', (msg) => this.renderCircuit(msg));
         App.on('hopUpdate', (msg) => this.animateHop(msg));
         App.on('nodesLoaded', (nodes) => this.renderNodes(nodes));
+        App.on('registrySummaryLoaded', (summary) => {
+            App.state.registrySummary = summary;
+            this.renderSummary(summary);
+            this.syncModelFilterOptions(summary.models || []);
+            this.renderNodes(App.state.nodes || []);
+        });
+        App.on('modelSelectionChanged', () => this.loadRegistrySummary());
         App.on('tabSwitch', (tab) => {
-            if (tab === 'network') this.loadNodes();
+            if (tab === 'network') {
+                this.loadNodes();
+            }
         });
 
-        // Initial load
-        this.loadNodes();
+        // Initial load comes from shared app bootstrap.
+        if (App.state.registrySummary) {
+            this.renderSummary(App.state.registrySummary);
+            this.syncModelFilterOptions(App.state.registrySummary.models || []);
+        }
+        if (Array.isArray(App.state.nodes) && App.state.nodes.length > 0) {
+            this.renderNodes(App.state.nodes);
+        }
+        if (typeof App.loadNetworkBootstrap === 'function') {
+            App.loadNetworkBootstrap();
+        } else {
+            this.loadNodes();
+        }
     },
 
     async loadNodes() {
+        await this.loadRegistrySummary();
         const data = await App.fetchJson('/api/network/nodes');
         if (data && data.nodes) {
             App.state.nodes = data.nodes;
             this.renderNodes(data.nodes);
         }
+    },
+
+    selectedModelId() {
+        const selected = App.getSelectedModel();
+        if (selected && selected.model_id) return selected.model_id;
+        return '';
+    },
+
+    async loadRegistrySummary() {
+        const modelId = this.selectedModelId();
+        const query = modelId ? `?model_id=${encodeURIComponent(modelId)}` : '';
+        const summary = await App.fetchJson(`/api/registry/summary${query}`);
+        if (!summary || summary.error) return;
+        App.state.registrySummary = summary;
+        this.renderSummary(summary);
+        this.syncModelFilterOptions(summary.models || []);
+        this.renderNodes(App.state.nodes || []);
+    },
+
+    syncModelFilterOptions(models) {
+        if (!this.modelFilterEl) return;
+        const current = this.modelFilterEl.value;
+        this.modelFilterEl.innerHTML = '<option value="">All models</option>';
+        models
+            .slice()
+            .sort((a, b) => String(a.model_id || '').localeCompare(String(b.model_id || '')))
+            .forEach((m) => {
+                const opt = document.createElement('option');
+                opt.value = m.model_id || '';
+                opt.textContent = m.can_serve
+                    ? `${m.model_id} (${m.covered_shards}/${m.total_shards})`
+                    : `${m.model_id} (${m.covered_shards}/${m.total_shards}) - unavailable`;
+                this.modelFilterEl.appendChild(opt);
+            });
+        if (current && models.some((m) => m.model_id === current)) {
+            this.modelFilterEl.value = current;
+        } else if (!current && this.selectedModelId()) {
+            this.modelFilterEl.value = this.selectedModelId();
+        }
+    },
+
+    formatRate(value, suffix = '') {
+        const num = Number(value || 0);
+        if (!Number.isFinite(num) || num <= 0) return '—';
+        return `${num.toFixed(2)}${suffix}`;
+    },
+
+    formatMs(value) {
+        const num = Number(value || 0);
+        if (!Number.isFinite(num) || num <= 0) return '—';
+        return `${Math.round(num)}ms`;
+    },
+
+    renderSummary(summary) {
+        const perf = summary.performance || {};
+        const pricing = summary.pricing || {};
+        const registry = summary.registry || {};
+
+        const currency = pricing.currency || 'UNFED';
+        document.getElementById('regTotalNodes').textContent = String(registry.total_nodes ?? '—');
+        document.getElementById('regPriceIn').textContent =
+            Number(pricing.price_per_input_token || 0) > 0
+                ? `${Number(pricing.price_per_input_token).toFixed(6)} ${currency}`
+                : '—';
+        document.getElementById('regPriceOut').textContent =
+            Number(pricing.price_per_output_token || 0) > 0
+                ? `${Number(pricing.price_per_output_token).toFixed(6)} ${currency}`
+                : '—';
+        document.getElementById('regAvgTps').textContent = this.formatRate(perf.avg_tps, ' tok/s');
+        document.getElementById('regP95Ttft').textContent = this.formatMs(perf.p95_ttft_ms);
+        document.getElementById('regHealthyModels').textContent =
+            `${registry.healthy_models ?? 0}/${registry.total_models ?? 0}`;
+
+        if (this.windowEl) {
+            const seconds = Number(perf.window_seconds || 0);
+            this.windowEl.textContent = seconds > 0
+                ? `Window: last ${Math.round(seconds / 60)}m`
+                : 'Window: --';
+        }
+        if (this.perfHintEl) {
+            const samples = Number(perf.sample_count || 0);
+            this.perfHintEl.textContent = samples > 0
+                ? `Performance values are rolling end-to-end user metrics (${samples} sample${samples === 1 ? '' : 's'}).`
+                : 'Performance values will appear after completed generations.';
+        }
+    },
+
+    isModelServeReady(modelId) {
+        if (!modelId) return true;
+        const summary = App.state.registrySummary || {};
+        const models = summary.models || [];
+        const model = models.find((m) => m.model_id === modelId);
+        return model ? Boolean(model.can_serve) : false;
     },
 
     // ---- Render the registered nodes grid ----
@@ -55,9 +182,39 @@ const Network = {
             return;
         }
 
+        const modelFilter = this.modelFilterEl?.value || '';
+        const typeFilter = this.typeFilterEl?.value || '';
+        const healthyOnly = Boolean(this.healthyOnlyEl?.checked);
+        let filtered = nodes.slice();
+
+        if (modelFilter) {
+            filtered = filtered.filter((node) => {
+                if (!node || !node.model_id) {
+                    return node?.node_type === 'daemon';
+                }
+                return node.model_id === modelFilter;
+            });
+        }
+
+        if (typeFilter) {
+            filtered = filtered.filter((node) => (node.node_type || '') === typeFilter);
+        }
+
+        if (healthyOnly) {
+            filtered = filtered.filter((node) => {
+                if (!node?.model_id) return true;
+                return this.isModelServeReady(node.model_id);
+            });
+        }
+
+        if (!filtered.length) {
+            this.nodesList.innerHTML = '<p class="nodes-empty">No nodes match the current filters</p>';
+            return;
+        }
+
         this.nodesList.innerHTML = '';
         // Sort infra first, then execution nodes.
-        const sorted = [...nodes].sort((a, b) => {
+        const sorted = [...filtered].sort((a, b) => {
             const order = {
                 daemon: 0,
                 mpc: 1,

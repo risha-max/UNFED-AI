@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>UNFED AI Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css?v=11">
+    <link rel="stylesheet" href="/static/style.css?v=12">
 </head>
 <body>
     <!-- Top bar -->
@@ -150,6 +150,42 @@
     <!-- ================================================================ -->
     <main class="tab-content" id="tab-network">
         <div class="network-layout">
+            <div class="registry-overview-panel">
+                <div class="registry-overview-head">
+                    <h3>Registry Overview</h3>
+                    <span class="registry-overview-window" id="registryWindow">Window: --</span>
+                </div>
+                <div class="registry-overview-grid">
+                    <div class="overview-card">
+                        <span class="overview-label">Total Nodes</span>
+                        <span class="overview-value" id="regTotalNodes">—</span>
+                    </div>
+                    <div class="overview-card">
+                        <span class="overview-label">Input Price</span>
+                        <span class="overview-value" id="regPriceIn">—</span>
+                    </div>
+                    <div class="overview-card">
+                        <span class="overview-label">Output Price</span>
+                        <span class="overview-value" id="regPriceOut">—</span>
+                    </div>
+                    <div class="overview-card">
+                        <span class="overview-label">Avg Speed</span>
+                        <span class="overview-value" id="regAvgTps">—</span>
+                    </div>
+                    <div class="overview-card">
+                        <span class="overview-label">P95 TTFT</span>
+                        <span class="overview-value" id="regP95Ttft">—</span>
+                    </div>
+                    <div class="overview-card">
+                        <span class="overview-label">Healthy Models</span>
+                        <span class="overview-value" id="regHealthyModels">—</span>
+                    </div>
+                </div>
+                <p class="registry-overview-hint" id="registryPerfHint">
+                    Performance values are rolling end-to-end user metrics.
+                </p>
+            </div>
+
             <!-- Circuit visualization -->
             <div class="circuit-panel">
                 <h3>Active Circuit</h3>
@@ -174,7 +210,25 @@
             <div class="nodes-panel">
                 <div class="nodes-header">
                     <h3>Registered Nodes</h3>
-                    <button class="refresh-btn" id="refreshNodesBtn">Refresh</button>
+                    <div class="nodes-toolbar">
+                        <select id="networkModelFilter" class="network-filter">
+                            <option value="">All models</option>
+                        </select>
+                        <select id="networkTypeFilter" class="network-filter">
+                            <option value="">All types</option>
+                            <option value="compute">compute</option>
+                            <option value="vision">vision</option>
+                            <option value="mpc">mpc</option>
+                            <option value="daemon">daemon</option>
+                            <option value="verifier">verifier</option>
+                            <option value="he_sidecar">he_sidecar</option>
+                        </select>
+                        <label class="toggle-label network-filter-toggle">
+                            <input type="checkbox" id="networkHealthyOnly">
+                            <span>Serve-ready only</span>
+                        </label>
+                        <button class="refresh-btn" id="refreshNodesBtn">Refresh</button>
+                    </div>
                 </div>
                 <div class="nodes-list" id="nodesList">
                     <p class="nodes-empty">Loading nodes...</p>
@@ -317,6 +371,30 @@
                     <p class="chain-card-hint">
                         Payout windows produced every 6 blocks.
                     </p>
+                    <div class="payout-ledger-wrap">
+                        <h4>Payout Ledger</h4>
+                        <p class="chain-card-hint">
+                            Estimated compute payouts by settlement plus pending daemon/winner bonus rows.
+                        </p>
+                        <div class="explorer-table-wrap">
+                            <table class="explorer-table">
+                                <thead>
+                                    <tr>
+                                        <th>Kind</th>
+                                        <th>Status</th>
+                                        <th>Recipient</th>
+                                        <th>Settlement</th>
+                                        <th>Weight</th>
+                                        <th>Share</th>
+                                        <th>Amount</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="payoutLedgerRows">
+                                    <tr><td colspan="7" class="blocks-empty">Loading payout ledger...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                     <div class="infra-payout-summary" id="infraPayoutSummary">
                         <p class="settlements-empty">Loading infra payout recipients...</p>
                     </div>
@@ -329,9 +407,9 @@
     </main>
 
     <!-- Scripts -->
-    <script src="/static/app.js?v=11"></script>
-    <script src="/static/chat.js?v=11"></script>
-    <script src="/static/network.js?v=11"></script>
-    <script src="/static/chain.js?v=11"></script>
+    <script src="/static/app.js?v=12"></script>
+    <script src="/static/chat.js?v=12"></script>
+    <script src="/static/network.js?v=12"></script>
+    <script src="/static/chain.js?v=13"></script>
 </body>
 </html>

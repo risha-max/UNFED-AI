@@ -12,10 +12,12 @@ const App = {
         generating: false,      // Whether generation is in progress
         models: [],             // Resolved model catalog
         selectedModelId: "",    // Active model_id
+        registrySummary: null,  // Aggregated registry metrics snapshot
         authSessionToken: "",   // Wallet auth session token for chat
         activeWallet: "",       // Wallet resolved by backend session
         devAuthBypass: false,   // Local dev bypass mode from backend
         heOutputEnabled: false, // HE output artifact mode capability
+        networkBootstrapPromise: null, // Shared startup fetch for summary+nodes
     },
 
     // Event bus for cross-tab communication
@@ -498,6 +500,46 @@ const App = {
         }
     },
 
+    async loadNetworkBootstrap(force = false) {
+        if (!force && this.state.networkBootstrapPromise) {
+            return this.state.networkBootstrapPromise;
+        }
+
+        this.state.networkBootstrapPromise = (async () => {
+            const [summary, nodesData] = await Promise.all([
+                this.fetchJson('/api/registry/summary'),
+                this.fetchJson('/api/network/nodes'),
+            ]);
+
+            let totalNodes = 0;
+            if (summary && !summary.error && summary.registry) {
+                this.state.registrySummary = summary;
+                totalNodes = Number(summary.registry.total_nodes || 0);
+                this.emit('registrySummaryLoaded', summary);
+            }
+
+            if (nodesData && Array.isArray(nodesData.nodes)) {
+                this.state.nodes = nodesData.nodes;
+                if (!totalNodes) totalNodes = nodesData.nodes.length;
+                this.emit('nodesLoaded', nodesData.nodes);
+            }
+
+            if (totalNodes > 0) {
+                this.setStatus('connected', `${totalNodes} nodes`);
+            }
+            this.emit('networkBootstrapLoaded', {
+                summary: this.state.registrySummary,
+                nodes: this.state.nodes,
+            });
+            return {
+                summary: this.state.registrySummary,
+                nodes: this.state.nodes,
+            };
+        })();
+
+        return this.state.networkBootstrapPromise;
+    },
+
     // ---- Format helpers ----
     truncHash(hash, len = 8) {
         if (!hash) return '—';
@@ -574,15 +616,7 @@ const App = {
         Promise.all([this.loadAuthMode(), this.loadSecurityModes()]).finally(() => this.connectChat());
         this.connectChain();
         this.refreshModelOptions();
-
-        // Check registry health
-        this.fetchJson('/api/network/nodes').then(data => {
-            if (data && data.nodes) {
-                this.state.nodes = data.nodes;
-                this.setStatus('connected', `${data.nodes.length} nodes`);
-                this.emit('nodesLoaded', data.nodes);
-            }
-        });
+        this.loadNetworkBootstrap();
 
     },
 };

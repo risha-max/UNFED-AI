@@ -606,8 +606,8 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
                         break
                     if len(self._share_buffer) == 0:
                         continue
-                    if len(self._share_buffer) < self._daemon_batch_size and self._daemon_batch_max_wait_s <= 0:
-                        continue
+                    # Flush partial batches on timed wakeups so low-throughput
+                    # sessions still reach the daemon and can produce blocks.
                 batch: list[ComputeShare] = []
                 while self._share_buffer and len(batch) < self._daemon_batch_size:
                     batch.append(self._share_buffer.popleft())

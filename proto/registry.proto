@@ -19,6 +19,9 @@ service Registry {
   // Discover available nodes, optionally filtered by model.
   rpc Discover(DiscoverRequest) returns (DiscoverResponse);
 
+  // Fetch a consolidated registry snapshot to reduce RPC round trips.
+  rpc GetRegistrySnapshot(GetRegistrySnapshotRequest) returns (GetRegistrySnapshotResponse);
+
   // Get pool health: which shards are covered, node counts per shard.
   rpc GetPoolHealth(PoolHealthRequest) returns (PoolHealthResponse);
 
@@ -181,6 +184,25 @@ message NodeInfo {
 
 message DiscoverResponse {
   repeated NodeInfo nodes = 1;
+}
+
+message GetRegistrySnapshotRequest {
+  string model_id = 1;              // Optional model scope for pool_health/pricing
+  bool include_nodes = 2;           // Include node rows
+  bool include_models = 3;          // Include model catalog
+  bool include_pricing = 4;         // Include pricing for model_id/default
+  bool include_pool_health = 5;     // Include PoolHealth for model_id
+}
+
+message GetRegistrySnapshotResponse {
+  int64 timestamp = 1;              // Unix timestamp (seconds)
+  int64 topology_version = 2;       // Increments when node topology mutates
+  int32 total_nodes = 3;
+  map<string, int32> by_type = 4;   // Node counts by node_type
+  repeated NodeInfo nodes = 5;
+  repeated ModelInfo models = 6;
+  GetPricingResponse pricing = 7;
+  PoolHealthResponse pool_health = 8;
 }
 
 // --- Pool Health ---

@@ -128,6 +128,16 @@ _ESCROW_ABI = [
         "outputs": [],
         "stateMutability": "nonpayable",
     },
+    {
+        "type": "function",
+        "name": "chargeClient",
+        "inputs": [
+            {"name": "client", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "outputs": [],
+        "stateMutability": "nonpayable",
+    },
 ]
 
 _ERC20_ABI = [
@@ -326,6 +336,15 @@ class OnChainEscrow:
         addr = Web3.to_checksum_address(node_address)
         fn = self._contract.functions.slashNode(addr)
         return self._send_tx(fn, f"slashNode({node_address[:10]}...)")
+
+    def charge_client(self, client_address: str, amount_wei: int) -> str:
+        """Debit a client's escrow balance in real time (operator only)."""
+        client = Web3.to_checksum_address(client_address)
+        fn = self._contract.functions.chargeClient(client, int(amount_wei))
+        return self._send_tx(
+            fn,
+            f"chargeClient({client_address[:10]}..., {int(amount_wei)})",
+        )
 
     # ------------------------------------------------------------------
     # Faucet (testnet only)

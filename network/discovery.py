@@ -165,6 +165,30 @@ class RegistryClient:
             print(f"[Discovery] Failed to get infra telemetry: {e.details()}")
             return None
 
+    def get_registry_snapshot(
+        self,
+        *,
+        model_id: str = "",
+        include_nodes: bool = True,
+        include_models: bool = True,
+        include_pricing: bool = True,
+        include_pool_health: bool = False,
+    ):
+        try:
+            return self._stub.GetRegistrySnapshot(
+                registry_pb2.GetRegistrySnapshotRequest(
+                    model_id=model_id,
+                    include_nodes=include_nodes,
+                    include_models=include_models,
+                    include_pricing=include_pricing,
+                    include_pool_health=include_pool_health,
+                ),
+                timeout=5,
+            )
+        except grpc.RpcError as e:
+            print(f"[Discovery] Failed to get registry snapshot: {e.details()}")
+            return None
+
     def report_race_winner(
         self,
         *,
@@ -649,6 +673,26 @@ class RegistryPool:
         return self._try_each(
             lambda c: c.get_infra_telemetry(),
             "get_infra_telemetry",
+        )
+
+    def get_registry_snapshot(
+        self,
+        *,
+        model_id: str = "",
+        include_nodes: bool = True,
+        include_models: bool = True,
+        include_pricing: bool = True,
+        include_pool_health: bool = False,
+    ):
+        return self._try_each(
+            lambda c: c.get_registry_snapshot(
+                model_id=model_id,
+                include_nodes=include_nodes,
+                include_models=include_models,
+                include_pricing=include_pricing,
+                include_pool_health=include_pool_health,
+            ),
+            "get_registry_snapshot",
         )
 
     def report_race_winner(

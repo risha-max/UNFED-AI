@@ -13,7 +13,9 @@ Usage:
 
 import asyncio
 import base64
+from collections import Counter, deque
 from functools import lru_cache
+import grpc
 import ipaddress
 import json
 import logging
@@ -22,6 +24,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import uuid
@@ -42,13 +45,18 @@ sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "proto"))
 
 import config as app_config
+import inference_pb2
+import inference_pb2_grpc
 from network.admission import (
     pick_first_eligible_model,
     preflight_model_admission,
+    resolve_daemon_required_flag,
     resolve_mpc_required_flag,
 )
 from network.discovery import RegistryClient, RegistryPool
 from network.infra_routing import select_least_loaded_daemon
+import registry_pb2
+import registry_pb2_grpc
 from web.auth import WalletAuth
 
 # ---------------------------------------------------------------------------
@@ -102,6 +110,117 @@ _FAUCET_REQUIRE_AUTH = (
 _FAUCET_STATE_DB_PATH = os.path.expanduser(
     os.environ.get("UNFED_FAUCET_STATE_DB", "~/.unfed/faucet_state.db")
 )
+
+
+def _env_int(name: str, default: int, min_value: int) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return max(default, min_value)
+    return max(parsed, min_value)
+
+
+_REGISTRY_METRICS_WINDOW_SECONDS = _env_int(
+    "UNFED_REGISTRY_METRICS_WINDOW_SECONDS", 900, 60
+)
+_REGISTRY_METRICS_MAX_SAMPLES = _env_int(
+    "UNFED_REGISTRY_METRICS_MAX_SAMPLES", 1000, 50
+)
+_registry_perf_samples = deque(maxlen=max(_REGISTRY_METRICS_MAX_SAMPLES, 50))
+_REGISTRY_SNAPSHOT_TTL_SECONDS = max(
+    1.0, float(os.environ.get("UNFED_REGISTRY_SNAPSHOT_TTL_SECONDS", "2"))
+)
+_registry_snapshot_cache_lock = threading.Lock()
+_registry_snapshot_cache: dict[tuple, tuple[float, object]] = {}
+_grpc_pool_lock = threading.Lock()
+_grpc_channels: dict[tuple[str, str], grpc.Channel] = {}
+_grpc_stubs: dict[tuple[str, str], object] = {}
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    pct = min(max(float(percentile), 0.0), 1.0)
+    idx = int(round((len(ordered) - 1) * pct))
+    idx = max(0, min(idx, len(ordered) - 1))
+    return float(ordered[idx])
+
+
+def _trim_perf_samples(window_seconds: Optional[int] = None) -> None:
+    window = int(window_seconds or _REGISTRY_METRICS_WINDOW_SECONDS)
+    now = time.time()
+    while _registry_perf_samples and (now - _registry_perf_samples[0]["ts"]) > window:
+        _registry_perf_samples.popleft()
+
+
+def _record_perf_sample(
+    model_id: str,
+    output_tokens: int,
+    total_time_s: float,
+    ttft_ms: Optional[float],
+    token_intervals_ms: list[float],
+) -> None:
+    if total_time_s <= 0:
+        return
+    tps = float(output_tokens) / float(total_time_s)
+    sample = {
+        "ts": time.time(),
+        "model_id": model_id or "",
+        "output_tokens": int(output_tokens),
+        "total_time_s": float(total_time_s),
+        "tokens_per_sec": float(tps),
+        "ttft_ms": float(ttft_ms) if ttft_ms is not None else 0.0,
+        "avg_token_interval_ms": (
+            sum(token_intervals_ms) / len(token_intervals_ms)
+            if token_intervals_ms else 0.0
+        ),
+        "p95_token_interval_ms": (
+            _percentile(token_intervals_ms, 0.95)
+            if token_intervals_ms else 0.0
+        ),
+    }
+    _registry_perf_samples.append(sample)
+    _trim_perf_samples()
+
+
+def _perf_summary(model_id: str = "", window_seconds: Optional[int] = None) -> dict:
+    _trim_perf_samples(window_seconds=window_seconds)
+    requested_model = (model_id or "").strip()
+    samples = list(_registry_perf_samples)
+    if requested_model:
+        samples = [s for s in samples if s.get("model_id") == requested_model]
+    if not samples:
+        return {
+            "sample_count": 0,
+            "avg_tps": 0.0,
+            "p50_tps": 0.0,
+            "p95_tps": 0.0,
+            "p50_ttft_ms": 0.0,
+            "p95_ttft_ms": 0.0,
+            "p50_total_latency_ms": 0.0,
+            "p95_total_latency_ms": 0.0,
+            "window_seconds": int(window_seconds or _REGISTRY_METRICS_WINDOW_SECONDS),
+        }
+
+    tps_values = [float(s.get("tokens_per_sec", 0.0)) for s in samples]
+    ttft_values = [float(s.get("ttft_ms", 0.0)) for s in samples]
+    total_latency_values = [float(s.get("total_time_s", 0.0)) * 1000.0 for s in samples]
+
+    return {
+        "sample_count": len(samples),
+        "avg_tps": round(sum(tps_values) / max(len(tps_values), 1), 2),
+        "p50_tps": round(_percentile(tps_values, 0.50), 2),
+        "p95_tps": round(_percentile(tps_values, 0.95), 2),
+        "p50_ttft_ms": round(_percentile(ttft_values, 0.50), 1),
+        "p95_ttft_ms": round(_percentile(ttft_values, 0.95), 1),
+        "p50_total_latency_ms": round(_percentile(total_latency_values, 0.50), 1),
+        "p95_total_latency_ms": round(_percentile(total_latency_values, 0.95), 1),
+        "window_seconds": int(window_seconds or _REGISTRY_METRICS_WINDOW_SECONDS),
+    }
 
 
 def _is_loopback_host(value: str) -> bool:
@@ -195,20 +314,188 @@ def _resolve_registry_endpoint(cluster_endpoint: str) -> str:
     )
 
 
+def _close_grpc_endpoint(kind: str, endpoint: str) -> None:
+    key = (str(kind), str(endpoint))
+    with _grpc_pool_lock:
+        _grpc_stubs.pop(key, None)
+        ch = _grpc_channels.pop(key, None)
+    if ch is not None:
+        try:
+            ch.close()
+        except Exception:
+            pass
+
+
+def _get_grpc_stub(kind: str, endpoint: str):
+    key = (str(kind), str(endpoint))
+    with _grpc_pool_lock:
+        stub = _grpc_stubs.get(key)
+        if stub is not None:
+            return stub
+        channel = grpc.insecure_channel(endpoint, options=app_config.GRPC_OPTIONS)
+        if kind == "registry":
+            stub = registry_pb2_grpc.RegistryStub(channel)
+        elif kind == "inference":
+            stub = inference_pb2_grpc.InferenceNodeStub(channel)
+        else:
+            raise ValueError(f"Unsupported gRPC stub kind: {kind}")
+        _grpc_channels[key] = channel
+        _grpc_stubs[key] = stub
+        return stub
+
+
+def _snapshot_cache_key(
+    discovery: RegistryPool,
+    *,
+    model_id: str,
+    include_nodes: bool,
+    include_models: bool,
+    include_pricing: bool,
+    include_pool_health: bool,
+) -> tuple:
+    endpoint = getattr(discovery, "active_registry", None) or _registry_address
+    return (
+        str(endpoint),
+        str(model_id or ""),
+        bool(include_nodes),
+        bool(include_models),
+        bool(include_pricing),
+        bool(include_pool_health),
+    )
+
+
+def _get_registry_snapshot_cached(
+    discovery: RegistryPool,
+    *,
+    model_id: str = "",
+    include_nodes: bool = True,
+    include_models: bool = True,
+    include_pricing: bool = False,
+    include_pool_health: bool = False,
+):
+    fetch_snapshot = getattr(discovery, "get_registry_snapshot", None)
+    if not callable(fetch_snapshot):
+        return None
+
+    key = _snapshot_cache_key(
+        discovery,
+        model_id=model_id,
+        include_nodes=include_nodes,
+        include_models=include_models,
+        include_pricing=include_pricing,
+        include_pool_health=include_pool_health,
+    )
+    now = time.time()
+    with _registry_snapshot_cache_lock:
+        cached = _registry_snapshot_cache.get(key)
+        if cached and now < cached[0]:
+            return cached[1]
+
+    snapshot = fetch_snapshot(
+        model_id=model_id,
+        include_nodes=include_nodes,
+        include_models=include_models,
+        include_pricing=include_pricing,
+        include_pool_health=include_pool_health,
+    )
+    if snapshot is None:
+        return None
+
+    with _registry_snapshot_cache_lock:
+        _registry_snapshot_cache[key] = (now + _REGISTRY_SNAPSHOT_TTL_SECONDS, snapshot)
+    return snapshot
+
+
+def _parse_mpc_capability_json(value: str) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
+
+
+def _node_has_mpc_capability(node, capability: str) -> bool:
+    data = _parse_mpc_capability_json(getattr(node, "capability_json", ""))
+    caps = data.get("mpc_capabilities")
+    if isinstance(caps, list) and caps:
+        normalized = {str(x).strip().lower() for x in caps}
+        return capability in normalized
+    return True
+
+
+def _node_mpc_role(node) -> str:
+    data = _parse_mpc_capability_json(getattr(node, "capability_json", ""))
+    role = str(data.get("mpc_role", "")).strip().upper()
+    return role if role in ("A", "B") else "A"
+
+
+def _has_mpc_pair(nodes: list, capability: str) -> bool:
+    scoped = [
+        n
+        for n in nodes
+        if str(getattr(n, "node_type", "") or "") == "mpc"
+        and int(getattr(n, "shard_index", -1) or -1) == 0
+        and _node_has_mpc_capability(n, capability)
+    ]
+    has_a = any(_node_mpc_role(n) == "A" for n in scoped)
+    has_b = any(_node_mpc_role(n) == "B" for n in scoped)
+    return has_a and has_b
+
+
 def _lookup_models(discovery: RegistryPool) -> dict[str, dict]:
+    models = list(discovery.list_models())
+    snapshot = _get_registry_snapshot_cached(
+        discovery,
+        include_nodes=True,
+        include_models=False,
+        include_pricing=False,
+        include_pool_health=False,
+    )
+    all_nodes = (
+        list(getattr(snapshot, "nodes", []))
+        if snapshot is not None
+        else list(discovery.discover(""))
+    )
+
+    daemon_required = resolve_daemon_required_flag()
+    daemon_count = len(
+        [n for n in all_nodes if str(getattr(n, "node_type", "") or "") == "daemon"]
+    )
+    mpc_required = resolve_mpc_required_flag()
+
+    by_model_nodes: dict[str, list] = {}
+    for node in all_nodes:
+        node_type = str(getattr(node, "node_type", "") or "")
+        model_id = str(getattr(node, "model_id", "") or "")
+        if not model_id or node_type not in ("compute", "mpc"):
+            continue
+        by_model_nodes.setdefault(model_id, []).append(node)
+
     out = {}
-    for m in discovery.list_models():
-        preflight = preflight_model_admission(
-            discovery,
-            m.model_id,
-            require_mpc=resolve_mpc_required_flag(),
+    for m in models:
+        model_id = str(getattr(m, "model_id", "") or "")
+        text_nodes = by_model_nodes.get(model_id, [])
+        shard_indexes = {
+            int(getattr(n, "shard_index", -1))
+            for n in text_nodes
+            if int(getattr(n, "shard_index", -1)) >= 0
+        }
+        covered_shards = len(shard_indexes)
+        total_shards = (max(shard_indexes) + 1) if shard_indexes else 0
+        mpc_available = _has_mpc_pair(text_nodes, "input") and _has_mpc_pair(
+            text_nodes, "output"
         )
-        out[m.model_id] = {
-            "can_serve": preflight.ok,
-            "covered_shards": preflight.text.covered_shards,
-            "total_shards": preflight.text.total_shards,
-            "mpc_available": preflight.mpc_available,
-            "mpc_required": preflight.mpc_required,
+        text_ready = total_shards > 0 and covered_shards == total_shards
+        daemon_ready = (not daemon_required) or daemon_count >= 1
+        can_serve = text_ready and ((not mpc_required) or mpc_available) and daemon_ready
+        out[model_id] = {
+            "can_serve": bool(can_serve),
+            "covered_shards": int(covered_shards),
+            "total_shards": int(total_shards),
+            "mpc_available": bool(mpc_available),
+            "mpc_required": bool(mpc_required),
         }
     return out
 
@@ -305,7 +592,18 @@ async def get_nodes():
     """Get all registered nodes from the registry."""
     try:
         discovery = get_discovery()
-        all_nodes = discovery.discover("")
+        snapshot = _get_registry_snapshot_cached(
+            discovery,
+            include_nodes=True,
+            include_models=False,
+            include_pricing=False,
+            include_pool_health=False,
+        )
+        all_nodes = (
+            list(getattr(snapshot, "nodes", []))
+            if snapshot is not None
+            else list(discovery.discover(""))
+        )
         nodes = []
 
         def _node_function(node_type: str, has_embedding: bool, has_lm_head: bool) -> str:
@@ -498,6 +796,112 @@ async def get_health(model_id: str = ""):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/registry/summary")
+async def get_registry_summary(model_id: str = "", window_seconds: int = 0):
+    """Aggregate registry topology, pricing, and recent generation performance."""
+    try:
+        selected_model = (model_id or "").strip()
+        discovery = get_discovery()
+        snapshot = _get_registry_snapshot_cached(
+            discovery,
+            model_id=selected_model,
+            include_nodes=True,
+            include_models=True,
+            include_pricing=True,
+            include_pool_health=False,
+        )
+        all_nodes = (
+            list(getattr(snapshot, "nodes", []))
+            if snapshot is not None
+            else list(discovery.discover(""))
+        )
+        models = (
+            list(getattr(snapshot, "models", []))
+            if snapshot is not None
+            else list(discovery.list_models())
+        )
+        admission_map = _lookup_models(discovery)
+
+        type_counts = Counter()
+        model_node_counts = Counter()
+        for node in all_nodes:
+            node_type = str(getattr(node, "node_type", "") or "unknown")
+            node_model = str(getattr(node, "model_id", "") or "")
+            type_counts[node_type] += 1
+            if node_model:
+                model_node_counts[node_model] += 1
+
+        model_rows = []
+        healthy_models = 0
+        for model in models:
+            model_info = admission_map.get(model.model_id, {})
+            can_serve = bool(model_info.get("can_serve", False))
+            if can_serve:
+                healthy_models += 1
+            model_rows.append({
+                "model_id": model.model_id,
+                "total_nodes": int(model.total_nodes or 0),
+                "registered_nodes": int(model_node_counts.get(model.model_id, 0)),
+                "can_serve": can_serve,
+                "covered_shards": int(model_info.get("covered_shards", 0)),
+                "total_shards": int(model_info.get("total_shards", 0)),
+                "mpc_available": bool(model_info.get("mpc_available", False)),
+                "mpc_required": bool(model_info.get("mpc_required", False)),
+            })
+
+        selected_health = None
+        if selected_model:
+            selected_info = admission_map.get(selected_model, {})
+            selected_health = {
+                "model_id": selected_model,
+                "can_serve": bool(selected_info.get("can_serve", False)),
+                "covered_shards": int(selected_info.get("covered_shards", 0)),
+                "total_shards": int(selected_info.get("total_shards", 0)),
+                "registered_nodes": int(model_node_counts.get(selected_model, 0)),
+                "mpc_available": bool(selected_info.get("mpc_available", False)),
+                "mpc_required": bool(selected_info.get("mpc_required", False)),
+            }
+
+        snapshot_pricing = getattr(snapshot, "pricing", None) if snapshot is not None else None
+        if snapshot_pricing and (
+            getattr(snapshot_pricing, "currency", "")
+            or float(getattr(snapshot_pricing, "price_per_input_token", 0.0) or 0.0) > 0.0
+            or float(getattr(snapshot_pricing, "price_per_output_token", 0.0) or 0.0) > 0.0
+        ):
+            pricing = {
+                "price_per_input_token": float(
+                    getattr(snapshot_pricing, "price_per_input_token", 0.0) or 0.0
+                ),
+                "price_per_output_token": float(
+                    getattr(snapshot_pricing, "price_per_output_token", 0.0) or 0.0
+                ),
+                "currency": str(getattr(snapshot_pricing, "currency", "UNFED") or "UNFED"),
+                "model_id": str(getattr(snapshot_pricing, "model_id", "") or ""),
+            }
+        else:
+            pricing = await get_pricing(model_id=selected_model)
+        perf = _perf_summary(
+            model_id=selected_model,
+            window_seconds=(window_seconds if window_seconds > 0 else None),
+        )
+
+        return {
+            "timestamp": int(time.time()),
+            "registry": {
+                "total_nodes": len(all_nodes),
+                "by_type": dict(type_counts),
+                "healthy_models": healthy_models,
+                "total_models": len(models),
+            },
+            "pricing": pricing,
+            "performance": perf,
+            "model_health": selected_health,
+            "models": model_rows,
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # REST: Mini-Chain (syncs from network like a Monero wallet)
 # ---------------------------------------------------------------------------
@@ -516,26 +920,26 @@ def _get_chain():
 def _discover_daemon_with_utilization():
     """Find least-loaded daemon and return (daemon, utilization map)."""
     try:
-        import grpc
-        import inference_pb2
-        import inference_pb2_grpc
         discovery = get_discovery()
         all_nodes = discovery.discover("")
         daemons = [n for n in all_nodes if n.node_type == "daemon"]
         if daemons:
             def _probe(daemon):
-                ch = grpc.insecure_channel(
-                    daemon.address, options=app_config.GRPC_OPTIONS
-                )
                 try:
-                    stub = inference_pb2_grpc.InferenceNodeStub(ch)
+                    stub = _get_grpc_stub("inference", daemon.address)
                     fee = stub.GetLoad(
                         inference_pb2.FeeEstimateRequest(estimated_tokens=1),
                         timeout=2,
                     )
                     return float(getattr(fee, "utilization", 1.0))
-                finally:
-                    ch.close()
+                except Exception:
+                    _close_grpc_endpoint("inference", daemon.address)
+                    stub = _get_grpc_stub("inference", daemon.address)
+                    fee = stub.GetLoad(
+                        inference_pb2.FeeEstimateRequest(estimated_tokens=1),
+                        timeout=2,
+                    )
+                    return float(getattr(fee, "utilization", 1.0))
 
             selected, utilization = select_least_loaded_daemon(daemons, _probe)
             if selected is None:
@@ -549,6 +953,70 @@ def _discover_daemon_with_utilization():
 def _discover_daemon():
     daemon, _ = _discover_daemon_with_utilization()
     return daemon
+
+
+def _rebuild_settlements_from_blocks(blocks: list, settlement_blocks: int) -> list:
+    """Reconstruct settlement summaries from imported daemon blocks.
+
+    This is used by dashboard trusted-sync mode, where blocks are accepted as
+    canonical from the daemon snapshot.
+    """
+    if settlement_blocks <= 0 or not blocks:
+        return []
+    try:
+        from economics.share_chain import SettlementSummary
+    except Exception:
+        return []
+
+    by_index = {int(getattr(b, "index", -1)): b for b in blocks}
+    max_index = max(by_index.keys(), default=0)
+    settlements = []
+
+    for end_idx in range(settlement_blocks, max_index + 1, settlement_blocks):
+        start_idx = max(1, end_idx - settlement_blocks + 1)
+        node_shares: dict[str, float] = {}
+        total = 0.0
+        total_tokens = 0
+        earliest = float("inf")
+        latest = 0.0
+
+        for i in range(start_idx, end_idx + 1):
+            block = by_index.get(i)
+            if block is None:
+                continue
+            for share in getattr(block, "shares", []) or []:
+                if not getattr(share, "validated", False):
+                    continue
+                node_id = str(getattr(share, "node_id", "") or "")
+                if not node_id:
+                    continue
+                weight = float(getattr(share, "share_weight", 1.0) or 1.0)
+                node_shares[node_id] = node_shares.get(node_id, 0.0) + weight
+                total += weight
+                total_tokens += int(getattr(share, "tokens_processed", 0) or 0)
+                ts = float(getattr(share, "timestamp", 0.0) or 0.0)
+                if ts > 0:
+                    earliest = min(earliest, ts)
+                    latest = max(latest, ts)
+
+        now = time.time()
+        if earliest == float("inf"):
+            earliest = now
+        if latest == 0.0:
+            latest = now
+
+        settlement = SettlementSummary(
+            period_start=earliest,
+            period_end=latest,
+            block_range=(start_idx, end_idx),
+            node_shares=node_shares,
+            total_shares=total,
+            total_tokens=total_tokens,
+        )
+        settlement.finalize()
+        settlements.append(settlement)
+
+    return settlements
 
 
 def _sync_chain():
@@ -580,10 +1048,14 @@ def _sync_chain():
         imported = [proto_to_block(bm) for bm in full.blocks]
         if not imported:
             return 0
+        rebuilt_settlements = _rebuild_settlements_from_blocks(
+            imported,
+            settlement_blocks=int(getattr(chain, "settlement_blocks", 6) or 6),
+        )
         with chain._lock:  # dashboard-local cache only
             chain._chain = imported
             chain._pending_shares = []
-            chain._settlements = []
+            chain._settlements = rebuilt_settlements
         return len(imported)
 
     # Try daemon first (preferred)
@@ -710,9 +1182,6 @@ async def chain_node_totals():
 @app.get("/api/chain/fees")
 async def chain_fees():
     """Get current fee market data from the daemon's fee oracle."""
-    import grpc as _grpc
-    import inference_pb2
-    import inference_pb2_grpc
     try:
         daemon, candidates = _discover_daemon_with_utilization()
         if not daemon:
@@ -727,17 +1196,19 @@ async def chain_fees():
                 "fee_history": [],
             }
 
-        channel = _grpc.insecure_channel(
-            daemon.address,
-            options=app_config.GRPC_OPTIONS,
-        )
-        stub = inference_pb2_grpc.InferenceNodeStub(channel)
-
-        resp = stub.GetLoad(
-            inference_pb2.FeeEstimateRequest(estimated_tokens=100),
-            timeout=5,
-        )
-        channel.close()
+        try:
+            stub = _get_grpc_stub("inference", daemon.address)
+            resp = stub.GetLoad(
+                inference_pb2.FeeEstimateRequest(estimated_tokens=100),
+                timeout=5,
+            )
+        except Exception:
+            _close_grpc_endpoint("inference", daemon.address)
+            stub = _get_grpc_stub("inference", daemon.address)
+            resp = stub.GetLoad(
+                inference_pb2.FeeEstimateRequest(estimated_tokens=100),
+                timeout=5,
+            )
 
         return {
             "base_fee": resp.base_fee,
@@ -765,24 +1236,192 @@ async def chain_fees():
         }
 
 
+@app.get("/api/chain/payout-ledger")
+async def chain_payout_ledger(limit: int = 8):
+    """Return payout ledger rows (estimated/finalized-like) for the dashboard."""
+    try:
+        _sync_chain()
+        chain = _get_chain()
+        settlements = chain.get_settlements()
+        if not settlements:
+            return {"rows": [], "meta": {"settlements": 0}}
+
+        max_settlements = max(1, min(int(limit or 8), 30))
+        selected = settlements[-max_settlements:]
+
+        discovery = get_discovery()
+        all_nodes = discovery.discover("")
+        daemon_count = len([n for n in all_nodes if getattr(n, "node_type", "") == "daemon"])
+
+        # Best-effort fee/pricing snapshot for payout estimation.
+        base_fee = 0.001
+        utilization = 0.0
+        selected_daemon = ""
+        daemon, _ = _discover_daemon_with_utilization()
+        if daemon is not None:
+            selected_daemon = str(getattr(daemon, "address", "") or "")
+            try:
+                stub = _get_grpc_stub("inference", daemon.address)
+                fee = stub.GetLoad(
+                    inference_pb2.FeeEstimateRequest(estimated_tokens=100),
+                    timeout=5,
+                )
+                base_fee = float(getattr(fee, "base_fee", base_fee) or base_fee)
+                utilization = float(getattr(fee, "utilization", 0.0) or 0.0)
+            except Exception:
+                _close_grpc_endpoint("inference", daemon.address)
+
+        pricing = await get_pricing(model_id="")
+        output_price = float(pricing.get("price_per_output_token", 0.0) or 0.0)
+        currency = str(pricing.get("currency", "UNFED") or "UNFED")
+
+        daemon_work_window = {}
+        daemon_payout_share = {}
+        winner_bonus_window = {}
+        infra = None
+        get_infra_telemetry = getattr(discovery, "get_infra_telemetry", None)
+        if callable(get_infra_telemetry):
+            infra = get_infra_telemetry()
+        if infra is not None:
+            try:
+                daemon_work_window = json.loads(
+                    getattr(infra, "daemon_work_window_json", "{}") or "{}"
+                )
+            except Exception:
+                daemon_work_window = {}
+            try:
+                daemon_payout_share = json.loads(
+                    getattr(infra, "daemon_payout_share_json", "{}") or "{}"
+                )
+            except Exception:
+                daemon_payout_share = {}
+            try:
+                winner_bonus_window = json.loads(
+                    getattr(infra, "winner_bonus_window_json", "{}") or "{}"
+                )
+            except Exception:
+                winner_bonus_window = {}
+
+        rows: list[dict] = []
+        for idx, settlement in enumerate(reversed(selected), start=1):
+            total_shares = float(getattr(settlement, "total_shares", 0.0) or 0.0)
+            total_tokens = int(getattr(settlement, "total_tokens", 0) or 0)
+            if output_price > 0.0 and total_tokens > 0:
+                pool_amount = float(total_tokens) * output_price
+                pool_basis = "token_pricing"
+            else:
+                pool_amount = total_shares * base_fee
+                pool_basis = "base_fee"
+
+            node_shares = dict(getattr(settlement, "node_shares", {}) or {})
+            for node_id, weight in sorted(node_shares.items(), key=lambda kv: float(kv[1]), reverse=True):
+                w = float(weight or 0.0)
+                share_ratio = (w / total_shares) if total_shares > 0 else 0.0
+                rows.append(
+                    {
+                        "kind": "compute",
+                        "status": "estimated",
+                        "settlement_index": len(settlements) - idx + 1,
+                        "settlement_hash": str(getattr(settlement, "settlement_hash", "") or ""),
+                        "recipient": str(node_id),
+                        "weight": round(w, 6),
+                        "share_ratio": round(share_ratio, 8),
+                        "estimated_amount": round(pool_amount * share_ratio, 8),
+                        "currency": currency,
+                        "pool_basis": pool_basis,
+                        "block_start": int(getattr(settlement, "block_range", (0, 0))[0]),
+                        "block_end": int(getattr(settlement, "block_range", (0, 0))[1]),
+                    }
+                )
+
+        for recipient, units in sorted(daemon_work_window.items(), key=lambda kv: float(kv[1]), reverse=True):
+            rows.append(
+                {
+                    "kind": "daemon_pending",
+                    "status": "pending",
+                    "recipient": str(recipient),
+                    "weight": round(float(units or 0.0), 6),
+                    "share_ratio": round(float(daemon_payout_share.get(recipient, 0.0) or 0.0), 8),
+                    "estimated_amount": None,
+                    "currency": currency,
+                    "pool_basis": "infra_window",
+                }
+            )
+
+        for winner, bonus_units in sorted(winner_bonus_window.items(), key=lambda kv: float(kv[1]), reverse=True):
+            rows.append(
+                {
+                    "kind": "winner_bonus_pending",
+                    "status": "pending",
+                    "recipient": str(winner),
+                    "weight": round(float(bonus_units or 0.0), 6),
+                    "share_ratio": 0.0,
+                    "estimated_amount": None,
+                    "currency": currency,
+                    "pool_basis": "winner_bonus_window",
+                }
+            )
+
+        rows.sort(
+            key=lambda r: (
+                0 if r.get("kind") == "compute" else (1 if r.get("kind") == "daemon_pending" else 2),
+                -float(r.get("estimated_amount") or 0.0),
+                -float(r.get("weight") or 0.0),
+            )
+        )
+        rows = rows[:300]
+        return {
+            "rows": rows,
+            "meta": {
+                "settlements": len(settlements),
+                "selected_settlements": len(selected),
+                "daemon_count": daemon_count,
+                "selected_daemon": selected_daemon,
+                "base_fee": base_fee,
+                "utilization": utilization,
+                "currency": currency,
+                "price_per_output_token": output_price,
+            },
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # Pricing
 # ---------------------------------------------------------------------------
 @app.get("/api/pricing")
 async def get_pricing(model_id: str = ""):
     """Get per-token pricing from the registry."""
-    import grpc as _grpc
-    import registry_pb2 as _rpb
-    import registry_pb2_grpc as _rgrpc
     try:
-        channel = _grpc.insecure_channel(
-            _registry_address, options=app_config.GRPC_OPTIONS)
-        stub = _rgrpc.RegistryStub(channel)
-        resp = stub.GetPricing(
-            _rpb.GetPricingRequest(model_id=model_id),
-            timeout=5,
-        )
-        channel.close()
+        stub = _get_grpc_stub("registry", _registry_address)
+        requested_model_id = (model_id or "").strip()
+        try:
+            resp = stub.GetPricing(
+                registry_pb2.GetPricingRequest(model_id=model_id),
+                timeout=5,
+            )
+        except Exception:
+            _close_grpc_endpoint("registry", _registry_address)
+            stub = _get_grpc_stub("registry", _registry_address)
+            resp = stub.GetPricing(
+                registry_pb2.GetPricingRequest(model_id=model_id),
+                timeout=5,
+            )
+        # Backward-compatible fallback: if model-scoped pricing lookup fails in the
+        # registry, retry cluster-level defaults instead of returning zeros.
+        if (
+            requested_model_id
+            and float(getattr(resp, "price_per_input_token", 0.0) or 0.0) <= 0.0
+            and float(getattr(resp, "price_per_output_token", 0.0) or 0.0) <= 0.0
+        ):
+            try:
+                resp = stub.GetPricing(
+                    registry_pb2.GetPricingRequest(model_id=""),
+                    timeout=5,
+                )
+            except Exception:
+                pass
         return {
             "price_per_input_token": resp.price_per_input_token,
             "price_per_output_token": resp.price_per_output_token,
@@ -1426,6 +2065,9 @@ async def _run_generation(
 
         # Run generation
         gen_start = time.time()
+        first_token_ts = None
+        prev_token_ts = None
+        token_intervals_ms: list[float] = []
         step = 0
 
         if model_type in ("qwen2_vl", "smolvlm") and image_path:
@@ -1461,7 +2103,13 @@ async def _run_generation(
 
         # Stream tokens
         for token_text in generator:
-            step_time = time.time() - gen_start
+            now_ts = time.time()
+            step_time = now_ts - gen_start
+            if first_token_ts is None:
+                first_token_ts = now_ts
+            if prev_token_ts is not None:
+                token_intervals_ms.append((now_ts - prev_token_ts) * 1000.0)
+            prev_token_ts = now_ts
             await websocket.send_json({
                 "type": "token",
                 "text": token_text,
@@ -1474,6 +2122,14 @@ async def _run_generation(
 
         total_time = time.time() - gen_start
         tps = step / total_time if total_time > 0 else 0
+        ttft_ms = ((first_token_ts - gen_start) * 1000.0) if first_token_ts else 0.0
+        _record_perf_sample(
+            model_id=model_id,
+            output_tokens=step,
+            total_time_s=total_time,
+            ttft_ms=ttft_ms,
+            token_intervals_ms=token_intervals_ms,
+        )
 
         # Report token usage to registry for settlement accounting
         output_tokens = step
@@ -1493,6 +2149,12 @@ async def _run_generation(
             )
         except Exception as e:
             print(f"[Web] ReportUsage failed: {e}")
+
+        # Apply immediate per-request debit in on-chain escrow mode.
+        try:
+            _charge_client_escrow(client_address, usage_cost)
+        except Exception as e:
+            print(f"[Web] Escrow debit failed: {e}")
 
         # Report remaining balance after deduction
         _, remaining_balance = _check_client_balance(client_address)
@@ -1537,14 +2199,9 @@ def _count_request_input_tokens(client, model_type: str, model_id: str,
 def _report_usage(registry_addr: str, input_tokens: int, output_tokens: int,
                   model_id: str, session_id: str = "") -> float:
     """Report usage to registry and return computed cost."""
-    import grpc as _grpc
-    import registry_pb2 as _rpb
-    import registry_pb2_grpc as _rgrpc
-
-    ch = _grpc.insecure_channel(registry_addr)
     try:
-        stub = _rgrpc.RegistryStub(ch)
-        resp = stub.ReportUsage(_rpb.ReportUsageRequest(
+        stub = _get_grpc_stub("registry", registry_addr)
+        resp = stub.ReportUsage(registry_pb2.ReportUsageRequest(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             model_id=model_id,
@@ -1553,8 +2210,31 @@ def _report_usage(registry_addr: str, input_tokens: int, output_tokens: int,
         if not resp.accepted:
             raise RuntimeError("Usage report rejected by registry")
         return float(resp.cost)
-    finally:
-        ch.close()
+    except Exception:
+        _close_grpc_endpoint("registry", registry_addr)
+        stub = _get_grpc_stub("registry", registry_addr)
+        resp = stub.ReportUsage(registry_pb2.ReportUsageRequest(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            model_id=model_id,
+            session_id=session_id,
+        ), timeout=3)
+        if not resp.accepted:
+            raise RuntimeError("Usage report rejected by registry")
+        return float(resp.cost)
+
+
+def _charge_client_escrow(client_address: str, cost_tokens: float) -> None:
+    """Apply immediate per-request debit to on-chain client escrow balance."""
+    escrow = _get_escrow()
+    if escrow is None:
+        return
+    if cost_tokens <= 0.0:
+        return
+    amount_wei = int(round(float(cost_tokens) * 1e18))
+    if amount_wei <= 0:
+        return
+    escrow.charge_client(client_address, amount_wei)
 
 
 # ---------------------------------------------------------------------------

@@ -21,11 +21,13 @@ const Chain = {
     contributionsChart: null,
     settlementsList: null,
     infraPayoutSummary: null,
+    payoutLedgerRows: null,
     allBlocks: [],
     pageSize: 50,
     currentPage: 0,  // 0 = newest page
     totalPages: 1,
     totalBlocks: 0,
+    latestSettlements: [],
 
     init() {
         this.blocksList = document.getElementById('blocksList');
@@ -51,6 +53,7 @@ const Chain = {
         this.contributionsChart = document.getElementById('contributionsChart');
         this.settlementsList = document.getElementById('settlementsList');
         this.infraPayoutSummary = document.getElementById('infraPayoutSummary');
+        this.payoutLedgerRows = document.getElementById('payoutLedgerRows');
 
         this.refreshBtn.addEventListener('click', () => this.loadAll());
         if (this.searchInput) {
@@ -113,6 +116,7 @@ const Chain = {
             this.loadSettlements(),
             this.loadFees(),
             this.loadInfraPayouts(),
+            this.loadPayoutLedger(),
         ]);
     },
 
@@ -158,7 +162,19 @@ const Chain = {
     async loadSettlements() {
         const data = await App.fetchJson('/api/chain/settlements');
         if (data && data.settlements) {
+            this.latestSettlements = Array.isArray(data.settlements) ? data.settlements : [];
             this.renderSettlements(data.settlements);
+        }
+    },
+
+    async loadPayoutLedger() {
+        const data = await App.fetchJson('/api/chain/payout-ledger?limit=8');
+        if (data && !data.error) {
+            this.renderPayoutLedger(data.rows || [], data.meta || {});
+            return;
+        }
+        if (this.payoutLedgerRows) {
+            this.payoutLedgerRows.innerHTML = '<tr><td colspan="7" class="blocks-empty">Payout ledger unavailable.</td></tr>';
         }
     },
 
@@ -439,7 +455,9 @@ const Chain = {
         const daemonWork = data.daemon_work_window || {};
         const verifierWork = data.verifier_work_window || {};
         const winnerBonus = data.winner_bonus_window || {};
-        const recentWinners = data.recent_winner_receipts || [];
+        let recentWinners = Array.isArray(data.recent_winner_receipts)
+            ? data.recent_winner_receipts
+            : [];
         const winnerReceiptCount = Number(data.winner_receipt_count || 0);
         const selectedDaemon = data.selected_daemon_recipient || '';
         const selectedVerifier = data.selected_verifier_recipient || '';
@@ -449,6 +467,30 @@ const Chain = {
         const daemonWorkRows = Object.entries(daemonWork).sort((a, b) => b[1] - a[1]);
         const verifierWorkRows = Object.entries(verifierWork).sort((a, b) => b[1] - a[1]);
         const winnerBonusRows = Object.entries(winnerBonus).sort((a, b) => b[1] - a[1]);
+        let winnerSubtitle = `Recent winner receipts (${winnerReceiptCount})`;
+
+        // Fallback for non-racing modes: infer "winners" from latest settlements.
+        if (!recentWinners.length && this.latestSettlements.length) {
+            recentWinners = this.latestSettlements
+                .slice(-6)
+                .reverse()
+                .map((s) => {
+                    const nodeShares = s && s.node_shares ? s.node_shares : {};
+                    const entries = Object.entries(nodeShares).sort((a, b) => Number(b[1]) - Number(a[1]));
+                    const winnerNodeId = entries.length ? String(entries[0][0]) : '';
+                    return {
+                        winner_node_id: winnerNodeId,
+                        shard_index: -1,
+                        step_index: -1,
+                        consumed: false,
+                        source: 'settlement',
+                    };
+                })
+                .filter((x) => x.winner_node_id);
+            if (recentWinners.length) {
+                winnerSubtitle = `Recent winner leaders (${recentWinners.length})`;
+            }
+        }
 
         if (
             !daemonRows.length &&
@@ -501,13 +543,17 @@ const Chain = {
                 <div class="infra-payout-card">
                     <div class="infra-payout-title">Winner bonus (pending)</div>
                     ${winnerBonusRows.length ? renderWorkRows(winnerBonusRows, '') : '<div class="infra-empty">No pending winner bonus rows</div>'}
-                    <div class="infra-subtitle">Recent winner receipts (${winnerReceiptCount})</div>
+                    <div class="infra-subtitle">${winnerSubtitle}</div>
                     ${
                         recentWinners.length
                             ? recentWinners.slice(-6).reverse().map((r) => `
                                 <div class="infra-payout-row">
                                     <span class="infra-payout-address mono" title="${r.winner_node_id || ''}">${App.truncHash(r.winner_node_id || 'unknown', 8)}</span>
-                                    <span class="infra-payout-work">s${r.shard_index}/t${r.step_index}${r.consumed ? ' consumed' : ''}</span>
+                                    <span class="infra-payout-work">${
+                                        r.source === 'settlement'
+                                            ? 'top settlement leader'
+                                            : `s${r.shard_index}/t${r.step_index}${r.consumed ? ' consumed' : ''}`
+                                    }</span>
                                 </div>
                             `).join('')
                             : '<div class="infra-empty">No winner receipts yet</div>'
@@ -516,6 +562,45 @@ const Chain = {
             </div>
             <div class="chain-card-hint">Pending work accumulates continuously; payout share updates after infra settlement accounting cycles.</div>
         `;
+    },
+
+    renderPayoutLedger(rows, meta) {
+        if (!this.payoutLedgerRows) return;
+        if (!rows || rows.length === 0) {
+            this.payoutLedgerRows.innerHTML = '<tr><td colspan="7" class="blocks-empty">No payout rows available yet.</td></tr>';
+            return;
+        }
+
+        const currency = meta.currency || 'UNFED';
+        const renderSettlementLabel = (row) => {
+            const idx = Number(row.settlement_index || 0);
+            const hash = row.settlement_hash || '';
+            if (!idx && !hash) return '—';
+            return idx ? `#${idx} ${App.truncHash(hash, 6)}` : App.truncHash(hash, 8);
+        };
+
+        this.payoutLedgerRows.innerHTML = rows.map((row) => {
+            const kind = String(row.kind || 'unknown');
+            const status = String(row.status || 'unknown');
+            const recipient = String(row.recipient || '');
+            const weight = Number(row.weight || 0);
+            const share = Number(row.share_ratio || 0);
+            const estimatedAmount = row.estimated_amount;
+            const amountText = (estimatedAmount === null || estimatedAmount === undefined)
+                ? 'pending'
+                : `${Number(estimatedAmount).toFixed(6)} ${currency}`;
+            return `
+                <tr>
+                    <td>${kind}</td>
+                    <td>${status}</td>
+                    <td class="mono" title="${recipient}">${App.truncHash(recipient, 8)}</td>
+                    <td class="mono">${renderSettlementLabel(row)}</td>
+                    <td>${weight.toFixed(3)}</td>
+                    <td>${(share * 100).toFixed(2)}%</td>
+                    <td>${amountText}</td>
+                </tr>
+            `;
+        }).join('');
     },
 
     renderSettlements(settlements) {

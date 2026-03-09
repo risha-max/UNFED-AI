@@ -58,6 +58,11 @@ class RegistryStub(object):
                 request_serializer=registry__pb2.DiscoverRequest.SerializeToString,
                 response_deserializer=registry__pb2.DiscoverResponse.FromString,
                 _registered_method=True)
+        self.GetRegistrySnapshot = channel.unary_unary(
+                '/unfed.Registry/GetRegistrySnapshot',
+                request_serializer=registry__pb2.GetRegistrySnapshotRequest.SerializeToString,
+                response_deserializer=registry__pb2.GetRegistrySnapshotResponse.FromString,
+                _registered_method=True)
         self.GetPoolHealth = channel.unary_unary(
                 '/unfed.Registry/GetPoolHealth',
                 request_serializer=registry__pb2.PoolHealthRequest.SerializeToString,
@@ -175,6 +180,13 @@ class RegistryServicer(object):
 
     def Discover(self, request, context):
         """Discover available nodes, optionally filtered by model.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetRegistrySnapshot(self, request, context):
+        """Fetch a consolidated registry snapshot to reduce RPC round trips.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -327,6 +339,11 @@ def add_RegistryServicer_to_server(servicer, server):
                     servicer.Discover,
                     request_deserializer=registry__pb2.DiscoverRequest.FromString,
                     response_serializer=registry__pb2.DiscoverResponse.SerializeToString,
+            ),
+            'GetRegistrySnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetRegistrySnapshot,
+                    request_deserializer=registry__pb2.GetRegistrySnapshotRequest.FromString,
+                    response_serializer=registry__pb2.GetRegistrySnapshotResponse.SerializeToString,
             ),
             'GetPoolHealth': grpc.unary_unary_rpc_method_handler(
                     servicer.GetPoolHealth,
@@ -526,6 +543,33 @@ class Registry(object):
             '/unfed.Registry/Discover',
             registry__pb2.DiscoverRequest.SerializeToString,
             registry__pb2.DiscoverResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetRegistrySnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.Registry/GetRegistrySnapshot',
+            registry__pb2.GetRegistrySnapshotRequest.SerializeToString,
+            registry__pb2.GetRegistrySnapshotResponse.FromString,
             options,
             channel_credentials,
             insecure,

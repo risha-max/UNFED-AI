@@ -20,6 +20,8 @@ const Chat = {
     maxContextChars: 12000,
     maxStoredTurns: 60,
     historyStorageKey: "unfed_chat_history_v1",
+    pendingGenerationKey: "unfed_chat_pending_generation_v1",
+    pendingAssistantDraftKey: "unfed_chat_pending_assistant_draft_v1",
 
     init() {
         this.messagesEl = document.getElementById('chatMessages');
@@ -30,6 +32,9 @@ const Chat = {
         this.imagePreviewImg = document.getElementById('imagePreviewImg');
         this.imageRemoveBtn = document.getElementById('imageRemoveBtn');
         this.loadHistory();
+        this.renderHistory();
+        this.restoreInterruptedGeneration();
+        this.installUnloadGuard();
 
         // Send on Enter (Shift+Enter for newline)
         this.inputEl.addEventListener('keydown', (e) => {
@@ -71,6 +76,98 @@ const Chat = {
 
         // WebSocket messages
         App.on('chatMessage', (msg) => this.onMessage(msg));
+    },
+
+    installUnloadGuard() {
+        window.addEventListener('beforeunload', (e) => {
+            if (!App.state.generating) return;
+            e.preventDefault();
+            e.returnValue = '';
+        });
+    },
+
+    renderHistory() {
+        if (!Array.isArray(this.history) || this.history.length === 0) return;
+        const welcome = this.messagesEl.querySelector('.chat-welcome');
+        if (welcome) welcome.remove();
+        this.welcomeShown = false;
+        this.history.forEach((turn) => {
+            const role = turn.role === 'assistant' ? 'assistant' : 'user';
+            this.addMessage(role, turn.content);
+        });
+    },
+
+    persistPendingGeneration(prompt) {
+        try {
+            localStorage.setItem(this.pendingGenerationKey, JSON.stringify({
+                prompt: String(prompt || ''),
+                ts: Date.now(),
+            }));
+        } catch (e) {
+            // Best effort only.
+        }
+    },
+
+    clearPendingGeneration() {
+        try {
+            localStorage.removeItem(this.pendingGenerationKey);
+            localStorage.removeItem(this.pendingAssistantDraftKey);
+        } catch (e) {
+            // Best effort only.
+        }
+    },
+
+    persistAssistantDraft(text) {
+        try {
+            const content = String(text || '');
+            if (!content) return;
+            localStorage.setItem(this.pendingAssistantDraftKey, JSON.stringify({
+                content,
+                ts: Date.now(),
+            }));
+        } catch (e) {
+            // Best effort only.
+        }
+    },
+
+    restoreInterruptedGeneration() {
+        let pending = null;
+        let draft = null;
+        try {
+            const rawPending = localStorage.getItem(this.pendingGenerationKey);
+            if (rawPending) pending = JSON.parse(rawPending);
+        } catch (e) {
+            pending = null;
+        }
+        try {
+            const rawDraft = localStorage.getItem(this.pendingAssistantDraftKey);
+            if (rawDraft) draft = JSON.parse(rawDraft);
+        } catch (e) {
+            draft = null;
+        }
+
+        if (!pending && !draft) return;
+        const welcome = this.messagesEl.querySelector('.chat-welcome');
+        if (welcome) welcome.remove();
+        this.welcomeShown = false;
+
+        this.addSystemMessage('Previous generation was interrupted by refresh/reload. The request may still have been billed.');
+        if (pending && pending.prompt) {
+            const prompt = String(pending.prompt);
+            const last = this.history.length ? this.history[this.history.length - 1] : null;
+            const alreadyShown = Boolean(last && last.role === 'user' && last.content === prompt);
+            if (!alreadyShown) {
+                this.addMessage('user', prompt);
+            }
+        }
+        if (draft && draft.content) {
+            const msg = this.addMessage('assistant', String(draft.content));
+            const meta = document.createElement('div');
+            meta.className = 'message-meta';
+            meta.textContent = 'Interrupted response (partial draft restored after refresh)';
+            msg.querySelector('.message-body').appendChild(meta);
+        }
+        this.clearPendingGeneration();
     },
 
     handleImageFile(file) {
@@ -175,8 +272,10 @@ const Chat = {
 
         if (prompt) {
             this.recordTurn("user", prompt);
+            this.persistPendingGeneration(prompt);
         } else if (imagePath) {
             this.recordTurn("user", "[Image uploaded]");
+            this.persistPendingGeneration("[Image uploaded]");
         }
         this.sendBtn.disabled = true;
     },
@@ -205,6 +304,7 @@ const Chat = {
                     if (cursor) cursor.remove();
                     textEl.textContent += msg.text;
                     this.currentAssistantText += msg.text;
+                    this.persistAssistantDraft(this.currentAssistantText);
                     textEl.appendChild(this.makeCursor());
                     this.scrollToBottom();
                 }
@@ -237,6 +337,7 @@ const Chat = {
                     this.recordTurn("assistant", this.currentAssistantText);
                 }
                 this.currentAssistantText = "";
+                this.clearPendingGeneration();
 
                 // Update stats
                 document.getElementById('statTokens').textContent = msg.total_tokens;
@@ -261,6 +362,7 @@ const Chat = {
                 App.state.generating = false;
                 this.sendBtn.disabled = false;
                 this.currentAssistantText = "";
+                this.clearPendingGeneration();
                 App.setStatus('error', 'Error');
                 break;
         }

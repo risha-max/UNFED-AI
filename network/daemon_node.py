@@ -1107,7 +1107,7 @@ if __name__ == "__main__":
     parser.add_argument("--fee-window-blocks", type=int, default=10,
                         help="Rolling window size for utilization")
     parser.add_argument("--fee-target-capacity", type=int, default=40,
-                        help="Shares/block at 100% utilization")
+                        help="Shares/block at 100%% utilization")
     parser.add_argument("--heartbeat-interval", type=int,
                         default=config.HEARTBEAT_INTERVAL_SECONDS,
                         help="Registry heartbeat interval in seconds")

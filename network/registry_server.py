@@ -351,6 +351,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                  no_chain: bool = False):
         self._nodes: dict[str, NodeRecord] = {}  # node_id -> NodeRecord
         self._lock = threading.Lock()
+        self._topology_version = 1
         self._verifiers: dict[str, VerifierRecord] = {}
         self._verifier_lock = threading.Lock()
         self._verifier_health_last_change = time.time()
@@ -366,6 +367,13 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         self._registry_gossip_interval_seconds = 60.0
         self._registry_peer_exchange_timeout_seconds = 10.0
         self._registry_daemon_poll_timeout_seconds = 3.0
+        # Initialize runtime-tuned fields before applying config overrides.
+        self._winner_bonus_per_report = 0.25
+        self._winner_bonus_cap_ratio = 0.5
+        self._winner_receipt_store_path = os.path.expanduser(
+            "~/.unfed/registry_winner_receipts.jsonl"
+        )
+        self._winner_receipt_store_max_entries = 200000
         self._apply_runtime_tuning_from_cluster_config()
 
         # --- Known peer registries (endpoint -> PeerInfo-like dict) ---
@@ -568,6 +576,9 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
             1000,
             int(getattr(self._cluster_config, "winner_receipt_store_max_entries", self._winner_receipt_store_max_entries) or self._winner_receipt_store_max_entries),
         )
+
+    def _bump_topology_version(self):
+        self._topology_version += 1
 
     def _cleanup_loop(self):
         """Periodically remove nodes that haven't sent a heartbeat."""
@@ -1083,6 +1094,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                     })
                     print(f"[Registry] ORPHANED shard {record.shard_index} "
                           f"for {record.model_id} — queued for reassignment")
+            if stale:
+                self._bump_topology_version()
 
         # Verifier role retired: no verifier liveness maintenance.
 
@@ -1635,6 +1648,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                       f"time={resp.allocation_time_ms:.0f}ms) — unregistering")
                 with self._lock:
                     record = self._nodes.pop(node_id, None)
+                    if record is not None:
+                        self._bump_topology_version()
                 if record:
                     self._pool_registry.node_left(
                         record.model_id, record.shard_index, node_id)
@@ -1779,6 +1794,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 stake_identity=effective_stake_identity,
             )
             self._nodes[request.node_id] = record
+            self._bump_topology_version()
 
         print(f"[Registry] Node registered: {request.node_id[:8]}... "
               f"type={node_type} model={request.model_id} shard={request.shard_index} "
@@ -1837,6 +1853,7 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 and not self._node_is_eligible_now(record.node_id)
             ):
                 self._nodes.pop(request.node_id, None)
+                self._bump_topology_version()
                 return registry_pb2.HeartbeatResponse(acknowledged=False)
             record.last_heartbeat = time.time()
             return registry_pb2.HeartbeatResponse(acknowledged=True)
@@ -1939,6 +1956,8 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
                 ):
                     return registry_pb2.UnregisterResponse(success=False)
             record = self._nodes.pop(request.node_id, None)
+            if record is not None:
+                self._bump_topology_version()
 
         if record:
             print(f"[Registry] Node unregistered: {request.node_id[:8]}... "
@@ -1963,6 +1982,63 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
         return registry_pb2.DiscoverResponse(
             nodes=[n.to_proto() for n in nodes]
+        )
+
+    def GetRegistrySnapshot(self, request, context):
+        """Return an aggregated snapshot to avoid client-side N+1 RPC fanout."""
+        include_any = any(
+            [
+                bool(request.include_nodes),
+                bool(request.include_models),
+                bool(request.include_pricing),
+                bool(request.include_pool_health),
+            ]
+        )
+        include_nodes = bool(request.include_nodes) or not include_any
+        include_models = bool(request.include_models) or not include_any
+        include_pricing = bool(request.include_pricing) or not include_any
+        include_pool_health = bool(request.include_pool_health) or (
+            (not include_any) and bool((request.model_id or "").strip())
+        )
+
+        model_id = (request.model_id or "").strip()
+        discover_resp = self.Discover(registry_pb2.DiscoverRequest(model_id=""), context)
+        nodes = list(discover_resp.nodes)
+        by_type: dict[str, int] = defaultdict(int)
+        for n in nodes:
+            by_type[str(n.node_type or "unknown")] += 1
+
+        models = []
+        if include_models:
+            models_resp = self.ListModels(registry_pb2.ListModelsRequest(), context)
+            models = list(models_resp.models)
+
+        pricing = registry_pb2.GetPricingResponse()
+        if include_pricing:
+            pricing = self.GetPricing(
+                registry_pb2.GetPricingRequest(model_id=model_id),
+                context,
+            )
+
+        pool_health = registry_pb2.PoolHealthResponse()
+        if include_pool_health and model_id:
+            pool_health = self.GetPoolHealth(
+                registry_pb2.PoolHealthRequest(model_id=model_id),
+                context,
+            )
+
+        with self._lock:
+            topology_version = int(self._topology_version)
+
+        return registry_pb2.GetRegistrySnapshotResponse(
+            timestamp=int(time.time()),
+            topology_version=topology_version,
+            total_nodes=len(nodes),
+            by_type=dict(by_type),
+            nodes=(nodes if include_nodes else []),
+            models=models,
+            pricing=pricing,
+            pool_health=pool_health,
         )
 
     def ListModels(self, request, context):
@@ -2424,10 +2500,15 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
 
         # Check for per-model override
         if model_id:
-            pool_cfg = self._pool_registry.get_config(model_id)
-            if pool_cfg:
-                input_price = pool_cfg.price_per_input_token
-                output_price = pool_cfg.price_per_output_token
+            pool = self._pool_registry.get_pool(model_id)
+            pool_cfg = getattr(pool, "pool_config", None) if pool is not None else None
+            if pool_cfg is not None:
+                input_price = float(
+                    getattr(pool_cfg, "price_per_input_token", input_price)
+                )
+                output_price = float(
+                    getattr(pool_cfg, "price_per_output_token", output_price)
+                )
 
         # Token symbol
         symbol = "UNFED"

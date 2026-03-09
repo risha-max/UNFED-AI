@@ -89,6 +89,7 @@ contract UnfedEscrow {
     event UnstakeRequested(address indexed node, uint256 amount, uint256 readyAt);
     event Withdrawn(address indexed node, uint256 amount);
     event Deposited(address indexed client, uint256 amount);
+    event ClientCharged(address indexed client, uint256 amount);
     event ClientWithdrawn(address indexed client, uint256 amount);
     event SettlementPosted(bytes32 indexed hash, uint256 totalPayout, uint256 deadline);
     event SettlementFinalized(bytes32 indexed hash);
@@ -213,6 +214,19 @@ contract UnfedEscrow {
         escrowPool -= amount;
         token.safeTransfer(msg.sender, amount);
         emit ClientWithdrawn(msg.sender, amount);
+    }
+
+    /// @notice Charge a client's escrow balance for a completed request.
+    /// @dev Operator-only because request metering and validation happen off-chain.
+    ///      This updates per-client accounting in real time, while actual node
+    ///      payouts still happen via batch settlements.
+    function chargeClient(address client, uint256 amount) external onlyOperator {
+        require(client != address(0), "UnfedEscrow: zero client");
+        require(amount > 0, "UnfedEscrow: zero amount");
+        require(clientBalances[client] >= amount, "UnfedEscrow: insufficient balance");
+
+        clientBalances[client] -= amount;
+        emit ClientCharged(client, amount);
     }
 
     // ---------------------------------------------------------------
