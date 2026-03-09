@@ -2,6 +2,23 @@
 
 How to run, join, and operate on the UNFED AI test network.
 
+For contributor onboarding and PR expectations, see `CONTRIBUTING.md`.
+
+## Developer Shortcuts
+
+```bash
+# Show common tasks
+make help
+
+# Local contributor checks
+make check
+
+# Public testnet lifecycle helpers
+make public-testnet-start
+make public-testnet-status
+make public-testnet-stop
+```
+
 ## Prerequisites
 
 - Python 3.12+

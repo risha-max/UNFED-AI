@@ -1,0 +1,7 @@
+# Default owners for repository changes
+* @risha-max
+
+# Ops / launch workflows
+scripts/* @risha-max
+README.md @risha-max
+CONTRIBUTING.md @risha-max

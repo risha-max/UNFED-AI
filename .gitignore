@@ -16,6 +16,7 @@ env/
 # Environment / secrets
 .env
 *.env
+.env.testnet.strict
 deployed.env
 contracts/deployed.env
 
@@ -50,6 +51,7 @@ Thumbs.db
 # Foundry
 contracts/cache/
 contracts/out/
+contracts/broadcast/**/run-*.json
 
 # Shard directories (model weights)
 shards/

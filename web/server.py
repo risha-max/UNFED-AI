@@ -436,7 +436,7 @@ def _has_mpc_pair(nodes: list, capability: str) -> bool:
         n
         for n in nodes
         if str(getattr(n, "node_type", "") or "") == "mpc"
-        and int(getattr(n, "shard_index", -1) or -1) == 0
+        and int(getattr(n, "shard_index", -1)) == 0
         and _node_has_mpc_capability(n, capability)
     ]
     has_a = any(_node_mpc_role(n) == "A" for n in scoped)
