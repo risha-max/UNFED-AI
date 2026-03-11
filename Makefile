@@ -1,4 +1,6 @@
 SHELL := /usr/bin/env bash
+PYTHON ?= python3
+VENV_ACTIVATE := if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi
 
 .PHONY: help setup check check-runtime preflight-web preflight-node test test-quick \
 	public-testnet-start public-testnet-start-strict public-testnet-check \
@@ -26,25 +28,25 @@ help:
 	@echo "  make public-testnet-stop         Stop launcher-managed services"
 
 setup:
-	python3 -m venv .venv
+	$(PYTHON) -m venv .venv
 	source .venv/bin/activate && pip install -r requirements.txt
 
 test:
-	source .venv/bin/activate && python -m pytest -q
+	$(VENV_ACTIVATE) && $(PYTHON) -m pytest -q
 
 test-quick:
-	source .venv/bin/activate && python -m pytest tests/test_registry_model_health.py tests/test_registry_auth_controls.py -q
+	$(VENV_ACTIVATE) && $(PYTHON) -m pytest tests/test_registry_model_health.py tests/test_registry_auth_controls.py -q
 
 preflight-web:
-	source .venv/bin/activate && python -m scripts.testnet_preflight web --host 127.0.0.1
+	$(VENV_ACTIVATE) && $(PYTHON) -m scripts.testnet_preflight web --host 127.0.0.1
 
 preflight-node:
-	source .venv/bin/activate && python -m scripts.testnet_preflight node --advertise 127.0.0.1:50051
+	$(VENV_ACTIVATE) && $(PYTHON) -m scripts.testnet_preflight node --advertise 127.0.0.1:50051
 
 check: test-quick preflight-web preflight-node
 
 check-runtime:
-	source .venv/bin/activate && python -m scripts.testnet_preflight runtime --web-url http://127.0.0.1:8080
+	$(VENV_ACTIVATE) && $(PYTHON) -m scripts.testnet_preflight runtime --web-url http://127.0.0.1:8080
 
 public-testnet-start:
 	./scripts/start_public_testnet.sh
