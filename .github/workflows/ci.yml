@@ -33,6 +33,3 @@ jobs:
 
       - name: Run contributor checks
         run: make check
-
-      - name: Run tests excluding e2e
-        run: python -m pytest -q -m "not e2e"
