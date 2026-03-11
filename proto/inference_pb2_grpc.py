@@ -51,6 +51,11 @@ class InferenceNodeStub(object):
                 request_serializer=inference__pb2.GetShardRequest.SerializeToString,
                 response_deserializer=inference__pb2.ShardChunk.FromString,
                 _registered_method=True)
+        self.GetShardBitfield = channel.unary_unary(
+                '/unfed.InferenceNode/GetShardBitfield',
+                request_serializer=inference__pb2.GetShardBitfieldRequest.SerializeToString,
+                response_deserializer=inference__pb2.GetShardBitfieldResponse.FromString,
+                _registered_method=True)
         self.Commit = channel.unary_unary(
                 '/unfed.InferenceNode/Commit',
                 request_serializer=inference__pb2.CommitRequest.SerializeToString,
@@ -111,6 +116,13 @@ class InferenceNodeServicer(object):
 
     def GetShard(self, request, context):
         """Transfer a shard file to a requesting node (BitTorrent-style P2P weight distribution).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetShardBitfield(self, request, context):
+        """Return a shard chunk availability bitfield for rarest-first scheduling.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -185,6 +197,11 @@ def add_InferenceNodeServicer_to_server(servicer, server):
                     servicer.GetShard,
                     request_deserializer=inference__pb2.GetShardRequest.FromString,
                     response_serializer=inference__pb2.ShardChunk.SerializeToString,
+            ),
+            'GetShardBitfield': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetShardBitfield,
+                    request_deserializer=inference__pb2.GetShardBitfieldRequest.FromString,
+                    response_serializer=inference__pb2.GetShardBitfieldResponse.SerializeToString,
             ),
             'Commit': grpc.unary_unary_rpc_method_handler(
                     servicer.Commit,
@@ -304,6 +321,33 @@ class InferenceNode(object):
             '/unfed.InferenceNode/GetShard',
             inference__pb2.GetShardRequest.SerializeToString,
             inference__pb2.ShardChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetShardBitfield(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/unfed.InferenceNode/GetShardBitfield',
+            inference__pb2.GetShardBitfieldRequest.SerializeToString,
+            inference__pb2.GetShardBitfieldResponse.FromString,
             options,
             channel_credentials,
             insecure,

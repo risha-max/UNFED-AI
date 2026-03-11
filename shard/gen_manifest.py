@@ -17,6 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from shard.manifest_signing import resolve_private_key_bytes, sign_manifest
 
 
 def compute_file_hash(path: str) -> str:
@@ -96,8 +97,30 @@ if __name__ == "__main__":
     parser.add_argument("--layers-per-shard", type=int, default=6)
     parser.add_argument("--registry", type=str, default=None,
                         help="Registry address to publish manifest to (e.g. localhost:50050)")
+    parser.add_argument("--signing-private-key-hex", type=str, default="",
+                        help="Optional Ed25519 private key (hex/base64) to sign manifest")
+    parser.add_argument("--signing-private-key-file", type=str, default="",
+                        help="Optional path to Ed25519 private key file (hex/base64) to sign manifest")
+    parser.add_argument("--signing-key-id", type=str, default="default",
+                        help="Optional signer key ID embedded in manifest_signature")
+    parser.add_argument("--signature-ttl-seconds", type=int, default=0,
+                        help="Optional signature TTL in seconds (0 = no expires_at)")
     args = parser.parse_args()
     manifest = gen_manifest(args.num_shards, args.layers_per_shard)
+    if manifest and (args.signing_private_key_hex or args.signing_private_key_file):
+        key_bytes = resolve_private_key_bytes(
+            private_key_hex=args.signing_private_key_hex,
+            private_key_file=args.signing_private_key_file,
+        )
+        manifest = sign_manifest(
+            manifest,
+            private_key_bytes=key_bytes,
+            key_id=args.signing_key_id,
+            expires_in_seconds=args.signature_ttl_seconds,
+        )
+        with open(config.MANIFEST_PATH, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        print("Manifest signature added.")
     if args.registry and manifest:
         from shard.splitter import publish_manifest_to_registry
         publish_manifest_to_registry(manifest, args.registry)

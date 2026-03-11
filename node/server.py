@@ -1855,6 +1855,54 @@ class InferenceNodeServicer(inference_pb2_grpc.InferenceNodeServicer):
             if self._transfer_semaphore is not None:
                 self._transfer_semaphore.release()
 
+    def GetShardBitfield(self, request, context):
+        """Return chunk availability bitfield for a shard.
+
+        Current implementation reports local full availability for shard files
+        present on disk. This enables downloader rarest-first scheduling.
+        """
+        # Resolve shard path similarly to GetShard.
+        manifest = self._load_manifest()
+        if self.model_type in ("qwen2_vl", "smolvlm"):
+            shards_list = manifest.get("text_shards", [])
+        else:
+            shards_list = manifest.get("shards", [])
+        if not shards_list:
+            shards_list = (manifest.get("text_shards", [])
+                           + manifest.get("vision_shards", []))
+        shard_file = None
+        for s in shards_list:
+            if s.get("shard_index") == request.shard_index:
+                shard_file = s.get("file")
+                break
+        if shard_file:
+            shard_path = os.path.join(self._shards_dir, shard_file)
+        else:
+            shard_path = config.get_shard_path(request.shard_index)
+
+        if not os.path.exists(shard_path):
+            return inference_pb2.GetShardBitfieldResponse(
+                supported=False,
+                chunk_count=0,
+                bitfield=b"",
+            )
+
+        size_bytes = os.path.getsize(shard_path)
+        piece_size = int(request.chunk_size or config.P2P_PIECE_SIZE)
+        if piece_size <= 0:
+            piece_size = config.P2P_PIECE_SIZE
+        chunk_count = max(1, (size_bytes + piece_size - 1) // piece_size)
+        bit_len = (chunk_count + 7) // 8
+        bits = bytearray(bit_len)
+        for i in range(chunk_count):
+            bits[i // 8] |= (1 << (i % 8))
+
+        return inference_pb2.GetShardBitfieldResponse(
+            supported=True,
+            chunk_count=chunk_count,
+            bitfield=bytes(bits),
+        )
+
     def _get_shard_impl(self, request, context):
         """Internal implementation of GetShard (after bandwidth gate checks)."""
         # Resolve shard path from this node's shards directory + manifest.

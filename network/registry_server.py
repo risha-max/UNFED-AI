@@ -2318,10 +2318,60 @@ class RegistryServicer(registry_pb2_grpc.RegistryServicer):
         # Basic validation: must be valid JSON
         try:
             import json
-            json.loads(request.manifest_json)
+            manifest_obj = json.loads(request.manifest_json)
         except json.JSONDecodeError as e:
             return registry_pb2.PutManifestResponse(
                 success=False, message=f"Invalid JSON: {e}")
+
+        # Optional signature enforcement path for trusted manifest publishers.
+        require_signed = (
+            os.environ.get("UNFED_REQUIRE_SIGNED_MANIFEST", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        trusted_keys_file = os.environ.get("UNFED_MANIFEST_TRUSTED_KEYS_FILE", "").strip()
+        trusted_keys_json = os.environ.get("UNFED_MANIFEST_TRUSTED_KEYS_JSON", "").strip()
+        active_key_ids = [
+            x.strip()
+            for x in os.environ.get("UNFED_MANIFEST_ACTIVE_KEY_IDS", "").split(",")
+            if x.strip()
+        ]
+        max_age_seconds = int(
+            os.environ.get("UNFED_MANIFEST_MAX_AGE_SECONDS", "0") or 0
+        )
+        if require_signed or trusted_keys_file or trusted_keys_json or active_key_ids or max_age_seconds > 0:
+            try:
+                from shard.manifest_signing import (
+                    decode_public_key_bytes,
+                    load_trusted_keys_file,
+                    verify_manifest_signature,
+                )
+                trusted: dict[str, bytes] = {}
+                if trusted_keys_file:
+                    trusted.update(load_trusted_keys_file(trusted_keys_file))
+                if trusted_keys_json:
+                    inline = json.loads(trusted_keys_json)
+                    if not isinstance(inline, dict):
+                        raise ValueError("UNFED_MANIFEST_TRUSTED_KEYS_JSON must be a JSON object")
+                    for key_id, raw in inline.items():
+                        kid = str(key_id).strip()
+                        if kid:
+                            trusted[kid] = decode_public_key_bytes(str(raw))
+                ok, msg = verify_manifest_signature(
+                    manifest_obj,
+                    trusted_keys_by_id=(trusted or None),
+                    active_key_ids=(active_key_ids or None),
+                    max_age_seconds=max_age_seconds,
+                )
+                if not ok:
+                    return registry_pb2.PutManifestResponse(
+                        success=False,
+                        message=f"Manifest signature rejected: {msg}",
+                    )
+            except Exception as e:
+                return registry_pb2.PutManifestResponse(
+                    success=False,
+                    message=f"Manifest signature policy error: {e}",
+                )
 
         with self._manifests_lock:
             self._manifests[request.model_id] = request.manifest_json

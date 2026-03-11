@@ -16,6 +16,8 @@ service InferenceNode {
 
   // Transfer a shard file to a requesting node (BitTorrent-style P2P weight distribution).
   rpc GetShard(GetShardRequest) returns (stream ShardChunk);
+  // Return a shard chunk availability bitfield for rarest-first scheduling.
+  rpc GetShardBitfield(GetShardBitfieldRequest) returns (GetShardBitfieldResponse);
 
   // Commit: compute forward pass and return only the output hash (for voting).
   // The node holds the output in memory for a follow-up Forward call.
@@ -284,6 +286,18 @@ message ShardChunk {
   int64 total_size = 3;         // Total file size in bytes
   string shard_hash = 4;        // SHA256 hash of the complete shard (sent in first chunk)
   string chunk_hash = 5;        // SHA256 hash of this individual chunk (for piece-level verification)
+}
+
+message GetShardBitfieldRequest {
+  string model_id = 1;
+  int32 shard_index = 2;
+  int64 chunk_size = 3;        // Optional override (0 uses default piece size)
+}
+
+message GetShardBitfieldResponse {
+  bool supported = 1;          // False when node cannot answer bitfield yet
+  int32 chunk_count = 2;       // Number of chunks represented
+  bytes bitfield = 3;          // Bit i=1 means chunk i is available
 }
 
 
