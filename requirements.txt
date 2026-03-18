@@ -5,7 +5,7 @@ grpcio==1.78.0
 grpcio-tools==1.78.0
 protobuf==6.33.5
 fastapi==0.129.0
-uvicorn==0.40.0
+uvicorn==0.42.0
 python-multipart==0.0.22
 websockets==15.0.1
 web3==7.14.1
