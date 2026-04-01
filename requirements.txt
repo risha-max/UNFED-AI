@@ -2,7 +2,7 @@ torch==2.10.0
 transformers==5.1.0
 safetensors==0.7.0
 grpcio==1.78.0
-grpcio-tools==1.78.0
+grpcio-tools==1.80.0
 protobuf==6.33.5
 fastapi==0.129.0
 uvicorn==0.40.0
